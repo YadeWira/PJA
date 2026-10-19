@@ -1,0 +1,116 @@
+# PJA
+
+Lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal with
+some x86-64 assembly, and nothing else: no C, no C++, no libraries.
+
+```sh
+pja a photo.jpg          # -> photo.pja, about 25% smaller
+pja x photo.pja          # -> photo.jpg, the same file byte for byte
+```
+
+The original comes back **byte for byte**, and nothing is written under an
+output's name unless it verified: compressing decompresses the result and
+compares it with the input before writing, and extracting checks the size
+and the BLAKE3 hash stored in the `.pja`.
+
+Measured on 19/10/2026 (`doc/CODEC.md`):
+
+| | files | PJA saves | packJPG 5.0f saves |
+|---|---|---|---|
+| photos (Huffman JPEG) | 151 | **24.97%** | 23.38% |
+| arithmetic-coded JPEG | 244 | **23.66%** | 21.48% |
+| JPEG-LS photos | 16 | **15.6%** | — (it rebuilds 2 of 9 real JPEG-LS test files; PJA 8) |
+
+What it handles: baseline, extended and progressive JPEG with Huffman or
+arithmetic coding, 8 bits, any subsampling, restart markers, and the oddities
+real encoders leave (extra restart markers, EOB runs cut by the table, data
+after the end); JPEG-LS from 2 to 16 bits, lossless and near-lossless, every
+interleave mode. What it refuses, with the reason: 12-bit JPEG, lossless
+JPEG (SOF3), hierarchical JPEG, and JPEG-LS with subsampled components or a
+point transform.
+
+## Building
+
+FreePascal 3.2:
+
+```sh
+cd pas
+fpc -O3 -dPJA_FAST pjacli.pas -opja       # the command
+cd .. && ./run_tests.sh                    # every test
+```
+
+`-dPJA_FAST` turns off range and overflow checks in the models and the
+encoders, where they cost 2.3x. The checked build is the reference: the codec
+suite compresses the same files with both, with and without assembly and with
+several threads, and demands identical streams. The JPEG and JPEG-LS
+decoders stay checked in every build. Windows builds are not set up yet.
+
+## Layout
+
+| | |
+|---|---|
+| `pas/pjajpeg.pas` | JPEG ↔ DCT coefficients, plus what is needed to rebuild the exact bits |
+| `pas/pjajls.pas` | JPEG-LS ↔ samples, the same way |
+| `pas/pjaarith.pas` | the binary arithmetic coder |
+| `pas/pjamodel.pas` | the context models (SSE4.1 assembly for the mixer, chosen at run time) |
+| `pas/pjacodec.pas` | the compressed stream, verified when compressing; bands in threads |
+| `pas/pjablake3.pas` | BLAKE3, checked against the official implementation |
+| `pas/pjaformat.pas`, `pas/pjalimits.pas` | the `.pja` file: header, size, hash |
+| `pas/pjapack.pas` | codec and format together, in the order that makes it safe |
+| `pas/pjafs.pas` | writing the output: no links followed, no half-written files, nothing unverified under its name |
+| `pas/pjacli.pas` | the `pja` command |
+| `doc/` | `CODEC.md` (how the codec works, what was measured and tried), `FORMAT.md`, `POLICY.md`, `CLI.md` |
+
+## Testing
+
+`./run_tests.sh` runs both suites:
+
+- `pas/run_codec_tests.sh`: each codec layer, round trips, every bit flip and
+  truncation of the first bytes of every sample and stream (no exception
+  allowed), and the reference, fast, no-assembly and threaded builds giving
+  identical streams. `JPEG_CORPUS=dir1:dir2` adds round trips over more files.
+- `pas/run_tests.sh`: BLAKE3 against its vectors, the format's every error,
+  more than a million damaged `.pja` variants, writing the output (links,
+  overwriting, `.corrupt`), and the command (`tests/cli.sh`).
+
+Each test demands its own minimum cell count: one that runs zero cells is not
+green. Two source guards stop the build first: `collisions.py`
+(identifiers that clash case-insensitively) and `results.py` (functions that
+never set `Result`).
+
+## FreePascal rules, all measured and none obvious
+
+The first two are in `pas/pja.inc`.
+
+- **`{$R+}` does not check pointer accesses.** `p[10]` with `p: PByte` reads
+  out of range without any error. Validation works only on arrays.
+- **With `{$Q+}`, `for i := 0 to n - 1` with unsigned `n` and `n = 0` raises
+  `EIntOverflow`.** Lengths and indices are signed, and loops use `High()`.
+- **On i386, `Int64` is not ordinal**: it cannot be a `for` variable, and the
+  error only shows up when compiling for 32 bits. Counters in `SizeInt`, and
+  byte positions in `Int64`.
+- **`for s in ['short', 'much_longer']` truncates the literals** to the length
+  of the first one, and with numbers it builds a **set** of bytes. Iterate over
+  a declared constant array instead.
+- **On Unix, `TFileStream.Create(f, fmOpenRead)` takes an exclusive `flock`.**
+  A second open of the same file, even in the same process, fails with
+  `EAGAIN`. For reading: `fmOpenRead or fmShareDenyNone`.
+- **FPC does not warn about an unset `Result` if some path does `Exit(value)`.**
+  `pjafs.Parent` returned whatever was left in the register, and it showed up
+  as an **intermittent** failure (1 run in ~10). `pas/results.py` stops the build.
+- **Pascal is case-insensitive.** A variable `version` shadowed the constant
+  `VERSION` and no future version was rejected; a variable `plain` shadowed the
+  function `Plain`. The compiler does not warn in either case (the second was
+  caught only because the types did not match).
+  `pas/collisions.py` stops the build.
+- **On 64 bits, FPC multiplies two `Cardinal`s in 64 bits.** A hash meant to
+  wrap at 32 bits kept its high bits until the product was wrapped in
+  `Cardinal()`.
+- **A global written from several threads costs more than it seems.** The
+  cost accounting wrote one per coefficient from every band thread; the cache
+  line bouncing between cores made each band three times slower.
+
+## License
+
+MIT, see `LICENSE`. The arithmetic-coded JPEG support is based in part on the
+work of the Independent JPEG Group; see `NOTICE` for that and other credits.

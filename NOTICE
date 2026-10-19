@@ -1,0 +1,57 @@
+PJA
+Copyright (c) 2026 Yade Bravo (YadeWira)
+Licensed under the MIT License (see LICENSE).
+
+Third-party work
+----------------
+
+Arithmetic-coded JPEG (pas/pjajpeg.pas, the QM coder section): the decoder
+and encoder follow libjpeg's jdarith.c and jcarith.c, and the Qe table is
+taken from libjpeg-turbo's jaricom.c. This software is based in part on the
+work of the Independent JPEG Group.
+
+JPEG-LS (pas/pjajls.pas): written from ITU-T T.87, with its behaviour
+where the standard leaves room (the bit stuffing, the padding at the end of
+a scan, the bounds on the context variables, the Golomb code limits)
+following CharLS 2.4.2, whose decoding and encoding it reproduces bit for
+bit. CharLS is distributed under the BSD 3-Clause license:
+
+  Copyright (c) Team CharLS. Copyright (c) Jan de Vaan 2007-2010.
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+BLAKE3 (pas/pjablake3.pas): written from the BLAKE3 specification; checked
+against the official implementation's output.
+
+Credits (ideas, no code taken)
+------------------------------
+
+The edge-coefficient and DC predictions of the model (pas/pjamodel.pas) are
+built on ideas published with Lepton (Dropbox) and on Lakhani's prediction
+of the first AC coefficients.
+
+The second prediction in the JPEG-LS symbol model (pas/pjamodel.pas) is
+CALIC's gradient-adjusted prediction with its error feedback (Wu and Memon).

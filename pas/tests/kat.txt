@@ -1,0 +1,16 @@
+# BLAKE3-128 vectors from the official implementation (1.8.7, through the reference Rust,
+# frozen 12/10/2026).
+# b3 <size> <BLAKE3-128>
+# Input: pattern(n, seed) xorshift32 with seed 0x1234567 xor n (tests/test_blake3.pas).
+b3 0 af1349b9f5f9a1a6a0404dea36dcc949
+b3 1 cf416ea3d113aeb646ba57b0d1c96d1e
+b3 63 6f830afac5e070d3eef38da7fdd919d5
+b3 64 c167d998eb7fb309aee984eae0a2e207
+b3 65 5158d80c8f1dcca43efccc71304deba3
+b3 1023 b3b52cc1c9c801713d800981839165d5
+b3 1024 85b39a6f2cf1cafda2d10451f6332770
+b3 1025 1e807e7d471906acc097923d5cafa9b3
+b3 2048 d6abbf6d71eab93cde5de18b96ed7e27
+b3 2049 2f5325a90731a94bd528f04c236d10d1
+b3 4096 27a7294c8f1c0b4fc1fc3f13f5ad2bba
+b3 1048576 e7445ea19d42d0d97a3afacff96ed008
