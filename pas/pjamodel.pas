@@ -147,23 +147,33 @@ end;
 type
   TBits = array of TAdaptiveBit;
 
-function BitLen(v: Int64): Integer; inline;
+function BitLen(const v: Int64): Integer; inline;
 begin
-  if v < 0 then v := -v;
-  if v = 0 then Result := 0 else Result := BsrQWord(QWord(v)) + 1;
+  if v = 0 then Result := 0
+  else if v < 0 then Result := BsrQWord(QWord(-v)) + 1
+  else Result := BsrQWord(QWord(v)) + 1;
 end;
 
 { Integer division rounded to nearest, for a positive divisor. }
-function DivRound(a, b: Int64): Int64; inline;
+function DivRound(const a, b: Int64): Int64; inline;
 begin
   if a >= 0 then Result := (a + b div 2) div b else Result := -((-a + b div 2) div b);
 end;
 
 procedure NewBits(var b: TBits; n: SizeInt);
-var i: SizeInt;
+var i: SizeInt; e: TAdaptiveBit;
 begin
   SetLength(b, n);
-  for i := 0 to n - 1 do b[i].Init;
+  if n = 0 then Exit;
+  { one counter initialized and copied over all of them: the raw-byte model
+    alone has 4M, set up for every file }
+  e := Default(TAdaptiveBit);
+  e.Init;
+  {$if SizeOf(TAdaptiveBit) = 4}
+  FillDWord(b[0], n, PLongWord(@e)^);
+  {$else}
+  for i := 0 to n - 1 do b[i] := e;
+  {$endif}
 end;
 
 { ---------- logistic mixing ---------- }
@@ -556,12 +566,14 @@ end;
 
 { log2 in half steps: 0 -> 0, 1 -> 1, 2 -> 2, 3 -> 3, 4..5 -> 4, 6..7 -> 5, 8..11 -> 6... }
 function FineLog(v: Int64): Integer; inline;
-var e: Integer;
+var e: Integer; u: QWord;
 begin
-  if v < 0 then v := -v;
-  e := BitLen(v);
-  if e <= 1 then Exit(e);
-  Result := 2 * e - 2 + Integer((v shr (e - 2)) and 1);
+  if v < 0 then u := QWord(-v) else u := QWord(v);
+  if u <= 1 then Result := Integer(u)
+  else begin
+    e := BsrQWord(u) + 1;
+    Result := 2 * e - 2 + Integer((u shr (e - 2)) and 1);
+  end;
 end;
 
 function Clip(v, hi: Integer): Integer; inline;
@@ -640,8 +652,15 @@ begin
     if bx + 1 < cp.bw then begin Inc(sum, Abs(cp.coef[base - cp.bw * 64 + 64 + k])); Inc(wsum); end;
   end;
   if bx > 0 then begin Inc(sum, 2 * Abs(cp.coef[base - 64 + k])); Inc(wsum, 2); end;
-  if wsum = 0 then Exit(-1);
-  Result := (sum * 2 + wsum div 2) div wsum;
+  { wsum is 2 to 6: a division by a constant is a multiplication }
+  case wsum of
+    0: Result := -1;
+    2: Result := Integer(Cardinal(sum * 2 + 1) div 2);
+    3: Result := Integer(Cardinal(sum * 2 + 1) div 3);
+    4: Result := Integer(Cardinal(sum * 2 + 2) div 4);
+    5: Result := Integer(Cardinal(sum * 2 + 2) div 5);
+  else Result := Integer(Cardinal(sum * 2 + 3) div 6);
+  end;
 end;
 
 type
@@ -659,6 +678,8 @@ var
     left from each one on, itself included }
   INTERIOR: array[0..48] of Byte;
   INTERIOR_LEFT: array[0..48] of Byte;
+  { RATIO_OF[left, rem] = rem * 16 div left, for rem < left }
+  RATIO_OF: array[1..49, 0..48] of Byte;
 
 const
   { A dequantized coefficient is clamped here: the predictions multiply it by
@@ -689,13 +710,42 @@ begin
 end;
 
 { The caches of a finished block, from its nonzero coefficients only. }
-procedure FillCaches(const fb: TBlockF; out right, bottom: TEdgeCache);
+{ mask: a bit set for (at least) every nonzero position of fb }
+const
+  { Batcher's odd-even merge sort for 8 and 16 values (checked on every 0/1
+    input): the estimates sorted without a branch per comparison }
+  SORT8: array[0..18, 0..1] of Byte = (
+    (0,1), (2,3), (4,5), (6,7), (0,2), (1,3), (4,6), (5,7), (1,2), (5,6), (0,4), (1,5), (2,6),
+    (3,7), (2,4), (3,5), (1,2), (3,4), (5,6));
+  SORT16: array[0..62, 0..1] of Byte = (
+    (0,1), (2,3), (4,5), (6,7), (8,9), (10,11), (12,13), (14,15), (0,2), (1,3), (4,6), (5,7),
+    (8,10), (9,11), (12,14), (13,15), (1,2), (5,6), (9,10), (13,14), (0,4), (1,5), (2,6),
+    (3,7), (8,12), (9,13), (10,14), (11,15), (2,4), (3,5), (10,12), (11,13), (1,2), (3,4),
+    (5,6), (9,10), (11,12), (13,14), (0,8), (1,9), (2,10), (3,11), (4,12), (5,13), (6,14),
+    (7,15), (4,8), (5,9), (6,10), (7,11), (2,4), (3,5), (6,8), (7,9), (10,12), (11,13), (1,2),
+    (3,4), (5,6), (7,8), (9,10), (11,12), (13,14));
+  { the interior of column 0 (rows 1 to 7) and of row 0 (columns 1 to 7) }
+  COL_INTERIOR = QWord($0101010101010100);
+  ROW_INTERIOR = QWord($FE);
+
+{ a, b := min, max, without a branch }
+procedure CompareSwap(var a, b: Int64); inline;
+var d, m: Int64;
+begin
+  d := b - a;
+  m := SarInt64(d, 63);      { all ones when b < a }
+  a := a + (d and m);
+  b := b - (d and m);
+end;
+
+procedure FillCaches(const fb: TBlockF; mask: QWord; out right, bottom: TEdgeCache);
 var pos, u, v, y: Integer; f: Int64; c7, c6, r7, r6, ec, er: array[0..7] of Int64;
 begin
   for u := 0 to 7 do begin c7[u] := 0; c6[u] := 0; r7[u] := 0; r6[u] := 0; end;
-  for pos := 0 to 63 do begin
+  while mask <> 0 do begin
+    pos := BsfQWord(mask);
+    mask := mask and (mask - 1);
     f := fb[pos];
-    if f = 0 then Continue;
     u := pos shr 3; v := pos and 7;
     c7[u] := c7[u] + BASIS[v, 7] * f; c6[u] := c6[u] + BASIS[v, 6] * f;
     r7[v] := r7[v] + BASIS[u, 7] * f; r6[v] := r6[v] + BASIS[u, 6] * f;
@@ -721,7 +771,7 @@ var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, po
     nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
     q: array[0..63] of Integer; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
     gc, gr, pc, pr: array[0..7] of Int64; ests: array[0..15] of Int64; i2: Integer; tmp: Int64;
-    fb: TBlockF; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
+    fb: TBlockF; fm, mm: QWord; rowsM, colsM, mr: Cardinal; left: Integer; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
 begin
   for k := 0 to 63 do begin
     q[k] := 1;
@@ -799,7 +849,7 @@ begin
           bit := CodeMix5(cd, m.mxZero, k, m.zero5[(k * (NZ_BUCKETS + 1) + lz) * REM_BUCKETS + rb],
                          m.zero1[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN],
                          m.zero2[(k * MAG_BUCKETS + mbI) * 4 + Clip(mbN, 3)],
-                         m.zero3[k * RATIO_BUCKETS + (rem * 16) div INTERIOR_LEFT[idx]],
+                         m.zero3[k * RATIO_BUCKETS + RATIO_OF[INTERIOR_LEFT[idx], rem]],
                          m.zero4[(kb * MAG_BUCKETS + mbS) * REM_BUCKETS + rb],
                          Ord(v <> 0))
         else bit := 1;
@@ -833,10 +883,19 @@ begin
 
       { this block dequantized: the interior now, row 0 and column 0 as they
         are coded, the DC last }
+      { fm marks the nonzero positions of fb, so that the loops below only
+        visit those }
       FillChar(fb, SizeOf(fb), 0);
-      for i := 0 to 48 do begin
+      fm := 0;
+      i := 0; left := n;
+      while (left > 0) and (i <= 48) do begin
         k := INTERIOR[i];
-        if cp.coef[base + k] <> 0 then fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);
+        if cp.coef[base + k] <> 0 then begin
+          fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);
+          fm := fm or (QWord(1) shl ZIGZAG[k]);
+          Dec(left);
+        end;
+        Inc(i);
       end;
 
       { 3. row 0 and column 0, interleaved by frequency, each predicted from
@@ -852,14 +911,24 @@ begin
           only this coefficient is unknown (E0 and E1 weigh it the same) }
         if (u = 0) and haveA then begin
           sum := 0;
-          for i := 1 to 7 do sum := sum + W3[i] * fb[i * 8 + w];
+          mm := fm and (COL_INTERIOR shl w);
+          while mm <> 0 do begin
+            pos := BsfQWord(mm); mm := mm and (mm - 1);
+            sum := sum + W3[pos shr 3] * fb[pos];
+          end;
           predF := DivRound(rowC[bx].eg[w] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
-          pb := Clip(FineLog(DivRound(5 * predF, 8)), NO_PRED - 1);
+          tmp := DivRound(5 * predF, 8);
+          pb := Clip(FineLog(tmp), NO_PRED - 1);
         end else if (w = 0) and haveL then begin
           sum := 0;
-          for i := 1 to 7 do sum := sum + W3[i] * fb[u * 8 + i];
+          mm := fm and (ROW_INTERIOR shl (u * 8));
+          while mm <> 0 do begin
+            pos := BsfQWord(mm); mm := mm and (mm - 1);
+            sum := sum + W3[pos and 7] * fb[pos];
+          end;
           predF := DivRound(leftC.eg[u] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
-          pb := Clip(FineLog(DivRound(5 * predF, 8)), NO_PRED - 1);
+          tmp := DivRound(5 * predF, 8);
+          pb := Clip(FineLog(tmp), NO_PRED - 1);
         end;
         a := 0; l := 0;
         if haveA then a := Abs(cp.coef[abase + k]);
@@ -910,7 +979,10 @@ begin
       for ep := 0 to EDGE_POS - 1 do begin
         if ep and 1 = 0 then pos := ep div 2 + 1 else pos := (ep div 2 + 1) * 8;
         k := UNZIG[pos];
-        if cp.coef[base + k] <> 0 then fb[pos] := Dequant(cp.coef[base + k], q[k]);
+        if cp.coef[base + k] <> 0 then begin
+          fb[pos] := Dequant(cp.coef[base + k], q[k]);
+          fm := fm or (QWord(1) shl pos);
+        end;
       end;
 
       { 4. the DC, estimated pixel by pixel along both edges (Lepton's idea):
@@ -921,18 +993,26 @@ begin
       { this block's boundary without its DC, extrapolated the same way:
         5*P0 - P1, per column (left edge) and per row (top edge) }
       for u := 0 to 7 do begin gc[u] := 0; gr[u] := 0; end;
-      for pos := 1 to 63 do begin
+      rowsM := 0; colsM := 0;
+      mm := fm;
+      while mm <> 0 do begin
+        pos := BsfQWord(mm);
+        mm := mm and (mm - 1);
         f := fb[pos];
-        if f = 0 then Continue;
         u := pos shr 3; w := pos and 7;
         gc[u] := gc[u] + W5[w] * f;
         gr[w] := gr[w] + W5[u] * f;
+        rowsM := rowsM or (1 shl u); colsM := colsM or (1 shl w);
       end;
       nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
       if haveL then begin
+        for i := 0 to 7 do pc[i] := 0;
+        mr := rowsM;
+        while mr <> 0 do begin
+          u := BsfDWord(mr); mr := mr and (mr - 1);
+          for i := 0 to 7 do pc[i] := pc[i] + BASIS[u, i] * gc[u];
+        end;
         for i := 0 to 7 do begin
-          pc[i] := 0;
-          for u := 0 to 7 do pc[i] := pc[i] + BASIS[u, i] * gc[u];
           est := (leftC.px[i] - pc[i]) div 4;
           ests[nest] := est; Inc(nest);
           if est < lo then lo := est;
@@ -940,9 +1020,13 @@ begin
         end;
       end;
       if haveA then begin
+        for i := 0 to 7 do pr[i] := 0;
+        mr := colsM;
+        while mr <> 0 do begin
+          u := BsfDWord(mr); mr := mr and (mr - 1);
+          for i := 0 to 7 do pr[i] := pr[i] + BASIS[u, i] * gr[u];
+        end;
         for i := 0 to 7 do begin
-          pr[i] := 0;
-          for u := 0 to 7 do pr[i] := pr[i] + BASIS[u, i] * gr[u];
           est := (rowC[bx].px[i] - pr[i]) div 4;
           ests[nest] := est; Inc(nest);
           if est < lo then lo := est;
@@ -950,18 +1034,18 @@ begin
         end;
       end;
       { the middle half of the sorted estimates }
-      for i := 1 to nest - 1 do begin
-        tmp := ests[i]; i2 := i - 1;
-        while (i2 >= 0) and (ests[i2] > tmp) do begin ests[i2 + 1] := ests[i2]; Dec(i2); end;
-        ests[i2 + 1] := tmp;
-      end;
+      if nest = 16 then
+        for i := 0 to 62 do CompareSwap(ests[SORT16[i, 0]], ests[SORT16[i, 1]])
+      else if nest = 8 then
+        for i := 0 to 18 do CompareSwap(ests[SORT8[i, 0]], ests[SORT8[i, 1]]);
       total := 0;
       for i := nest div 4 to nest - 1 - nest div 4 do total := total + ests[i];
       if nest > 0 then nest := nest - 2 * (nest div 4);
       { a pixel gets DC * BASIS[0,0]^2: back to a quantized DC }
       if nest > 0 then begin
         pred := DivRound(total, Int64(nest) * BASIS[0, 0] * BASIS[0, 0] * q[0]);
-        ctx := Clip(FineLog(DivRound(hi - lo, Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0])), ACT_BUCKETS - 2);
+        tmp := DivRound(hi - lo, Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]);
+        ctx := Clip(FineLog(tmp), ACT_BUCKETS - 2);
       end else begin pred := 0; ctx := ACT_BUCKETS - 1; end;
       if pred > 32767 then pred := 32767;
       if pred < -32767 then pred := -32767;
@@ -995,7 +1079,7 @@ begin
         cp.coef[base] := x;
       end;
       fb[0] := Dequant(cp.coef[base], q[0]);
-      FillCaches(fb, rightC, rowC[bx]);
+      FillCaches(fb, fm or 1, rightC, rowC[bx]);
       leftC := rightC;
     end;
   nzOut := nzc;
@@ -1367,8 +1451,11 @@ begin
 end;
 
 function SignedLog(v, hi: Integer): Integer; inline;
+var f: Integer;
 begin
-  if v < 0 then Result := -Clip(FineLog(v), hi) else Result := Clip(FineLog(v), hi);
+  f := FineLog(v);
+  if f > hi then f := hi;
+  if v < 0 then Result := -f else Result := f;
 end;
 
 { The mapping of A.5.2, both ways. }
@@ -1512,6 +1599,9 @@ begin
   for k := 1 to 63 do
     if (ZIGZAG[k] shr 3 > 0) and (ZIGZAG[k] and 7 > 0) then begin INTERIOR[n] := k; Inc(n); end;
   for k := 0 to 48 do INTERIOR_LEFT[k] := 49 - k;
+  for k := 1 to 49 do
+    for n := 0 to 48 do
+      if n < k then RATIO_OF[k, n] := n * 16 div k else RATIO_OF[k, n] := 0;
   for k := 0 to 7 do begin
     W3[k] := 3 * BASIS[k, 0] - BASIS[k, 1];
     W5[k] := 5 * BASIS[k, 0] - BASIS[k, 1];

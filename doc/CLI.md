@@ -11,7 +11,7 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `-o PATH` | output name with one input; a directory if it exists or ends in `/` |
 | `--output-dir=DIR` | output directory, and nothing else |
 | `-f`, `--force` | replace an existing output, only with something that verified |
-| `-th N`, `--threads=N` | threads per file; by default the processors, up to 8 |
+| `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (a photo is usually one band). Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
 | `-n`, `--dry-run` | do everything but write |
@@ -55,5 +55,5 @@ measured against the old spelling.
 - **The output's type comes from its content**: a JPEG-LS file comes back as
   `.jls`, a JPEG as `.jpg`, whatever the `.pja` is called.
 
-Tested by `pas/tests/cli.sh` (40 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (41 cells: round trips, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, every usage error).

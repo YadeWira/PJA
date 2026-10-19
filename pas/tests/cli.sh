@@ -4,7 +4,7 @@
 #
 #   tests/cli.sh <pja binary> <work directory> <dir with samples>...
 set -uo pipefail
-PJA=$1; W=$2; shift 2
+PJA=$(realpath "$1"); W=$2; shift 2
 cells=0; failures=0
 check() {   # check <description> <command...>: the command has to succeed
   local what=$1; shift
@@ -29,6 +29,9 @@ check "  every file back byte for byte, with its extension ($same of $n)" test "
 check "the same .pja with 1 thread and with 4" bash -c "
   '$PJA' a -q -th 1 '$W/in/color_plasma.jpg' -o '$W/t1.pja' && '$PJA' a -q --threads=4 '$W/in/color_plasma.jpg' -o '$W/t4.pja' &&
   cmp -s '$W/t1.pja' '$W/t4.pja'"
+check "with -th 4 and several files, the lines follow the input order" bash -c "
+  '$PJA' a -th 4 -f '$W'/in/*.jpg -o '$W/ord/' | sed 's/ ->.*//' > '$W/ord.txt' &&
+  ls '$W'/in/*.jpg > '$W/ord_in.txt' && cmp -s '$W/ord.txt' '$W/ord_in.txt'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"

@@ -258,3 +258,45 @@ Tried and dropped: coding the difference from the second prediction's
 error instead of the error with it as context (better on gray photos,
 much worse on the test images: 96.8%), choosing per context how much to
 trust it, and a second mixer.
+
+## Speed, second pass (19/10/2026)
+
+Without changing a bit of any stream (checked on 415 files: the samples,
+244 arithmetic JPEGs, 74 JPEG-LS and 78 real JPEGs, every `.pja` identical
+to the previous build's):
+
+- the counters are set up with one fill instead of one by one: the raw-byte
+  model alone has 4M per file, so a small file decodes in half the time;
+- `FineLog`, `BitLen` and `DivRound` are inlined again: FPC does not inline
+  a call nested as the argument of another inline call, nor one that
+  assigns to a parameter;
+- each block keeps a mask of its nonzero coefficients, and the
+  dequantization, the edge sums and the DC estimates visit only those;
+- two divisions per coefficient became a table and a division by a
+  constant; the 8 or 16 DC estimates are sorted by a sorting network
+  without branches.
+
+On 151 photos (76 MB), one thread: compress 164 → 141 s, decompress
+79 → 69 s. packJPG 5.0f, the same files: 68 s with `--verify` (37 s
+without), 36 s. Measured with `perf`: 52.8 million binary decisions for
+4.2 MB of stream, about 300 cycles each, and neither cache misses (almost
+none reach the last level) nor branch misses (2.3%) dominate: the cost is
+the work per decision. Inlining the arithmetic coder and the mixer into
+their callers gave nothing.
+
+`pja -th N` now gives its threads to files first. On the same photos with
+8 threads: compress 20.6 s, decompress **10.0 s** (packJPG 5.0f: 10.4 s
+both ways).
+
+Smaller bands would let one photo decode on several threads, but every band
+starts its models from nothing:
+
+| blocks per band | the 151 photos | cost |
+|---|---|---|
+| 65536 (as it is) | 58,848,042 | — |
+| 16384 | 59,304,600 | +0.78% |
+| 8192 | 59,801,969 | +1.62% |
+| 4096 | 60,302,146 | +2.47% |
+
+A typical photo needs about 6,000 blocks per band for 8 threads: close to
+2%, most of PJA's lead over packJPG. Not done.

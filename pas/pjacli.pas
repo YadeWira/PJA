@@ -36,11 +36,30 @@ var
   threads: Integer;
   maxOutput: QWord;
   errors: Integer;
+  { threads per file: what is left of -th once the files are shared out }
+  bandThreads: Integer;
+
+type
+  { One input: what it printed and whether it failed. Files are processed
+    in parallel, and their lines come out in the order of the inputs. }
+  TFileJob = record
+    name, outText, errText: string;
+    failed, done: Boolean;
+  end;
+  PFileJob = ^TFileJob;
+
+threadvar
+  CurJob: PFileJob;
 
 procedure Fail(const msg: string);
 begin
-  Inc(errors);
-  Writeln(StdErr, 'pja: ', msg);
+  CurJob^.failed := True;
+  CurJob^.errText := CurJob^.errText + 'pja: ' + msg + LineEnding;
+end;
+
+procedure Say(const line: string);
+begin
+  CurJob^.outText := CurJob^.outText + line + LineEnding;
 end;
 
 procedure Usage(code: Integer);
@@ -54,7 +73,8 @@ begin
   Writeln('  -o PATH              output name (one input), or directory (ends in / or exists)');
   Writeln('  --output-dir=DIR     output directory');
   Writeln('  -f, --force          replace an existing output (only with something that verified)');
-  Writeln('  -th N, --threads=N   threads per file (default: the processors, up to 8)');
+  Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
+  Writeln('                       files at once, and what is left to each file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
   Writeln('  -n, --dry-run        do everything but write');
@@ -229,19 +249,19 @@ var d, pja: TBytes; r: TPackResult; path: string;
 begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
-  r := Pack(d, pja, threads);
+  r := Pack(d, pja, bandThreads);
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) and not quiet then
-    Writeln(f, ' -> ', path, '  ', Human(Length(d)), ' -> ', Human(Length(pja)),
-            Format('  %.2f%%', [100 * Length(pja) / Length(d)]));
+    Say(f + ' -> ' + path + '  ' + Human(Length(d)) + ' -> ' + Human(Length(pja)) +
+        Format('  %.2f%%', [100 * Length(pja) / Length(d)]));
 end;
 
 procedure ExtractOne(const f: string);
 var d, orig: TBytes; r: TPackResult; path, ext: string; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
-  r := Unpack(d, maxOutput, orig, h, threads);
+  r := Unpack(d, maxOutput, orig, h, bandThreads);
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
@@ -251,7 +271,7 @@ begin
   { a hash that does not match goes through Save as well: it deletes it, or
     keeps it under another name with --keep-corrupt }
   if Save(path, orig, h) and not quiet then
-    Writeln(f, ' -> ', path, '  ', Human(Length(orig)));
+    Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
 end;
 
 procedure ListOne(const f: string);
@@ -262,22 +282,92 @@ begin
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   hex := '';
   for i := 0 to 15 do hex := hex + LowerCase(IntToHex(p.hash[i], 2));
-  Writeln(f, '  original ', p.orig_size, ' B, stored ', Length(d), ' B',
-          Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]), '  blake3-128 ', hex);
+  Say(f + '  original ' + IntToStr(p.orig_size) + ' B, stored ' + IntToStr(Length(d)) + ' B' +
+      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + '  blake3-128 ' + hex);
 end;
 
-var i: Integer;
+var
+  jobs: array of TFileJob;
+  nextJob, nextPrint: LongInt;
+  printLock: TRTLCriticalSection;
+
+procedure RunJob(k: Integer);
+begin
+  CurJob := @jobs[k];
+  try
+    case command of
+      cmCompress: CompressOne(jobs[k].name);
+      cmExtract: ExtractOne(jobs[k].name);
+      cmList: ListOne(jobs[k].name);
+    end;
+  except
+    on e: Exception do Fail(jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
+  end;
+  { print every finished job that is next in line }
+  EnterCriticalSection(printLock);
+  try
+    jobs[k].done := True;
+    while (nextPrint < Length(jobs)) and jobs[nextPrint].done do begin
+      { Output and StdErr are per thread in FPC, each with its own buffer:
+        flushed here, inside the lock, or a worker's lines would come out
+        when it ends }
+      if jobs[nextPrint].outText <> '' then begin Write(jobs[nextPrint].outText); Flush(Output); end;
+      if jobs[nextPrint].errText <> '' then begin Write(StdErr, jobs[nextPrint].errText); Flush(StdErr); end;
+      if jobs[nextPrint].failed then Inc(errors);
+      jobs[nextPrint].outText := ''; jobs[nextPrint].errText := '';
+      Inc(nextPrint);
+    end;
+  finally
+    LeaveCriticalSection(printLock);
+  end;
+end;
+
+{ takes the next input until none is left }
+procedure Work;
+var k: LongInt;
+begin
+  repeat
+    k := InterlockedIncrement(nextJob) - 1;
+    if k >= Length(jobs) then Break;
+    RunJob(k);
+  until False;
+end;
+
+type
+  TWorker = class(TThread)
+    procedure Execute; override;
+  end;
+
+procedure TWorker.Execute;
+begin
+  Work;
+end;
+
+var i, workers: Integer; pool: array of TWorker;
 begin
   errors := 0;
   ParseArgs;
   if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
     UsageError('-o with several inputs has to be a directory');
-  for i := 0 to inputs.Count - 1 do
-    case command of
-      cmCompress: CompressOne(inputs[i]);
-      cmExtract: ExtractOne(inputs[i]);
-      cmList: ListOne(inputs[i]);
-    end;
+  jobs := nil;
+  SetLength(jobs, inputs.Count);
+  for i := 0 to inputs.Count - 1 do begin
+    jobs[i] := Default(TFileJob);
+    jobs[i].name := inputs[i];
+  end;
+  { the threads go to files first (a photo is usually one band), and what
+    is left to each file's bands }
+  workers := threads;
+  if workers > inputs.Count then workers := inputs.Count;
+  bandThreads := threads div workers;
+  nextJob := 0; nextPrint := 0;
+  InitCriticalSection(printLock);
+  pool := nil;
+  SetLength(pool, workers - 1);
+  for i := 0 to High(pool) do pool[i] := TWorker.Create(False);
+  Work;
+  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  DoneCriticalSection(printLock);
   if errors > 0 then begin
     if inputs.Count > 1 then Writeln(StdErr, 'pja: ', errors, ' of ', inputs.Count, ' files failed');
     Halt(1);
