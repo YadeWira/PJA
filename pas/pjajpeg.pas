@@ -292,7 +292,7 @@ end;
 
 procedure TBitWriter.Bits(v, count: Integer);
 begin
-  { at most 31 bits wait before adding, and count <= 16 }
+  { at most 31 bits wait before adding, and count <= 32 }
   acc := (acc shl count) or (QWord(v) and ((QWord(1) shl count) - 1));
   Inc(nacc, count);
   if nacc >= 32 then Drain;
@@ -396,9 +396,11 @@ begin
 end;
 
 function Category(v: Integer): Integer; inline;
+var a: Integer;
 begin
-  if v < 0 then v := -v;
-  if v = 0 then Result := 0 else Result := BsrDWord(DWord(v)) + 1;
+  { not assigning to v: that would keep it from being inlined }
+  if v < 0 then a := -v else a := v;
+  if a = 0 then Result := 0 else Result := BsrDWord(DWord(a)) + 1;
 end;
 
 { ---------- block traversal ---------- }
@@ -487,8 +489,8 @@ begin
   diff := v - pred; pred := v;
   t := Category(diff);
   if dc^.len[t] = 0 then Exit(False);
-  wr.Bits(dc^.code[t], dc^.len[t]);
-  if t > 0 then wr.Bits(diff - Ord(diff < 0), t);
+  { the code and its extra bits in one go: at most 16 + 16 bits }
+  wr.Bits((dc^.code[t] shl t) or ((diff - Ord(diff < 0)) and ((1 shl t) - 1)), dc^.len[t] + t);
   r := 0;
   for k := 1 to 63 do begin
     v := cf[k];
@@ -501,8 +503,7 @@ begin
     t := Category(v);
     sym := (r shl 4) or t;
     if ac^.len[sym] = 0 then Exit(False);
-    wr.Bits(ac^.code[sym], ac^.len[sym]);
-    wr.Bits(v - Ord(v < 0), t);
+    wr.Bits((ac^.code[sym] shl t) or ((v - Ord(v < 0)) and ((1 shl t) - 1)), ac^.len[sym] + t);
     r := 0;
   end;
   if r > 0 then begin

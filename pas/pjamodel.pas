@@ -302,6 +302,64 @@ begin
   Result := r;
 end;
 
+{ a1[i] += k1[i] * f and a2[i] += k2[i] * f over 8 Int64 lanes, with pmuldq
+  (signed 32 x 32 -> 64 bits): f and every k fit in 32 bits (the kernels
+  are below 2^27, a dequantized coefficient within 2^22), so the products
+  are exact. }
+procedure AddKernelsSse41(f: Int64; k1, k2, a1, a2: PInt64);
+var pk1, pk2, pa1, pa2: PInt64; ff: Int64;
+begin
+  pk1 := k1; pk2 := k2; pa1 := a1; pa2 := a2; ff := f;
+  asm
+    mov rax, pk1
+    mov rcx, pk2
+    mov rdx, pa1
+    mov r8, pa2
+    movq xmm7, ff
+    punpcklqdq xmm7, xmm7
+    movdqu xmm0, [rax]
+    movdqu xmm1, [rax + 16]
+    movdqu xmm2, [rax + 32]
+    movdqu xmm3, [rax + 48]
+    pmuldq xmm0, xmm7
+    pmuldq xmm1, xmm7
+    pmuldq xmm2, xmm7
+    pmuldq xmm3, xmm7
+    movdqu xmm4, [rdx]
+    paddq xmm4, xmm0
+    movdqu [rdx], xmm4
+    movdqu xmm4, [rdx + 16]
+    paddq xmm4, xmm1
+    movdqu [rdx + 16], xmm4
+    movdqu xmm4, [rdx + 32]
+    paddq xmm4, xmm2
+    movdqu [rdx + 32], xmm4
+    movdqu xmm4, [rdx + 48]
+    paddq xmm4, xmm3
+    movdqu [rdx + 48], xmm4
+    movdqu xmm0, [rcx]
+    movdqu xmm1, [rcx + 16]
+    movdqu xmm2, [rcx + 32]
+    movdqu xmm3, [rcx + 48]
+    pmuldq xmm0, xmm7
+    pmuldq xmm1, xmm7
+    pmuldq xmm2, xmm7
+    pmuldq xmm3, xmm7
+    movdqu xmm4, [r8]
+    paddq xmm4, xmm0
+    movdqu [r8], xmm4
+    movdqu xmm4, [r8 + 16]
+    paddq xmm4, xmm1
+    movdqu [r8 + 16], xmm4
+    movdqu xmm4, [r8 + 32]
+    paddq xmm4, xmm2
+    movdqu [r8 + 32], xmm4
+    movdqu xmm4, [r8 + 48]
+    paddq xmm4, xmm3
+    movdqu [r8 + 48], xmm4
+  end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm7'];
+end;
+
 { w[i] := clamp(w[i] + TruncShr(st[i] * err, 14)) over the 8 lanes. The
   truncating shift of a negative x is (x + 2^14 - 1) sar 14, the same as
   -((-x) shr 14). }
@@ -851,6 +909,19 @@ end;
     bottom.eg[v] = sum over u of fb[u,v] * (3 B[u,7] - B[u,6])
     right.px[y]  = sum over u of B[u,y] * (sum over v of fb[u,v] * (5 B[v,7] - B[v,6]))
     bottom.px[y] = sum over v of B[v,y] * (sum over u of fb[u,v] * (5 B[u,7] - B[u,6])) }
+{ a1 += k1 * f and a2 += k2 * f, 8 lanes each }
+procedure AddKernels(f: Int64; const k1, k2: array of Int64; var a1, a2: array of Int64); inline;
+var y: Integer;
+begin
+  {$ifdef CPUX86_64}
+  if UseSse41 then AddKernelsSse41(f, @k1[0], @k2[0], @a1[0], @a2[0]) else
+  {$endif}
+  for y := 0 to 7 do begin
+    a1[y] := a1[y] + k1[y] * f;
+    a2[y] := a2[y] + k2[y] * f;
+  end;
+end;
+
 procedure FillCaches(const fb: TBlockF; mask: QWord; out right, bottom: TEdgeCache);
 var pos, u, v, y: Integer; f: Int64;
 begin
@@ -862,10 +933,7 @@ begin
     u := pos shr 3; v := pos and 7;
     right.eg[u] := right.eg[u] + E3[v] * f;
     bottom.eg[v] := bottom.eg[v] + E3[u] * f;
-    for y := 0 to 7 do begin
-      right.px[y] := right.px[y] + KER_RIGHT[pos, y] * f;
-      bottom.px[y] := bottom.px[y] + KER_BOTTOM[pos, y] * f;
-    end;
+    AddKernels(f, KER_RIGHT[pos], KER_BOTTOM[pos], right.px, bottom.px);
   end;
 end;
 
@@ -1136,11 +1204,7 @@ begin
       while mm <> 0 do begin
         pos := BsfQWord(mm);
         mm := mm and (mm - 1);
-        f := fb[pos];
-        for i := 0 to 7 do begin
-          pc[i] := pc[i] + KER_LEFT[pos, i] * f;
-          pr[i] := pr[i] + KER_TOP[pos, i] * f;
-        end;
+        AddKernels(fb[pos], KER_LEFT[pos], KER_TOP[pos], pc, pr);
       end;
       nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
       if haveL then begin
@@ -1226,27 +1290,33 @@ begin
   if Result < 1 then Result := 1;
 end;
 
+threadvar
+  { a band's two models, kept for the next band in this thread: Init only
+    refills tables already allocated (NewBits), instead of allocating and
+    zeroing megabytes per band }
+  PoolLuma, PoolChroma: TCoefModel;
+
 function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean): Boolean;
-var c, nb: Integer; luma, chroma: TCoefModel; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
+var c, nb: Integer; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
 begin
   nb := BandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
   m0 := SizeInt(j.mcusy) * band div nb; m1 := SizeInt(j.mcusy) * (band + 1) div nb;
-  luma.Init(fast, False); chroma.Init(fast, True);
+  PoolLuma.Init(fast, False); PoolChroma.Init(fast, True);
   lumaNz := nil;
   for c := 0 to High(j.comp) do begin
     if c = 0 then
-      ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], luma, [], 0, 0, 0,
+      ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolLuma, [], 0, 0, 0,
                           m0 * j.comp[c].v, m1 * j.comp[c].v, lumaNz)
     else begin
       { how many luma blocks one of ours spans; a component sampled finer
         than the luma (H or V above it) maps to its first block }
       sx := j.comp[0].h div j.comp[c].h; sy := j.comp[0].v div j.comp[c].v;
       if (sx < 1) or (sy < 1) or (j.comp[c].bw * sx > j.comp[0].bw) or (j.comp[c].bh * sy > j.comp[0].bh) then
-        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], chroma, [], 0, 0, 0,
+        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, [], 0, 0, 0,
                             m0 * j.comp[c].v, m1 * j.comp[c].v, other)
       else
-        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], chroma, lumaNz, j.comp[0].bw, sx, sy,
+        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, lumaNz, j.comp[0].bw, sx, sy,
                             m0 * j.comp[c].v, m1 * j.comp[c].v, other);
     end;
     if not ok then Exit(False);

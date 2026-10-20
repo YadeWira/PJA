@@ -360,3 +360,33 @@ threads, the fast model loses more than the full one (8192 blocks per band:
 of five. Starting each band from per-image tables would cost their
 transmission, about as much again: a static design that parallelises inside
 a photo costs more than the 2% this mode allows.
+
+## Speed, last round (20/10/2026)
+
+All without changing a bit of any stream (830 streams, 415 files in both
+models, compared with the previous build each time): the DC estimates split
+by pruned partition networks; FillCaches and the DC estimates as
+precomputed per-position kernels, added with SSE4.1 `pmuldq` (a Pascal path
+gives the same numbers); a counter update without clamps or branches; the
+raw model's 16 MB of counters and each band's models kept per thread and
+refilled, not reallocated; one call per Huffman code and its extra bits.
+
+The 151 photos, measured in one session:
+
+| | packJPG 5.0f | PJA `--fast` | PJA full |
+|---|---|---|---|
+| size | 60,084,653 | 59,827,219 (-0.4%) | 58,848,193 (-2.1%) |
+| compress, 1 thread | 70.8 s (`--verify`) | 86.3 s | 133.2 s |
+| compress one file at a time, 2 threads | | 82.0 s | 107.3 s |
+| decompress, 1 thread | 34.4 s | 40.2 s | 67.6 s |
+
+Tried and dropped, each measured: inlining the arithmetic coder into its
+callers (nothing), decoding the bit without a branch (+3.5%: the model
+branches on it right after), building for AVX2 (nothing), multi-symbol
+models in the AV1 way for the zero-or-length decisions (ratio +0.4% to
++3.1% depending on the region, and no faster). With the predictions off
+altogether the fast model would decode 22% faster for 5.6% more: they are
+where both the time and the ratio are. What is left of the gap to packJPG on
+one thread is spread over the whole coefficient loop, about 200 cycles per
+binary decision; closing it would take that loop in assembly, which was
+judged not worth it.
