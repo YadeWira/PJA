@@ -317,14 +317,13 @@ procedure TAdaptiveBit.Update(bit: Integer; limit: Integer);
 var target: Integer; q: Int64;
 begin
   if bit <> 0 then target := PROB_ONE - 1 else target := 1;
-  { div PROB_ONE, truncating toward zero, without a division }
+  { div PROB_ONE, truncating toward zero, without a division and without a
+    branch: a negative product gets 65535 added before the shift }
   q := Int64(target - p) * RECIPROCAL[n];
-  if q >= 0 then q := q shr 16 else q := -((-q) shr 16);
-  q := p + q;
-  { clamped here and not with Clamp: a call to a private routine would keep
-    this method from being inlined in other units }
-  if q < 1 then q := 1 else if q > PROB_ONE - 1 then q := PROB_ONE - 1;
-  p := q;
+  q := SarInt64(q + (SarInt64(q, 63) and $FFFF), 16);
+  { no clamp needed: RECIPROCAL[n] <= 65536 / 1.5, so p moves at most 2/3
+    of the way to the target, which is 1 or 65535: it stays inside }
+  p := p + q;
   if (n < limit) and (n < MAX_LIMIT) then Inc(n);
 end;
 

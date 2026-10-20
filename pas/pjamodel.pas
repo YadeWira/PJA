@@ -210,12 +210,11 @@ begin
   Result := SQUASH_T[x + 2048];
 end;
 
+{ p16 in [0, 65535]: every caller passes a counter's probability or a
+  constant. STRETCH_T[0] is STRETCH_T[1], so no clamp is needed. }
 function Stretch(p16: Integer): Integer; inline;
-var p: Integer;
 begin
-  p := p16 shr 4;
-  if p < 1 then p := 1 else if p > 4095 then p := 4095;
-  Result := STRETCH_T[p];
+  Result := STRETCH_T[p16 shr 4];
 end;
 
 procedure InitTables;
@@ -233,6 +232,7 @@ begin
     while (pi <= SQUASH_T[x + 2048]) and (pi <= 4095) do begin STRETCH_T[pi] := x; Inc(pi); end;
   end;
   while pi <= 4095 do begin STRETCH_T[pi] := 2047; Inc(pi); end;
+  STRETCH_T[0] := STRETCH_T[1];
 end;
 
 const
@@ -414,14 +414,45 @@ begin
 end;
 {$pop}
 
+threadvar
+  { The raw model's tables, kept for the next file in this thread: the
+    order-2 one has 4M counters (16 MB), and a JPEG's raw bytes touch a few
+    thousand of them. After each use, only the counters it touched are put
+    back as new (RawReset); RawDirty says a use did not finish, and then all
+    of them are. The same tables as freshly allocated ones, so the same
+    streams. }
+  RawO0, RawO1, RawO2: TBits;
+  RawDirty: Boolean;
+
+procedure RawReset(const raw: TBytes; len: SizeInt);
+var e: TAdaptiveBit; i, b, node, c1, c2: SizeInt; h: Cardinal;
+begin
+  e := Default(TAdaptiveBit); e.Init;
+  c1 := 0; c2 := 0;
+  for i := 0 to len - 1 do begin
+    node := 1;
+    h := Hash2(c2, c1);
+    for b := 7 downto 0 do begin
+      RawO0[node] := e;
+      RawO1[c1 * 256 + node] := e;
+      RawO2[(h shl 8) or Cardinal(node)] := e;
+      node := node * 2 + (raw[i] shr b) and 1;
+    end;
+    c2 := c1; c1 := raw[i];
+  end;
+end;
+
 function CodeRaw(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
-var o0, o1, o2: TBits; mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
+var mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
 begin
   {$ifdef PJA_COSTS}CostKind := ckRaw;{$endif}
   len := cd.Direct(Cardinal(Length(raw)), 32);
   if (len < 0) or (len > maxLen) then Exit(False);
   if not cd.encoding then SetLength(raw, len);
-  NewBits(o0, 256); NewBits(o1, 256 * 256); NewBits(o2, 1 shl O2_BITS);
+  if (Length(RawO2) <> 1 shl O2_BITS) or RawDirty then begin
+    NewBits(RawO0, 256); NewBits(RawO1, 256 * 256); NewBits(RawO2, 1 shl O2_BITS);
+  end;
+  RawDirty := True;
   mx.Init(4, 8);
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
@@ -429,21 +460,23 @@ begin
     h := Hash2(c2, c1);
     for b := 7 downto 0 do begin
       if cd.encoding then bit := (raw[i] shr b) and 1 else bit := 0;
-      mx.Add(o0[node].p);
-      mx.Add(o1[c1 * 256 + node].p);
-      mx.Add(o2[(h shl 8) or Cardinal(node)].p);
+      mx.Add(RawO0[node].p);
+      mx.Add(RawO1[c1 * 256 + node].p);
+      mx.Add(RawO2[(h shl 8) or Cardinal(node)].p);
       mx.Add(32768);
       p := mx.Mix(7 - b);
       bit := cd.CodeP(p, bit);
       mx.Update(bit);
-      o0[node].Update(bit, COUNTER_LIMIT);
-      o1[c1 * 256 + node].Update(bit, COUNTER_LIMIT);
-      o2[(h shl 8) or Cardinal(node)].Update(bit, COUNTER_LIMIT);
+      RawO0[node].Update(bit, COUNTER_LIMIT);
+      RawO1[c1 * 256 + node].Update(bit, COUNTER_LIMIT);
+      RawO2[(h shl 8) or Cardinal(node)].Update(bit, COUNTER_LIMIT);
       node := node * 2 + bit;
     end;
     if not cd.encoding then raw[i] := Byte(node - 256);
     c2 := c1; c1 := node - 256;
   end;
+  RawReset(raw, len);
+  RawDirty := False;
   Result := True;
 end;
 
@@ -615,7 +648,8 @@ function CodeAvg(var cd: TCoder; var a, b: TAdaptiveBit; bit: Integer): Integer;
 var sa, sb, p: Integer;
 begin
   sa := Stretch(a.p); sb := Stretch(b.p);
-  p := Squash((sa + sb) div 2);
+  { both in [-2048, 2047]: so is their mean, no clamp }
+  p := SQUASH_T[(sa + sb) div 2 + 2048];
   Result := cd.CodeP(p shl 4, bit);
   a.Update(Result, COUNTER_LIMIT); b.Update(Result, COUNTER_LIMIT);
 end;
@@ -711,6 +745,12 @@ var
     5*BASIS[i,0] - BASIS[i,1] = 4 * (B0 + (B0 - B1) / 4): a quarter of a
     pixel, times 4 (the DC estimates) }
   W3, W5: array[0..7] of Int64;
+  { the same at the far side of a block (rows and columns 7 and 6) }
+  E3, E5: array[0..7] of Int64;
+  { what the coefficient at a position (u * 8 + v) adds per unit to each of
+    the 8 values of FillCaches's px (right and bottom edges) and of the DC
+    estimate's pc and pr (left and top edges) }
+  KER_RIGHT, KER_BOTTOM, KER_LEFT, KER_TOP: array[0..63, 0..7] of Int64;
   { UNZIG[natural position] = zigzag index }
   UNZIG: array[0..63] of Byte;
   { interior positions (u, v >= 1) in zigzag order, and how many of them are
@@ -751,18 +791,6 @@ end;
 { The caches of a finished block, from its nonzero coefficients only. }
 { mask: a bit set for (at least) every nonzero position of fb }
 const
-  { Batcher's odd-even merge sort for 8 and 16 values (checked on every 0/1
-    input): the estimates sorted without a branch per comparison }
-  SORT8: array[0..18, 0..1] of Byte = (
-    (0,1), (2,3), (4,5), (6,7), (0,2), (1,3), (4,6), (5,7), (1,2), (5,6), (0,4), (1,5), (2,6),
-    (3,7), (2,4), (3,5), (1,2), (3,4), (5,6));
-  SORT16: array[0..62, 0..1] of Byte = (
-    (0,1), (2,3), (4,5), (6,7), (8,9), (10,11), (12,13), (14,15), (0,2), (1,3), (4,6), (5,7),
-    (8,10), (9,11), (12,14), (13,15), (1,2), (5,6), (9,10), (13,14), (0,4), (1,5), (2,6),
-    (3,7), (8,12), (9,13), (10,14), (11,15), (2,4), (3,5), (10,12), (11,13), (1,2), (3,4),
-    (5,6), (9,10), (11,12), (13,14), (0,8), (1,9), (2,10), (3,11), (4,12), (5,13), (6,14),
-    (7,15), (4,8), (5,9), (6,10), (7,11), (2,4), (3,5), (6,8), (7,9), (10,12), (11,13), (1,2),
-    (3,4), (5,6), (7,8), (9,10), (11,12), (13,14));
   { the interior of column 0 (rows 1 to 7) and of row 0 (columns 1 to 7) }
   COL_INTERIOR = QWord($0101010101010100);
   ROW_INTERIOR = QWord($FE);
@@ -777,27 +805,66 @@ begin
   b := b - (d and m);
 end;
 
-procedure FillCaches(const fb: TBlockF; mask: QWord; out right, bottom: TEdgeCache);
-var pos, u, v, y: Integer; f: Int64; c7, c6, r7, r6, ec, er: array[0..7] of Int64;
+type
+  TEstimates = array[0..15] of Int64;
+
+{ The 4 smallest of 16 to e[0..3] and the 4 largest to e[12..15], and of 8,
+  the 2 smallest and the 2 largest: all the trimmed mean needs. Batcher's
+  odd-even merge sort with every comparator removed that the split does not
+  need (checked on all 2^16 and 2^8 inputs of 0s and 1s), written out with
+  constant indices. }
+procedure Split16(var e: TEstimates);
 begin
-  for u := 0 to 7 do begin c7[u] := 0; c6[u] := 0; r7[u] := 0; r6[u] := 0; end;
+  CompareSwap(e[0], e[1]); CompareSwap(e[2], e[3]); CompareSwap(e[4], e[5]);
+  CompareSwap(e[6], e[7]); CompareSwap(e[8], e[9]); CompareSwap(e[10], e[11]);
+  CompareSwap(e[12], e[13]); CompareSwap(e[0], e[2]); CompareSwap(e[1], e[3]);
+  CompareSwap(e[4], e[6]); CompareSwap(e[5], e[7]); CompareSwap(e[8], e[10]);
+  CompareSwap(e[9], e[11]); CompareSwap(e[12], e[14]); CompareSwap(e[13], e[15]);
+  CompareSwap(e[1], e[2]); CompareSwap(e[5], e[6]); CompareSwap(e[9], e[10]);
+  CompareSwap(e[13], e[14]); CompareSwap(e[0], e[4]); CompareSwap(e[1], e[5]);
+  CompareSwap(e[2], e[6]); CompareSwap(e[3], e[7]); CompareSwap(e[8], e[12]);
+  CompareSwap(e[9], e[13]); CompareSwap(e[10], e[14]); CompareSwap(e[11], e[15]);
+  CompareSwap(e[2], e[4]); CompareSwap(e[3], e[5]); CompareSwap(e[10], e[12]);
+  CompareSwap(e[11], e[13]); CompareSwap(e[1], e[2]); CompareSwap(e[5], e[6]);
+  CompareSwap(e[0], e[8]); CompareSwap(e[1], e[9]); CompareSwap(e[2], e[10]);
+  CompareSwap(e[3], e[11]); CompareSwap(e[4], e[12]); CompareSwap(e[5], e[13]);
+  CompareSwap(e[6], e[14]); CompareSwap(e[7], e[15]); CompareSwap(e[4], e[8]);
+  CompareSwap(e[5], e[9]); CompareSwap(e[6], e[10]); CompareSwap(e[7], e[11]);
+  CompareSwap(e[2], e[4]); CompareSwap(e[3], e[5]); CompareSwap(e[10], e[12]);
+  CompareSwap(e[11], e[13]); CompareSwap(e[3], e[4]); CompareSwap(e[11], e[12]);
+end;
+
+procedure Split8(var e: TEstimates);
+begin
+  CompareSwap(e[0], e[1]); CompareSwap(e[2], e[3]); CompareSwap(e[4], e[5]);
+  CompareSwap(e[0], e[2]); CompareSwap(e[1], e[3]); CompareSwap(e[4], e[6]);
+  CompareSwap(e[5], e[7]); CompareSwap(e[0], e[4]); CompareSwap(e[1], e[5]);
+  CompareSwap(e[2], e[6]); CompareSwap(e[3], e[7]); CompareSwap(e[2], e[4]);
+  CompareSwap(e[3], e[5]); CompareSwap(e[1], e[2]); CompareSwap(e[5], e[6]);
+end;
+
+{ Everything here is linear in the coefficients, so each nonzero one adds
+  its own share, precomputed per position (KER_* below): with the few
+  nonzero coefficients of a typical block, far less work than the 8x8
+  products it replaces, and the same integers.
+    right.eg[u]  = sum over v of fb[u,v] * (3 B[v,7] - B[v,6])
+    bottom.eg[v] = sum over u of fb[u,v] * (3 B[u,7] - B[u,6])
+    right.px[y]  = sum over u of B[u,y] * (sum over v of fb[u,v] * (5 B[v,7] - B[v,6]))
+    bottom.px[y] = sum over v of B[v,y] * (sum over u of fb[u,v] * (5 B[u,7] - B[u,6])) }
+procedure FillCaches(const fb: TBlockF; mask: QWord; out right, bottom: TEdgeCache);
+var pos, u, v, y: Integer; f: Int64;
+begin
+  for y := 0 to 7 do begin right.eg[y] := 0; bottom.eg[y] := 0; right.px[y] := 0; bottom.px[y] := 0; end;
   while mask <> 0 do begin
     pos := BsfQWord(mask);
     mask := mask and (mask - 1);
     f := fb[pos];
     u := pos shr 3; v := pos and 7;
-    c7[u] := c7[u] + BASIS[v, 7] * f; c6[u] := c6[u] + BASIS[v, 6] * f;
-    r7[v] := r7[v] + BASIS[u, 7] * f; r6[v] := r6[v] + BASIS[u, 6] * f;
-  end;
-  for u := 0 to 7 do begin
-    right.eg[u] := 3 * c7[u] - c6[u]; ec[u] := 5 * c7[u] - c6[u];
-    bottom.eg[u] := 3 * r7[u] - r6[u]; er[u] := 5 * r7[u] - r6[u];
-  end;
-  for y := 0 to 7 do begin
-    right.px[y] := 0; bottom.px[y] := 0;
-    for u := 0 to 7 do begin
-      right.px[y] := right.px[y] + BASIS[u, y] * ec[u];
-      bottom.px[y] := bottom.px[y] + BASIS[u, y] * er[u];
+    right.eg[u] := right.eg[u] + E3[v] * f;
+    bottom.eg[v] := bottom.eg[v] + E3[u] * f;
+    for y := 0 to 7 do begin
+      right.px[y] := right.px[y] + KER_RIGHT[pos, y] * f;
+      bottom.px[y] := bottom.px[y] + KER_BOTTOM[pos, y] * f;
     end;
   end;
 end;
@@ -809,8 +876,8 @@ var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, po
     nzc, dcr: array of Byte; haveA, haveL: Boolean; rb2, nbs: Integer; res, x, e, i, ep: Integer;
     nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
     q: array[0..63] of Integer; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
-    gc, gr, pc, pr: array[0..7] of Int64; ests: array[0..15] of Int64; i2: Integer; tmp: Int64;
-    fb: TBlockF; fm, mm: QWord; rowsM, colsM, mr: Cardinal; left: Integer; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
+    pc, pr: array[0..7] of Int64; ests: TEstimates; i2: Integer; tmp: Int64;
+    fb: TBlockF; fm, mm: QWord; left: Integer; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
 begin
   for k := 0 to 63 do begin
     q[k] := 1;
@@ -983,12 +1050,17 @@ begin
           tmp := DivRound(5 * predF, 8);
           pb := Clip(FineLog(tmp), NO_PRED - 1);
         end;
-        a := 0; l := 0;
-        if haveA then a := Abs(cp.coef[abase + k]);
-        if haveL then l := Abs(cp.coef[lbase + k]);
-        if haveA and haveL then mbN := Clip(BitLen(a + l), NO_NEIGHBOUR - 1)
-        else if haveA or haveL then mbN := Clip(BitLen(2 * (a + l)), NO_NEIGHBOUR - 1)
-        else mbN := NO_NEIGHBOUR;
+        { the neighbours' same coefficient: only the full model's counters
+          use it }
+        if m.fast then mbN := NO_NEIGHBOUR
+        else begin
+          a := 0; l := 0;
+          if haveA then a := Abs(cp.coef[abase + k]);
+          if haveL then l := Abs(cp.coef[lbase + k]);
+          if haveA and haveL then mbN := Clip(BitLen(a + l), NO_NEIGHBOUR - 1)
+          else if haveA or haveL then mbN := Clip(BitLen(2 * (a + l)), NO_NEIGHBOUR - 1)
+          else mbN := NO_NEIGHBOUR;
+        end;
         { the previous coefficient along this same edge }
         if ep >= 2 then begin
           if u = 0 then prevB := Clip(BitLen(cp.coef[base + UNZIG[w - 1]]), 7)
@@ -1056,26 +1128,22 @@ begin
         and their spread the context. }
       { this block's boundary without its DC, extrapolated the same way:
         5*P0 - P1, per column (left edge) and per row (top edge) }
-      for u := 0 to 7 do begin gc[u] := 0; gr[u] := 0; end;
-      rowsM := 0; colsM := 0;
+      { linear in the coefficients, like FillCaches:
+          pc[i] = sum over u of B[u,i] * (sum over w of W5[w] fb[u,w])
+          pr[i] = sum over w of B[w,i] * (sum over u of W5[u] fb[u,w]) }
+      for i := 0 to 7 do begin pc[i] := 0; pr[i] := 0; end;
       mm := fm;
       while mm <> 0 do begin
         pos := BsfQWord(mm);
         mm := mm and (mm - 1);
         f := fb[pos];
-        u := pos shr 3; w := pos and 7;
-        gc[u] := gc[u] + W5[w] * f;
-        gr[w] := gr[w] + W5[u] * f;
-        rowsM := rowsM or (1 shl u); colsM := colsM or (1 shl w);
+        for i := 0 to 7 do begin
+          pc[i] := pc[i] + KER_LEFT[pos, i] * f;
+          pr[i] := pr[i] + KER_TOP[pos, i] * f;
+        end;
       end;
       nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
       if haveL then begin
-        for i := 0 to 7 do pc[i] := 0;
-        mr := rowsM;
-        while mr <> 0 do begin
-          u := BsfDWord(mr); mr := mr and (mr - 1);
-          for i := 0 to 7 do pc[i] := pc[i] + BASIS[u, i] * gc[u];
-        end;
         for i := 0 to 7 do begin
           est := (leftC.px[i] - pc[i]) div 4;
           ests[nest] := est; Inc(nest);
@@ -1084,12 +1152,6 @@ begin
         end;
       end;
       if haveA then begin
-        for i := 0 to 7 do pr[i] := 0;
-        mr := colsM;
-        while mr <> 0 do begin
-          u := BsfDWord(mr); mr := mr and (mr - 1);
-          for i := 0 to 7 do pr[i] := pr[i] + BASIS[u, i] * gr[u];
-        end;
         for i := 0 to 7 do begin
           est := (rowC[bx].px[i] - pr[i]) div 4;
           ests[nest] := est; Inc(nest);
@@ -1098,10 +1160,7 @@ begin
         end;
       end;
       { the middle half of the sorted estimates }
-      if nest = 16 then
-        for i := 0 to 62 do CompareSwap(ests[SORT16[i, 0]], ests[SORT16[i, 1]])
-      else if nest = 8 then
-        for i := 0 to 18 do CompareSwap(ests[SORT8[i, 0]], ests[SORT8[i, 1]]);
+      if nest = 16 then Split16(ests) else if nest = 8 then Split8(ests);
       total := 0;
       for i := nest div 4 to nest - 1 - nest div 4 do total := total + ests[i];
       if nest > 0 then nest := nest - 2 * (nest div 4);
@@ -1675,7 +1734,16 @@ begin
   for k := 0 to 7 do begin
     W3[k] := 3 * BASIS[k, 0] - BASIS[k, 1];
     W5[k] := 5 * BASIS[k, 0] - BASIS[k, 1];
+    E3[k] := 3 * BASIS[k, 7] - BASIS[k, 6];
+    E5[k] := 5 * BASIS[k, 7] - BASIS[k, 6];
   end;
+  for n := 0 to 63 do
+    for k := 0 to 7 do begin
+      KER_RIGHT[n, k] := BASIS[n shr 3, k] * E5[n and 7];
+      KER_BOTTOM[n, k] := BASIS[n and 7, k] * E5[n shr 3];
+      KER_LEFT[n, k] := BASIS[n shr 3, k] * W5[n and 7];
+      KER_TOP[n, k] := BASIS[n and 7, k] * W5[n shr 3];
+    end;
 end;
 
 initialization
