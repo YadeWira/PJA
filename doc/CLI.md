@@ -56,5 +56,5 @@ measured against the old spelling.
 - **The output's type comes from its content**: a JPEG-LS file comes back as
   `.jls`, a JPEG as `.jpg`, whatever the `.pja` is called.
 
-Tested by `pas/tests/cli.sh` (43 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (44 cells: round trips, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, every usage error).

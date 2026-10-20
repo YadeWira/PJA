@@ -43,7 +43,19 @@ cd .. && ./run_tests.sh                    # every test
 encoders, where they cost 2.3x. The checked build is the reference: the codec
 suite compresses the same files with both, with and without assembly and with
 several threads, and demands identical streams. The JPEG and JPEG-LS
-decoders stay checked in every build. Windows builds are not set up yet.
+decoders stay checked in every build.
+
+**Windows (64-bit)**: cross-compiled from Linux with the `x86_64-win64` units
+FreePascal ships (`fpc -Twin64 -Px86_64`). `pas/tests/windows_pkg.sh DIR`
+builds `pja.exe`, a checked `pja_ref.exe`, the samples and the `.pja` files
+Linux makes of them; `windows.ps1`, run on Windows, demands the very same
+`.pja` files (full and fast model, with and without assembly, 1 to 4
+threads), every original back from the Linux ones, the CLI's refusals, and
+names outside the ANSI code page. Checked on Windows 10 on 20/10/2026: 22
+cells, 0 failures. The arguments are read in UTF-16 there and the program
+runs in UTF-8: through the ANSI code page a name like `写真.jpg` could not
+be opened at all. 32-bit Windows needs the `i386-win32` units, not
+installed here.
 
 ## Layout
 

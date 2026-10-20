@@ -83,6 +83,9 @@ check "-n writes nothing" bash -c "'$PJA' a -q -n '$W/in/grayscale.jpg' -o '$W/d
 cp "$W/in/grayscale.jpg" "$W/-dash.jpg"
 check "-- and a file that starts with a dash" bash -c "cd '$W' && '$PJA' a -q -- -dash.jpg && [ -e '-dash.pja' ]"
 check "-o with several inputs and no directory: rc 2" test "$(rc "$PJA" a "$W/in/grayscale.jpg" "$W/in/solid_color.jpg" -o "$W/one.pja")" -eq 2
+cp "$W/in/grayscale.jpg" "$W/写真ñ.jpg"
+check "a non-ASCII name, both ways" bash -c "'$PJA' a -q '$W/写真ñ.jpg' -o '$W/u.pja' && '$PJA' x -q '$W/u.pja' -o '$W/写真ñ2.jpg' &&
+  cmp -s '$W/写真ñ.jpg' '$W/写真ñ2.jpg'"
 check "--output-dir" bash -c "'$PJA' a -q '$W/in/grayscale.jpg' --output-dir='$W/od' && [ -e '$W/od/grayscale.pja' ]"
 check "an unknown option: rc 2" test "$(rc "$PJA" a --frobnicate "$W/in/grayscale.jpg")" -eq 2
 check "the old glued -th4: rc 2, naming the spelling" bash -c "'$PJA' a -th4 x.jpg 2>&1 | grep -q 'write -th 4'"

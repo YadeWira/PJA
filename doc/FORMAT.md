@@ -96,10 +96,10 @@ Each row is a case with its expected result, and it is in the tests.
 
 - **The format alone:** every bit of the 19 sample files packed, every value
   of the header and descriptor bytes, every truncation and appended data:
-  1,030,246 variants. None **reads the same** as the original: every byte
+  1,030,417 variants. None **reads the same** as the original: every byte
   means something. Those the format cannot reject (a bit in the payload)
   read a different payload, and step 5 gives them away.
-- **End to end, with the codec:** 6,161 variants of the 12 smaller files
+- **End to end, with the codec:** 6,157 variants of the 12 smaller files
   (every header and descriptor bit, bits spread over the payload,
   truncations). **None ends in a different file delivered as good**, and no
   exception: a format rejection, a codec rejection, a size or hash mismatch,

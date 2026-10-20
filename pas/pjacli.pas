@@ -16,6 +16,7 @@ program pjacli;
 
 uses
   {$ifdef UNIX} cthreads, {$endif}
+  {$ifdef MSWINDOWS} Windows, {$endif}
   SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajls, pjapack, pjafs;
 
 const
@@ -50,6 +51,41 @@ type
 
 threadvar
   CurJob: PFileJob;
+
+var
+  { the arguments, in UTF-8 on every system }
+  args: array of string;
+
+{$ifdef MSWINDOWS}
+function CommandLineToArgvW(cmd: PWideChar; out n: Integer): PPWideChar; stdcall; external 'shell32.dll';
+
+{ ParamStr goes through the ANSI code page on Windows, and a name like
+  "fotoñandú.jpg" does not survive it: the arguments are read in UTF-16
+  and kept in UTF-8, the code page the whole program then runs in (so the
+  RTL's file functions and pjafs open the right file). }
+procedure ReadArgs;
+var w: PPWideChar; n, i: Integer;
+begin
+  DefaultSystemCodePage := CP_UTF8;
+  DefaultFileSystemCodePage := CP_UTF8;
+  w := CommandLineToArgvW(GetCommandLineW, n);
+  args := nil;
+  SetLength(args, n);
+  for i := 0 to n - 1 do args[i] := UTF8Encode(UnicodeString(w[i]));
+  LocalFree(HLOCAL(w));
+end;
+{$else}
+procedure ReadArgs;
+var i: Integer;
+begin
+  args := nil;
+  SetLength(args, ParamCount + 1);
+  for i := 0 to ParamCount do args[i] := ParamStr(i);
+end;
+{$endif}
+
+function ArgCount: Integer;
+begin Result := High(args); end;
 
 procedure Fail(const msg: string);
 begin
@@ -117,9 +153,9 @@ var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 
   function NextValue: string;
   begin
-    if i >= ParamCount then UsageError(a + ' needs a value');
+    if i >= ArgCount then UsageError(a + ' needs a value');
     Inc(i);
-    Result := ParamStr(i);
+    Result := args[i];
   end;
 
 begin
@@ -130,8 +166,9 @@ begin
   if threads > 8 then threads := 8;
   if threads < 1 then threads := 1;
   maxOutput := DEFAULT_MAX_OUTPUT;
-  if ParamCount = 0 then Usage(2);
-  a := ParamStr(1);
+  ReadArgs;
+  if ArgCount = 0 then Usage(2);
+  a := args[1];
   if (a = '-h') or (a = '--help') then Usage(0);
   if a = '--version' then begin Writeln('pja ', PJA_VERSION); Halt(0); end;
   if a = 'a' then command := cmCompress
@@ -140,8 +177,8 @@ begin
   else UsageError('unknown command "' + a + '": a, x or list');
   onlyFiles := False;
   i := 2;
-  while i <= ParamCount do begin
-    a := ParamStr(i);
+  while i <= ArgCount do begin
+    a := args[i];
     if onlyFiles or (a = '') or (a[1] <> '-') or (a = '-') then inputs.Add(a)
     else if a = '--' then onlyFiles := True
     else if (a = '-h') or (a = '--help') then Usage(0)
