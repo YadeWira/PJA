@@ -20,7 +20,8 @@
 
   Compress verifies before handing anything out: it decompresses its own
   output and compares it with the input. A JPEG that does not come back
-  byte for byte is rejected with its reason.
+  byte for byte is rejected with its reason. With two threads or more, a
+  JPEG's bands are decoded while they are being encoded (CompressLive).
 
   Threads: a program that passes threads > 1 on Unix has to use cthreads. }
 unit pjacodec;
@@ -64,7 +65,7 @@ function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt = 1 
 
 implementation
 
-uses Classes, pjamodel;
+uses Classes, pjaarith, pjamodel;
 
 const
   ERROR_NAMES: array[TCodecError] of string = ('Ok', 'Jpeg', 'NoRoundTrip', 'BadStream', 'FutureVersion', 'TooLarge');
@@ -108,6 +109,9 @@ type
     input: TBytes;
     first, last: SizeInt;
     output: TBytes;
+    { not nil: encoding writes into it, or decoding reads it while another
+      thread writes it }
+    live: TLiveStream;
     ok: Boolean;
   end;
   PBandJob = ^TBandJob;
@@ -122,7 +126,9 @@ var cd: TCoder; slice: TBytes;
 begin
   b.ok := False;
   try
-    if b.encoding then cd.InitEncoder
+    if b.live <> nil then begin
+      if b.encoding then cd.InitLiveEncoder(b.live) else cd.InitLiveDecoder(b.live);
+    end else if b.encoding then cd.InitEncoder
     else begin
       { the band's own bytes only: past them the decoder reads zeros, never
         the next band }
@@ -136,6 +142,9 @@ begin
   except
     b.ok := False;
   end;
+  { an encoder that failed still closes its stream, or its reader would
+    wait forever (closing twice changes nothing) }
+  if b.encoding and (b.live <> nil) then b.live.Finish;
 end;
 
 procedure TBandThread.Execute;
@@ -185,11 +194,11 @@ end;
 { ---------- top ---------- }
 
 { The bands of a JPEG or of a JPEG-LS file, encoded, and the whole stream. }
-function Assemble(const head: TBytes; var jobs: array of TBandJob; threads: Integer; out stream: TBytes): Boolean;
+{ The stream from the header stream and the bands already encoded. }
+function Build(const head: TBytes; const jobs: array of TBandJob; out stream: TBytes): Boolean;
 var b, nb: Integer; total, p: SizeInt;
 begin
   stream := nil;
-  RunBands(jobs, threads);
   nb := Length(jobs);
   total := 1 + 4 + Length(head);
   for b := 0 to nb - 1 do begin
@@ -205,6 +214,69 @@ begin
     if b < nb - 1 then PutU32(stream, p, Length(jobs[b].output));
     if Length(jobs[b].output) > 0 then Move(jobs[b].output[0], stream[p], Length(jobs[b].output));
     Inc(p, Length(jobs[b].output));
+  end;
+  Result := True;
+end;
+
+function Assemble(const head: TBytes; var jobs: array of TBandJob; threads: Integer; out stream: TBytes): Boolean;
+begin
+  RunBands(jobs, threads);
+  Result := Build(head, jobs, stream);
+end;
+
+{ ---------- reading a stream ---------- }
+
+type
+  { What the header stream says: the file's headers, and how its bands are
+    coded. }
+  THead = record
+    j: TJpeg;
+    jl: TJls;
+    isLs, symbols: Boolean;
+    nb: Integer;
+  end;
+  TRange = record first, last: Int64; end;
+
+function DecodeHead(const head: TBytes; maxRaw: SizeInt; out h: THead): TCodecResult;
+var cd: TCoder; raw: TBytes;
+begin
+  h := Default(THead);
+  Result := CodecFail(ceOk);
+  cd.InitDecoder(head, 0);
+  raw := nil;
+  if not CodeRaw(cd, raw, maxRaw) then Exit(CodecFail(ceTooLarge));
+  h.isLs := IsJls(raw);
+  if h.isLs then begin
+    Result.jpeg := ParseJlsHeaders(raw, h.jl);
+    if not Result.jpeg.Ok then begin Result.err := ceBadStream; Exit; end;
+    h.symbols := cd.Direct(0, 1) = 1;
+    if h.symbols then h.nb := 1
+    else begin
+      if not CodeJlsRuns(cd, h.jl, 1 shl 26) then Exit(CodecFail(ceBadStream));
+      h.nb := JlsBandCount(h.jl);
+    end;
+  end else begin
+    Result.jpeg := ParseHeaders(raw, h.j);
+    if not Result.jpeg.Ok then begin Result.err := ceBadStream; Exit; end;
+    CodeScanBits(cd, h.j);
+    h.nb := BandCount(h.j);
+  end;
+end;
+
+{ Where each of the nb bands lies in the stream, the header stream being
+  `first` bytes from its start. False if the lengths do not fit. }
+function BandRanges(const stream: TBytes; first: Int64; nb: Integer; out r: array of TRange): Boolean;
+var b: Integer; p, len: Int64;
+begin
+  p := first;
+  for b := 0 to nb - 1 do begin
+    if b < nb - 1 then begin
+      if p + 4 > Length(stream) then Exit(False);
+      len := GetU32(stream, p); Inc(p, 4);
+      if p + len > Length(stream) then Exit(False);
+    end else len := Length(stream) - p;
+    r[b].first := p; r[b].last := p + len;
+    Inc(p, len);
   end;
   Result := True;
 end;
@@ -238,6 +310,78 @@ begin
   Result := stream <> nil;
 end;
 
+{ A JPEG compressed and verified at once: each band is decoded by a second
+  thread while its encoder is still writing it (pjaarith.TLiveStream), into
+  a second copy of the coefficients built from the header stream as
+  Decompress builds it. Then the stream's framing is read back with
+  Decompress's own BandRanges, and the copy is rebuilt into a JPEG that has
+  to be the input. The same checks as compressing and then decompressing,
+  in about the time of one of them. }
+function CompressLive(const jpeg: TBytes; var j: TJpeg; const head: TBytes; threads: Integer;
+                      out stream: TBytes): Boolean;
+var h: THead; nb, b, i, k, pairs, next: Integer; enc, dec: array of TBandJob; r: array of TRange;
+    pool: array of TBandThread; back: TBytes; cr: TCodecResult;
+begin
+  stream := nil;
+  Result := False;
+  cr := DecodeHead(head, 1 shl 28, h);
+  if not cr.Ok or h.isLs then Exit;
+  nb := BandCount(j);
+  if h.nb <> nb then Exit;
+  enc := nil; dec := nil;
+  SetLength(enc, nb); SetLength(dec, nb);
+  for b := 0 to nb - 1 do begin
+    enc[b] := Default(TBandJob);
+    enc[b].j := @j; enc[b].band := b; enc[b].encoding := True;
+    enc[b].live := TLiveStream.Create;
+    dec[b] := Default(TBandJob);
+    dec[b].j := @h.j; dec[b].band := b; dec[b].encoding := False;
+    dec[b].live := enc[b].live;
+  end;
+  try
+    { each band takes two threads, both running: the reader waits for the
+      writer }
+    pairs := threads div 2;
+    if pairs < 1 then pairs := 1;
+    next := 0;
+    while next < nb do begin
+      k := nb - next;
+      if k > pairs then k := pairs;
+      pool := nil;
+      SetLength(pool, 2 * k);
+      for i := 0 to k - 1 do begin
+        pool[2 * i] := TBandThread.Create(True);
+        pool[2 * i].job := @enc[next + i];
+        pool[2 * i + 1] := TBandThread.Create(True);
+        pool[2 * i + 1].job := @dec[next + i];
+      end;
+      for i := 0 to High(pool) do begin pool[i].FreeOnTerminate := False; pool[i].Start; end;
+      for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+      Inc(next, k);
+    end;
+    for b := 0 to nb - 1 do
+      if not enc[b].ok or not dec[b].ok then Exit;
+    if not Build(head, enc, stream) then Exit;
+    { the framing, read back the way Decompress reads it }
+    if (Length(stream) < 5 + Length(head)) or (stream[0] <> STREAM_VERSION) or
+       (GetU32(stream, 1) <> Cardinal(Length(head))) or
+       ((Length(head) > 0) and not CompareMem(@stream[5], @head[0], Length(head))) then Exit;
+    r := nil; SetLength(r, nb);
+    if not BandRanges(stream, 5 + Length(head), nb, r) then Exit;
+    for b := 0 to nb - 1 do
+      if (r[b].last - r[b].first <> Length(enc[b].output)) or
+         ((Length(enc[b].output) > 0) and not CompareMem(@stream[r[b].first], @enc[b].output[0], Length(enc[b].output))) then
+        Exit;
+    cr.jpeg := Recompose(h.j, back);
+    if not cr.jpeg.Ok or (Length(back) <> Length(jpeg)) or
+       ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then Exit;
+    Result := True;
+  finally
+    for b := 0 to nb - 1 do enc[b].live.Free;
+    if not Result then stream := nil;
+  end;
+end;
+
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
 var j: TJpeg; jl: TJls; cd: TCoder; head, back: TBytes; r: TCodecResult; jobs: array of TBandJob;
     nb, b: Integer;
@@ -256,6 +400,10 @@ begin
     CodeRaw(cd, j.raw, MaxInt);
     CodeScanBits(cd, j);
     head := cd.enc.Finish;
+    if verify and (threads >= 2) then begin
+      if not CompressLive(jpeg, j, head, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
+      Exit;
+    end;
     nb := BandCount(j);
     SetLength(jobs, nb);
     for b := 0 to nb - 1 do begin
@@ -275,8 +423,7 @@ begin
 end;
 
 function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
-var j: TJpeg; jl: TJls; cd: TCoder; raw, head: TBytes; jobs: array of TBandJob; nb, b: Integer;
-    p, len: Int64; isLs, symbols: Boolean;
+var h: THead; jobs: array of TBandJob; r: array of TRange; b: Integer; len: Int64;
 begin
   jpeg := nil;
   Result := CodecFail(ceOk);
@@ -285,45 +432,22 @@ begin
   if stream[0] < STREAM_VERSION then Exit(CodecFail(ceBadStream));
   len := GetU32(stream, 1);
   if 5 + len > Length(stream) then Exit(CodecFail(ceBadStream));
-  head := Copy(stream, 5, len);
-  cd.InitDecoder(head, 0);
-  raw := nil;
-  if not CodeRaw(cd, raw, maxRaw) then Exit(CodecFail(ceTooLarge));
-  isLs := IsJls(raw); symbols := False;
-  if isLs then begin
-    Result.jpeg := ParseJlsHeaders(raw, jl);
-    if not Result.jpeg.Ok then begin Result.err := ceBadStream; Exit; end;
-    symbols := cd.Direct(0, 1) = 1;
-    if symbols then nb := 1
-    else begin
-      if not CodeJlsRuns(cd, jl, 1 shl 26) then Exit(CodecFail(ceBadStream));
-      nb := JlsBandCount(jl);
-    end;
-  end else begin
-    Result.jpeg := ParseHeaders(raw, j);
-    if not Result.jpeg.Ok then begin Result.err := ceBadStream; Exit; end;
-    CodeScanBits(cd, j);
-    nb := BandCount(j);
-  end;
-  jobs := nil; SetLength(jobs, nb);
-  p := 5 + len;
-  for b := 0 to nb - 1 do begin
+  Result := DecodeHead(Copy(stream, 5, len), maxRaw, h);
+  if not Result.Ok then Exit;
+  r := nil; SetLength(r, h.nb);
+  if not BandRanges(stream, 5 + len, h.nb, r) then Exit(CodecFail(ceBadStream));
+  jobs := nil; SetLength(jobs, h.nb);
+  for b := 0 to h.nb - 1 do begin
     jobs[b] := Default(TBandJob);
-    if isLs then jobs[b].jl := @jl else jobs[b].j := @j;
-    jobs[b].symbols := symbols;
+    if h.isLs then jobs[b].jl := @h.jl else jobs[b].j := @h.j;
+    jobs[b].symbols := h.symbols;
     jobs[b].band := b; jobs[b].encoding := False; jobs[b].input := stream;
-    if b < nb - 1 then begin
-      if p + 4 > Length(stream) then Exit(CodecFail(ceBadStream));
-      len := GetU32(stream, p); Inc(p, 4);
-      if p + len > Length(stream) then Exit(CodecFail(ceBadStream));
-    end else len := Length(stream) - p;
-    jobs[b].first := p; jobs[b].last := p + len;
-    Inc(p, len);
+    jobs[b].first := r[b].first; jobs[b].last := r[b].last;
   end;
   RunBands(jobs, threads);
-  for b := 0 to nb - 1 do
+  for b := 0 to h.nb - 1 do
     if not jobs[b].ok then Exit(CodecFail(ceBadStream));
-  if isLs then Result.jpeg := RecomposeJls(jl, jpeg) else Result.jpeg := Recompose(j, jpeg);
+  if h.isLs then Result.jpeg := RecomposeJls(h.jl, jpeg) else Result.jpeg := Recompose(h.j, jpeg);
   if not Result.jpeg.Ok then begin jpeg := nil; Result.err := ceBadStream; end;
 end;
 

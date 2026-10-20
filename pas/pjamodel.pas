@@ -42,6 +42,9 @@ type
     dec: TArithDecoder;
     procedure InitEncoder;
     procedure InitDecoder(const data: TBytes; first: SizeInt);
+    { The same over a stream another thread is writing (pjaarith.TLiveStream). }
+    procedure InitLiveEncoder(s: TLiveStream);
+    procedure InitLiveDecoder(s: TLiveStream);
     { Codes `bit` with the counter (encoding), or decodes one (decoding);
       either way updates the counter and returns the bit. }
     function Code(var c: TAdaptiveBit; bit: Integer): Integer;
@@ -115,6 +118,12 @@ begin encoding := True; enc.Init; end;
 
 procedure TCoder.InitDecoder(const data: TBytes; first: SizeInt);
 begin encoding := False; dec.Init(data, first); end;
+
+procedure TCoder.InitLiveEncoder(s: TLiveStream);
+begin encoding := True; enc.InitLive(s); end;
+
+procedure TCoder.InitLiveDecoder(s: TLiveStream);
+begin encoding := False; dec.InitLive(s); end;
 
 procedure AddCost(p, bit: Integer);
 begin

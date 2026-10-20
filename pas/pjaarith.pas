@@ -32,11 +32,38 @@ const
   PROB_ONE = 65536;
 
 type
+  { A stream written by one thread and read by another while it is being
+    written: the encoder of a band and the decoder that verifies it run side
+    by side. The bytes go in blocks that never move, and the reader waits
+    for bytes not ready yet; past the end, once finished, it reads
+    zeros, as TArithDecoder does past the end of its data. }
+  TLiveStream = class
+  private
+    blocks: array of TBytes;
+    n: SizeInt;                   { written, by the writer }
+    { on cache lines of their own: the writer bumps n on every byte, and a
+      reader polling a line the writer keeps dirtying slows both down }
+    pad1: array[0..15] of SizeInt;
+    ready: SizeInt;               { what the reader may read }
+    finished: Boolean;
+    pad2: array[0..15] of SizeInt;
+  public
+    constructor Create;
+    procedure Put(b: Byte);
+    { No more bytes; also what unblocks the reader when the writer fails. }
+    procedure Finish;
+    function Get(p: SizeInt): Byte;
+    function Bytes: TBytes;
+  end;
+
   TArithEncoder = record
     x1, x2: Cardinal;
     d: TBytes;
     n: SizeInt;
+    live: TLiveStream;            { nil: into d }
     procedure Init;
+    { The bytes go to s as they come out (and Finish closes it). }
+    procedure InitLive(s: TLiveStream);
     procedure Encode(bit: Integer; p: Integer);
     { The low `count` bits of v, most significant first, at probability 1/2. }
     procedure Direct(v: Cardinal; count: Integer);
@@ -47,7 +74,10 @@ type
     x1, x2, x: Cardinal;
     d: TBytes;
     p: SizeInt;
+    live: TLiveStream;            { nil: from d }
     procedure Init(const data: TBytes; first: SizeInt = 0);
+    { From s, waiting for its writer when it gets ahead. }
+    procedure InitLive(s: TLiveStream);
     function Decode(prob: Integer): Integer;
     function Direct(count: Integer): Cardinal;
     { Bytes consumed so far, counting the ones read past the end. }
@@ -71,6 +101,8 @@ var
 
 implementation
 
+{$ifdef UNIX}uses BaseUnix;{$endif}
+
 function Split(x1, x2: Cardinal; p: Integer): Cardinal; inline;
 begin
   Result := x1 + Cardinal((QWord(x2 - x1) * Cardinal(p)) shr 16);
@@ -81,12 +113,105 @@ begin
   if p < 1 then Result := 1 else if p > PROB_ONE - 1 then Result := PROB_ONE - 1 else Result := p;
 end;
 
+{ ---------- live stream ---------- }
+
+const
+  LIVE_BLOCK_BITS = 16;
+  LIVE_BLOCK = 1 shl LIVE_BLOCK_BITS;
+  { 2^16 blocks of 64 KB: 4 GB, more than a band can take }
+  LIVE_BLOCKS = 1 shl 16;
+  { the writer publishes every this many bytes, and when it finishes }
+  LIVE_PUBLISH = 64;
+
+constructor TLiveStream.Create;
+begin
+  inherited Create;
+  { all the slots now: the array itself never moves while the reader reads }
+  SetLength(blocks, LIVE_BLOCKS);
+  n := 0; ready := 0; finished := False;
+end;
+
+procedure TLiveStream.Put(b: Byte);
+begin
+  if n shr LIVE_BLOCK_BITS >= LIVE_BLOCKS then raise ERangeError.Create('TLiveStream: full');
+  if n and (LIVE_BLOCK - 1) = 0 then SetLength(blocks[n shr LIVE_BLOCK_BITS], LIVE_BLOCK);
+  blocks[n shr LIVE_BLOCK_BITS][n and (LIVE_BLOCK - 1)] := b;
+  Inc(n);
+  if n and (LIVE_PUBLISH - 1) = 0 then begin
+    WriteBarrier;
+    ready := n;
+  end;
+end;
+
+procedure TLiveStream.Finish;
+begin
+  WriteBarrier;
+  ready := n;
+  WriteBarrier;
+  finished := True;
+end;
+
+procedure Nap;
+{$ifdef UNIX}
+var t: TTimeSpec;
+begin
+  t.tv_sec := 0; t.tv_nsec := 50000;
+  fpNanoSleep(@t, nil);
+end;
+{$else}
+begin
+  ThreadSwitch;
+end;
+{$endif}
+
+function TLiveStream.Get(p: SizeInt): Byte;
+var done: Boolean;
+begin
+  Result := 0;
+  repeat
+    { finished first: once it is set, `ready` already counts every byte }
+    done := finished;
+    ReadBarrier;
+    if p < ready then begin
+      ReadBarrier;
+      Result := blocks[p shr LIVE_BLOCK_BITS][p and (LIVE_BLOCK - 1)];
+      Exit;
+    end;
+    if done then Exit;
+    { caught up with the writer: sleep a little rather than spin, which
+      would also take the turbo budget away from the writer's core }
+    Nap;
+  until False;
+end;
+
+function TLiveStream.Bytes: TBytes;
+var k, take: SizeInt;
+begin
+  Result := nil;
+  SetLength(Result, n);
+  k := 0;
+  while k < n do begin
+    take := n - k;
+    if take > LIVE_BLOCK then take := LIVE_BLOCK;
+    Move(blocks[k shr LIVE_BLOCK_BITS][0], Result[k], take);
+    Inc(k, take);
+  end;
+end;
+
 { ---------- encoder ---------- }
 
 procedure TArithEncoder.Init;
 begin
   x1 := 0; x2 := $FFFFFFFF;
   SetLength(d, 4096); n := 0;
+  live := nil;
+end;
+
+procedure TArithEncoder.InitLive(s: TLiveStream);
+begin
+  Init;
+  d := nil;
+  live := s;
 end;
 
 procedure TArithEncoder.Encode(bit: Integer; p: Integer);
@@ -95,8 +220,12 @@ begin
   xm := Split(x1, x2, Clamp(p));
   if bit <> 0 then x2 := xm else x1 := xm + 1;
   while ((x1 xor x2) and $FF000000) = 0 do begin
-    if n >= Length(d) then SetLength(d, 2 * Length(d));
-    d[n] := Byte(x2 shr 24); Inc(n);
+    if live <> nil then live.Put(Byte(x2 shr 24))
+    else begin
+      if n >= Length(d) then SetLength(d, 2 * Length(d));
+      d[n] := Byte(x2 shr 24);
+    end;
+    Inc(n);
     x1 := x1 shl 8;
     x2 := (x2 shl 8) or 255;
   end;
@@ -113,22 +242,41 @@ var k: Integer;
 begin
   { all of x1: whatever tail the decoder reads falls inside [x1, x2] }
   for k := 0 to 3 do begin
-    if n >= Length(d) then SetLength(d, 2 * Length(d));
-    d[n] := Byte(x1 shr 24); Inc(n);
+    if live <> nil then live.Put(Byte(x1 shr 24))
+    else begin
+      if n >= Length(d) then SetLength(d, 2 * Length(d));
+      d[n] := Byte(x1 shr 24);
+    end;
+    Inc(n);
     x1 := x1 shl 8;
   end;
-  Result := Copy(d, 0, n);
+  if live <> nil then begin
+    live.Finish;
+    Result := live.Bytes;
+  end else
+    Result := Copy(d, 0, n);
 end;
 
 { ---------- decoder ---------- }
 
+procedure TArithDecoder.InitLive(s: TLiveStream);
+begin
+  Init(nil, 0);
+  { Init read four zeros from nothing: again, from s }
+  live := s;
+  x := (Cardinal(s.Get(0)) shl 24) or (Cardinal(s.Get(1)) shl 16) or (Cardinal(s.Get(2)) shl 8) or s.Get(3);
+  p := 4;
+end;
+
 procedure TArithDecoder.Init(const data: TBytes; first: SizeInt);
 var k: Integer; b: Byte;
 begin
+  live := nil;
   d := data; p := first;
   x1 := 0; x2 := $FFFFFFFF; x := 0;
   for k := 0 to 3 do begin
-    if (p >= 0) and (p < Length(d)) then b := d[p] else b := 0;
+    if live <> nil then b := live.Get(p)
+    else if (p >= 0) and (p < Length(d)) then b := d[p] else b := 0;
     Inc(p);
     x := (x shl 8) or b;
   end;
@@ -143,7 +291,8 @@ begin
   while ((x1 xor x2) and $FF000000) = 0 do begin
     x1 := x1 shl 8;
     x2 := (x2 shl 8) or 255;
-    if (p >= 0) and (p < Length(d)) then b := d[p] else b := 0;
+    if live <> nil then b := live.Get(p)
+    else if (p >= 0) and (p < Length(d)) then b := d[p] else b := 0;
     Inc(p);
     x := (x shl 8) or b;
   end;

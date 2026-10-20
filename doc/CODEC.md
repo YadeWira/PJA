@@ -300,3 +300,27 @@ starts its models from nothing:
 
 A typical photo needs about 6,000 blocks per band for 8 threads: close to
 2%, most of PJA's lead over packJPG. Not done.
+
+## Verifying while encoding (19/10/2026)
+
+With two threads or more, a JPEG is verified while it is being compressed:
+each band's encoder writes into a `TLiveStream` (`pjaarith`), and a second
+thread decodes it a few bytes behind, into a second copy of the
+coefficients built from the header stream exactly as `Decompress` builds
+it. Then the stream's framing is read back with `Decompress`'s own
+`BandRanges`, and the copy is rebuilt into a JPEG that has to be the input:
+the same checks as before, in about the time of one pass. The bytes go in
+64 KB blocks that never move, so the reader never sees a reallocation; past
+the end of a finished stream it reads zeros, as the decoder does on a band's
+own slice. An encoder that fails still closes its stream, so its reader is
+never left waiting. Two mutants were caught on every sample: a decoder off
+by one bit, and an encoder that fails mid-band (no hang).
+
+One photo at a time, the 151 photos: 146.5 → 108.5 s, the same `.pja`
+files. The ideal would be about 40% less: the phases outside the bands
+(the JPEG's own round trip, the header stream, the rebuild) stay in series,
+and with two cores busy each one runs at a lower clock (measured: the same
+instructions, 3.2 → 2.7 GHz). A reader that spins while it waits makes that
+worse, so it sleeps 50 µs when it catches up. The two threads must not land
+on the two hardware threads of one core: there it took 823 ms against
+650 ms on two cores.
