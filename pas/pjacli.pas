@@ -32,7 +32,7 @@ var
   inputs: TStringList;
   outArg: string;          { -o: a name, or a directory }
   outDir: string;          { --output-dir }
-  force, keepCorrupt, dryRun, quiet: Boolean;
+  force, keepCorrupt, dryRun, quiet, fastModel: Boolean;
   threads: Integer;
   maxOutput: QWord;
   errors: Integer;
@@ -77,6 +77,8 @@ begin
   Writeln('                       files at once, and what is left to each file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
+  Writeln('  --fast               a: a JPEG in the fast model: about 1.5x faster to extract,');
+  Writeln('                       about 1.7% larger (x needs no switch)');
   Writeln('  -n, --dry-run        do everything but write');
   Writeln('  -q, --quiet          only errors');
   Writeln('  --                   the rest are files');
@@ -123,6 +125,7 @@ var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
+  fastModel := False;
   threads := TThread.ProcessorCount;
   if threads > 8 then threads := 8;
   if threads < 1 then threads := 1;
@@ -148,6 +151,7 @@ begin
     else if (a = '-n') or (a = '--dry-run') then dryRun := True
     else if (a = '-q') or (a = '--quiet') then quiet := True
     else if a = '--keep-corrupt' then keepCorrupt := True
+    else if a = '--fast' then fastModel := True
     else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
       if a = '-th' then v := NextValue else v := Copy(a, 11, MaxInt);
       if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
@@ -165,6 +169,7 @@ begin
   if inputs.Count = 0 then UsageError('no input files');
   if (outArg <> '') and (outDir <> '') then UsageError('-o and --output-dir together');
   if (command = cmList) and ((outArg <> '') or (outDir <> '')) then UsageError('list writes nothing');
+  if fastModel and (command <> cmCompress) then UsageError('--fast is for a');
 end;
 
 function ReadWhole(const f: string; out data: TBytes): Boolean;
@@ -249,7 +254,7 @@ var d, pja: TBytes; r: TPackResult; path: string;
 begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
-  r := Pack(d, pja, bandThreads);
+  r := Pack(d, pja, bandThreads, fastModel);
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) and not quiet then

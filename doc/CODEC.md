@@ -324,3 +324,39 @@ instructions, 3.2 → 2.7 GHz). A reader that spins while it waits makes that
 worse, so it sleeps 50 µs when it catches up. The two threads must not land
 on the two hardware threads of one core: there it took 823 ms against
 650 ms on two cores.
+
+## The fast model (19/10/2026)
+
+`pja a --fast` (stream byte 1 = 1): a JPEG's coefficients with no mixer. Each
+decision is coded with one counter in a joint context, averaged in the
+logistic domain with one of the full model's counters for the biggest
+decisions (interior zero flags and bit lengths, edge zero flags and bit
+lengths); the DC, the nonzero counts, the mantissas and the signs use one
+counter. The predictions (edges, DC) are the full model's: they are where the
+ratio is.
+
+How the contexts were chosen: the full model's decisions were logged with
+the cells that took part, and for each kind of decision the code length of a
+static model over one cell or a pair of cells was estimated with the KT
+estimator, per image. The best pairs became the joint contexts; on 12 photos
+they predicted +1.8% for one counter, and gave +2.04% (one counter) and
++1.67% (two averaged).
+
+On the 151 photos, against the full model:
+
+| | full | fast |
+|---|---|---|
+| size | 58,848,193 | 59,827,219 (+1.66%) |
+| compress, 1 thread | 144.8 s | 95.9 s |
+| decompress, 1 thread | 72.5 s | 47.1 s |
+| decompress, 8 threads | 10.1 s | 6.9 s |
+
+Still smaller than packJPG 5.0f's 60,084,653, and faster to extract with 8
+threads (packJPG: 10.4 s).
+
+Measured and not done: with smaller bands, so one photo decodes on several
+threads, the fast model loses more than the full one (8192 blocks per band:
++4.4% on top), since one counter needs more samples to learn than a mixture
+of five. Starting each band from per-image tables would cost their
+transmission, about as much again: a static design that parallelises inside
+a photo costs more than the 2% this mode allows.

@@ -52,7 +52,7 @@ safety:
 
 1. validate the header: magic, version, flags known, reserved bytes zero
 2. validate the descriptor: `orig_size` between 1 and 65,536 x the payload
-   length (`ValidateDescriptor`), and a payload of at least 5 B (the
+   length (`ValidateDescriptor`), and a payload of at least 6 B (the
    smallest codec stream)
 3. reject if `orig_size` exceeds the user's cap (`--max-output`)
 4. decode, with `orig_size` as the cap of the raw part
@@ -90,7 +90,7 @@ Each row is a case with its expected result, and it is in the tests.
 | `orig_size` > 2^63 - 1 | `BadOrigSize` |
 | `orig_size` = 65,536 x payload | accepted |
 | `orig_size` = 65,536 x payload + 1 | `RatioExceeded`, without multiplying (by dividing: no overflow) |
-| 4 B payload | `PayloadOutOfRange` |
+| 5 B payload | `PayloadOutOfRange` |
 
 ### 3.3 Corruption (`test_corruption`)
 

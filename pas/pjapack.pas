@@ -36,8 +36,9 @@ type
     function Text: string;
   end;
 
-{ The original file (JPEG or JPEG-LS) -> .pja. }
-function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1): TPackResult;
+{ The original file (JPEG or JPEG-LS) -> .pja. fast: the codec's fast model
+  (pjacodec.Compress). }
+function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fast: Boolean = False): TPackResult;
 
 { .pja -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch, `original` holds what was decoded and `expected` the hash
@@ -69,12 +70,12 @@ begin
   Result.err := e;
 end;
 
-function Pack(const original: TBytes; out pja: TBytes; threads: Integer): TPackResult;
+function Pack(const original: TBytes; out pja: TBytes; threads: Integer; fast: Boolean): TPackResult;
 var stream: TBytes;
 begin
   pja := nil;
   Result := PackFail(ukOk);
-  Result.codec := Compress(original, stream, True, threads);
+  Result.codec := Compress(original, stream, True, threads, fast);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
   Result.fmt := WritePja(stream, Blake3_128(original), Length(original), pja);
   if not Result.fmt.Ok then begin pja := nil; Result.err := ukFormat; end;

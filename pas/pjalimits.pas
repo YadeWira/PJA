@@ -9,9 +9,9 @@ unit pjalimits;
 interface
 
 const
-  { The smallest codec stream: its version byte and the length of its
-    header stream. No payload can be smaller. }
-  MIN_PAYLOAD = 5;
+  { The smallest codec stream: its version and model bytes and the length
+    of its header stream. No payload can be smaller. }
+  MIN_PAYLOAD = 6;
 
   { How many times its payload a declared original size may be. Measured on
     19/10/2026: photos 1.3x, a 24 MP solid-colour JPEG 160x, a JPEG with

@@ -32,6 +32,10 @@ check "the same .pja with 1 thread and with 4" bash -c "
 check "with -th 4 and several files, the lines follow the input order" bash -c "
   '$PJA' a -th 4 -f '$W'/in/*.jpg -o '$W/ord/' | sed 's/ ->.*//' > '$W/ord.txt' &&
   ls '$W'/in/*.jpg > '$W/ord_in.txt' && cmp -s '$W/ord.txt' '$W/ord_in.txt'"
+check "--fast: every JPEG back byte for byte" bash -c "
+  '$PJA' a -q --fast '$W'/in/*.jpg -o '$W/fast/' && '$PJA' x -q '$W'/fast/*.pja -o '$W/fastx/' &&
+  for f in '$W'/in/*.jpg; do cmp -s \"\$f\" '$W/fastx/'\$(basename \"\$f\") || exit 1; done"
+check "--fast with x: rc 2" test "$(rc "$PJA" x --fast "$W/pja/grayscale.pja" -o "$W/fx.jpg")" -eq 2
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"

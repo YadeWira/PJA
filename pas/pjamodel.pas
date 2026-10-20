@@ -80,8 +80,9 @@ const
 function BandCount(const j: TJpeg): Integer;
 { The coefficients of one band (allocated by Decompose or ParseHeaders); its
   first block row has no neighbour above. False when decoding garbage
-  produces a value that does not fit. }
-function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer): Boolean;
+  produces a value that does not fit. fast: the fast model (one or two
+  counters per decision, nothing mixed), a different stream. }
+function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean = False): Boolean;
 
 const
   { JPEG-LS: one band per JLS_BAND_SAMPLES samples, at most MAX_BANDS, at
@@ -495,43 +496,61 @@ type
     dz2, dz3, dz4, dx2, dx3, dx4: TBits;
     mxDcZero, mxDcExpo: TMixer;
     mxNz, mxZero, mxExpo, mxEZero, mxEExpo: TMixer;
-    procedure Init;
+    { the fast model: no mixer; each decision codes with one counter in a
+      joint context (the pair of contexts that measured best for a static
+      model), averaged with one of the full model's counters for the
+      biggest decisions }
+    fast, chroma: Boolean;
+    fz, fx, fez, fex, fdz, fdx: TBits;
+    { only the tables the chosen model uses }
+    procedure Init(isFast, isChroma: Boolean);
   end;
 
-procedure TCoefModel.Init;
+procedure TCoefModel.Init(isFast, isChroma: Boolean);
 begin
-  NewBits(nz1, NZ_BUCKETS * 64);
+  fast := isFast; chroma := isChroma;
+  { both models }
   NewBits(nz2, NZ_BUCKETS * NZ_BUCKETS * 64);
   NewBits(nz3, (NZ_BUCKETS + 1) * NZ_BUCKETS * 64);
   NewBits(zero1, 64 * REM_BUCKETS * MAG_BUCKETS);
-  NewBits(zero2, 64 * MAG_BUCKETS * 4);
-  NewBits(zero3, 64 * RATIO_BUCKETS);
   NewBits(zero4, K_BUCKETS * MAG_BUCKETS * REM_BUCKETS);
-  NewBits(zero5, 64 * (NZ_BUCKETS + 1) * REM_BUCKETS);
   NewBits(expo1, K_BUCKETS * MAG_BUCKETS * MAX_EXP_AC);
-  NewBits(expo2, K_BUCKETS * MAG_BUCKETS * MAX_EXP_AC);
-  NewBits(expo3, K_BUCKETS * REM_BUCKETS * MAX_EXP_AC);
-  NewBits(expo4, MAG_BUCKETS * MAX_EXP_AC);
   NewBits(mant1, (MAX_EXP_AC + 1) * K_BUCKETS);
   NewBits(mant, (MAX_EXP_AC + 1) * MAX_EXP_AC);
   NewBits(sign, K_BUCKETS * 9);
+  NewBits(ezero5, EDGE_POS * 12 * 4);
+  NewBits(eexpo5, EDGE_POS * 12 * MAX_EXP_AC);
+  NewBits(emant1, (MAX_EXP_AC + 1) * PRED_BUCKETS);
+  NewBits(esign, 2 * 3 * PRED_BUCKETS);
+  NewBits(dcSign, ACT_BUCKETS);
+  NewBits(dcMant1, (MAX_EXP_DC + 1) * ACT_BUCKETS);
+  NewBits(dcMant, (MAX_EXP_DC + 1) * MAX_EXP_DC);
+  if fast then begin
+    NewBits(fz, 64 * REM_BUCKETS * MAG_BUCKETS);
+    NewBits(fx, K_BUCKETS * REM_BUCKETS * MAG_BUCKETS * MAX_EXP_AC);
+    NewBits(fez, EDGE_POS * NZ_BUCKETS * 8 * PRED_BUCKETS);
+    NewBits(fex, EDGE_POS * NZ_BUCKETS * PRED_BUCKETS * 8 * MAX_EXP_AC);
+    NewBits(fdz, 20 * ACT_BUCKETS * 3);
+    NewBits(fdx, ACT_BUCKETS * 3 * MAX_EXP_DC);
+    Exit;
+  end;
+  NewBits(nz1, NZ_BUCKETS * 64);
+  NewBits(zero2, 64 * MAG_BUCKETS * 4);
+  NewBits(zero3, 64 * RATIO_BUCKETS);
+  NewBits(zero5, 64 * (NZ_BUCKETS + 1) * REM_BUCKETS);
+  NewBits(expo2, K_BUCKETS * MAG_BUCKETS * MAX_EXP_AC);
+  NewBits(expo3, K_BUCKETS * REM_BUCKETS * MAX_EXP_AC);
+  NewBits(expo4, MAG_BUCKETS * MAX_EXP_AC);
   NewBits(ezero1, EDGE_POS * PRED_BUCKETS);
   NewBits(ezero2, EDGE_POS * NZ_BUCKETS);
   NewBits(ezero3, EDGE_POS * 8 * PRED_BUCKETS);
   NewBits(ezero4, EDGE_POS * MAG_BUCKETS);
-  NewBits(ezero5, EDGE_POS * 12 * 4);
   NewBits(eexpo1, EDGE_POS * PRED_BUCKETS * MAX_EXP_AC);
   NewBits(eexpo2, EDGE_POS * MAG_BUCKETS * MAX_EXP_AC);
   NewBits(eexpo3, PRED_BUCKETS * 8 * MAX_EXP_AC);
   NewBits(eexpo4, EDGE_POS * NZ_BUCKETS * MAX_EXP_AC);
-  NewBits(eexpo5, EDGE_POS * 12 * MAX_EXP_AC);
-  NewBits(emant1, (MAX_EXP_AC + 1) * PRED_BUCKETS);
-  NewBits(esign, 2 * 3 * PRED_BUCKETS);
   NewBits(dcZero, ACT_BUCKETS);
   NewBits(dcExpo, ACT_BUCKETS * MAX_EXP_DC);
-  NewBits(dcSign, ACT_BUCKETS);
-  NewBits(dcMant1, (MAX_EXP_DC + 1) * ACT_BUCKETS);
-  NewBits(dcMant, (MAX_EXP_DC + 1) * MAX_EXP_DC);
   NewBits(dz2, 20);
   NewBits(dz3, NZ_BUCKETS * 8);
   NewBits(dz4, ACT_BUCKETS * 3);
@@ -588,6 +607,17 @@ end;
 function Clip(v, hi: Integer): Integer; inline;
 begin
   if v > hi then Result := hi else Result := v;
+end;
+
+{ The fast model's: two counters averaged in the logistic domain, nothing
+  learned. }
+function CodeAvg(var cd: TCoder; var a, b: TAdaptiveBit; bit: Integer): Integer;
+var sa, sb, p: Integer;
+begin
+  sa := Stretch(a.p); sb := Stretch(b.p);
+  p := Squash((sa + sb) div 2);
+  Result := cd.CodeP(p shl 4, bit);
+  a.Update(Result, COUNTER_LIMIT); b.Update(Result, COUNTER_LIMIT);
 end;
 
 { Codes a bit mixing four counters; updates all of them. }
@@ -816,15 +846,20 @@ begin
       {$ifdef PJA_COSTS}CostKind := ckNz;{$endif}
       node := 1;
       for k := 5 downto 0 do begin
-        m.mxNz.Add(m.nz1[ctx * 64 + node].p);
-        m.mxNz.Add(m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].p);
-        m.mxNz.Add(m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].p);
-        m.mxNz.Add(32768 + 8192);
-        bit := cd.CodeP(m.mxNz.Mix(5 - k), (n shr k) and 1);
-        m.mxNz.Update(bit);
-        m.nz1[ctx * 64 + node].Update(bit, COUNTER_LIMIT);
-        m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].Update(bit, COUNTER_LIMIT);
-        m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].Update(bit, COUNTER_LIMIT);
+        if m.fast then begin
+          if m.chroma then bit := cd.Code(m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node], (n shr k) and 1)
+          else bit := cd.Code(m.nz2[(za * NZ_BUCKETS + zb) * 64 + node], (n shr k) and 1);
+        end else begin
+          m.mxNz.Add(m.nz1[ctx * 64 + node].p);
+          m.mxNz.Add(m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].p);
+          m.mxNz.Add(m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].p);
+          m.mxNz.Add(32768 + 8192);
+          bit := cd.CodeP(m.mxNz.Mix(5 - k), (n shr k) and 1);
+          m.mxNz.Update(bit);
+          m.nz1[ctx * 64 + node].Update(bit, COUNTER_LIMIT);
+          m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].Update(bit, COUNTER_LIMIT);
+          m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].Update(bit, COUNTER_LIMIT);
+        end;
         node := node * 2 + bit;
       end;
       n := node - 64;
@@ -854,20 +889,29 @@ begin
         if cd.encoding then v := cp.coef[base + k] else v := 0;
         {$ifdef PJA_COSTS}CostKind := ckZero;{$endif}
         { when every interior position left must be nonzero, nothing to code }
-        if rem < INTERIOR_LEFT[idx] then
+        if rem >= INTERIOR_LEFT[idx] then bit := 1
+        else if m.fast then begin
+          if m.chroma then bit := CodeAvg(cd, m.fz[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN],
+                                          m.zero4[(kb * MAG_BUCKETS + mbS) * REM_BUCKETS + rb], Ord(v <> 0))
+          else bit := CodeAvg(cd, m.fz[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbS],
+                              m.zero1[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN], Ord(v <> 0));
+        end else
           bit := CodeMix5(cd, m.mxZero, k, m.zero5[(k * (NZ_BUCKETS + 1) + lz) * REM_BUCKETS + rb],
                          m.zero1[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN],
                          m.zero2[(k * MAG_BUCKETS + mbI) * 4 + Clip(mbN, 3)],
                          m.zero3[k * RATIO_BUCKETS + RATIO_OF[INTERIOR_LEFT[idx], rem]],
                          m.zero4[(kb * MAG_BUCKETS + mbS) * REM_BUCKETS + rb],
-                         Ord(v <> 0))
-        else bit := 1;
+                         Ord(v <> 0));
         if bit = 1 then begin
           x := Abs(v);
           {$ifdef PJA_COSTS}CostKind := ckExpo;{$endif}
           if cd.encoding then e := BitLen(x) else e := 0;
           i := 1;
           while i < MAX_EXP_AC do begin
+            if m.fast then begin
+              if CodeAvg(cd, m.fx[((kb * REM_BUCKETS + rb) * MAG_BUCKETS + mbS) * MAX_EXP_AC + i - 1],
+                         m.expo1[(kb * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1], Ord(e > i)) = 0 then Break;
+            end else
             if CodeMix(cd, m.mxExpo, (i - 1) * K_BUCKETS + kb,
                        m.expo1[(kb * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1],
                        m.expo2[(kb * MAG_BUCKETS + mbI) * MAX_EXP_AC + i - 1],
@@ -955,6 +999,10 @@ begin
         else ib := Clip(FineLog(cp.coef[base + UNZIG[u * 8 + 1]]), 11);
         if cd.encoding then v := cp.coef[base + k] else v := 0;
         {$ifdef PJA_COSTS}CostKind := ckEZero;{$endif}
+        if m.fast then
+          bit := CodeAvg(cd, m.fez[((ep * NZ_BUCKETS + nzB) * 8 + prevB) * PRED_BUCKETS + pb],
+                         m.ezero5[(ep * 12 + ib) * 4 + Clip(pb, 3)], Ord(v <> 0))
+        else
         bit := CodeMix5(cd, m.mxEZero, ep, m.ezero5[(ep * 12 + ib) * 4 + Clip(pb, 3)],
                        m.ezero1[ep * PRED_BUCKETS + pb],
                        m.ezero2[ep * NZ_BUCKETS + nzB],
@@ -967,6 +1015,13 @@ begin
           if cd.encoding then e := BitLen(x) else e := 0;
           i := 1;
           while i < MAX_EXP_AC do begin
+            if m.fast then begin
+              if m.chroma then
+                ctx := ((ep * PRED_BUCKETS + pb) * NZ_BUCKETS + nzB) * 8 * MAX_EXP_AC + i - 1
+              else
+                ctx := (((ep * NZ_BUCKETS + nzB) * PRED_BUCKETS + pb) * 8 + prevB) * MAX_EXP_AC + i - 1;
+              if CodeAvg(cd, m.fex[ctx], m.eexpo5[(ep * 12 + ib) * MAX_EXP_AC + i - 1], Ord(e > i)) = 0 then Break;
+            end else
             if CodeMix5(cd, m.mxEExpo, (i - 1) * EDGE_POS + ep, m.eexpo5[(ep * 12 + ib) * MAX_EXP_AC + i - 1],
                        m.eexpo1[(ep * PRED_BUCKETS + pb) * MAX_EXP_AC + i - 1],
                        m.eexpo2[(ep * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1],
@@ -1065,6 +1120,9 @@ begin
       if haveA then begin Inc(rb2, dcr[(by - 1) * cp.bw + bx]); Inc(nbs); end;
       if haveL then begin Inc(rb2, dcr[by * cp.bw + bx - 1]); Inc(nbs); end;
       rb2 := Clip(rb2, 19);
+      if m.fast then
+        bit := cd.Code(m.fdz[(rb2 * ACT_BUCKETS + ctx) * 3 + nbs], Ord(res <> 0))
+      else
       bit := CodeMix(cd, m.mxDcZero, ctx, m.dcZero[ctx], m.dz2[rb2], m.dz3[nzB * 8 + ctx div 3],
                      m.dz4[ctx * 3 + nbs], Ord(res <> 0));
       if bit = 1 then begin
@@ -1072,6 +1130,9 @@ begin
         if cd.encoding then e := BitLen(x) else e := 0;
         i := 1;
         while i < MAX_EXP_DC do begin
+          if m.fast then begin
+            if cd.Code(m.fdx[(ctx * 3 + nbs) * MAX_EXP_DC + i - 1], Ord(e > i)) = 0 then Break;
+          end else
           if CodeMix(cd, m.mxDcExpo, i - 1, m.dcExpo[ctx * MAX_EXP_DC + i - 1], m.dx2[rb2 * MAX_EXP_DC + i - 1],
                      m.dx3[(nzB * 8 + ctx div 3) * MAX_EXP_DC + i - 1],
                      m.dx4[(ctx * 3 + nbs) * MAX_EXP_DC + i - 1], Ord(e > i)) = 0 then Break;
@@ -1106,13 +1167,13 @@ begin
   if Result < 1 then Result := 1;
 end;
 
-function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer): Boolean;
+function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean): Boolean;
 var c, nb: Integer; luma, chroma: TCoefModel; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
 begin
   nb := BandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
   m0 := SizeInt(j.mcusy) * band div nb; m1 := SizeInt(j.mcusy) * (band + 1) div nb;
-  luma.Init; chroma.Init;
+  luma.Init(fast, False); chroma.Init(fast, True);
   lumaNz := nil;
   for c := 0 to High(j.comp) do begin
     if c = 0 then

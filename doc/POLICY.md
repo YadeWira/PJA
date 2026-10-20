@@ -9,7 +9,7 @@ claims a huge output.
 
 | rule | value | why |
 |---|---|---|
-| payload >= 5 B | the codec stream's version byte and header length | no empty or impossible payload |
+| payload >= 6 B | the codec stream's version and model bytes and header length | no empty or impossible payload |
 | `orig_size` >= 1 | | an empty file does not exist |
 | `orig_size` <= 2^63 - 1 | | no stream size can hold more |
 | `orig_size` <= 65,536 x payload | see below | rejects before decoding |

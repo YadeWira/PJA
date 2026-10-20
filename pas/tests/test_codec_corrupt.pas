@@ -43,7 +43,8 @@ begin
   variants := 0; decoded := 0; same := 0; failures := 0;
   for i := 0 to files.Count - 1 do begin
     d := ReadFile(files[i]);
-    if not Compress(d, st).Ok then Continue;
+    { PJA_TEST_FAST=1: the streams of the fast model }
+    if not Compress(d, st, True, 1, GetEnvironmentVariable('PJA_TEST_FAST') = '1').Ok then Continue;
     n := Length(st); if n > maxBytes then n := maxBytes;
     for b := 0 to n * 8 - 1 do begin
       m := Copy(st, 0, Length(st));
