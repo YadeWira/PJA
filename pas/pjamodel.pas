@@ -937,347 +937,80 @@ begin
   end;
 end;
 
-function CodeComponent(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
-                       const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
-                       out nzOut: TByteArr): Boolean;
-var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, pos, u, w, idx: SizeInt;
-    nzc, dcr: array of Byte; haveA, haveL: Boolean; rb2, nbs: Integer; res, x, e, i, ep: Integer;
-    nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
-    q: array[0..63] of Integer; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
-    pc, pr: array[0..7] of Int64; ests: TEstimates; i2: Integer; tmp: Int64;
-    fb: TBlockF; fm, mm: QWord; left: Integer; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
+{ What the coefficient routine (pjacoef.inc) codes a counter's bit with.
+  CodeOne is TCoder.Code; DecAvg and DecOne are the decoding side fused into
+  one routine each: the arithmetic decoder and the counters' update written
+  out (FPC does not inline a routine inside another one it inlines). The
+  same arithmetic as CodeAvg, TCoder.Code, TArithDecoder.Decode and
+  TAdaptiveBit.Update, so the same bits. }
+function CodeOne(var cd: TCoder; var c: TAdaptiveBit; bit: Integer): Integer; inline;
 begin
-  for k := 0 to 63 do begin
-    q[k] := 1;
-    if (k < Length(qt)) and (qt[k] > 0) then q[k] := qt[k];
-  end;
-  rowC := nil; SetLength(rowC, cp.bw);
-  leftC := Default(TEdgeCache);
-  nzc := nil; SetLength(nzc, cp.bw * cp.bh);
-  nzOut := nil;
-  dcr := nil; SetLength(dcr, cp.bw * cp.bh);
-  for by := y0 to y1 - 1 do
-    for bx := 0 to cp.bw - 1 do begin
-      base := (by * cp.bw + bx) * 64;
-      haveA := by > y0; haveL := bx > 0;
-      abase := base - cp.bw * 64; lbase := base - 64;
-      if not haveA then abase := base;
-      if not haveL then lbase := base;
-
-      { 1. how many interior (7x7) coefficients are nonzero, as a 6-bit tree }
-      n := 0;
-      if cd.encoding then
-        for i := 0 to 48 do if cp.coef[base + INTERIOR[i]] <> 0 then Inc(n);
-      if haveA then nzA := nzc[(by - 1) * cp.bw + bx] else nzA := 0;
-      if haveL then nzL := nzc[by * cp.bw + bx - 1] else nzL := 0;
-      if haveA and haveL then ctx := NzBucket((nzA + nzL + 1) div 2)
-      else if haveA then ctx := NzBucket(nzA)
-      else if haveL then ctx := NzBucket(nzL)
-      else ctx := 0;
-      if haveA then za := NzBucket(nzA) else za := 0;
-      if haveL then zb := NzBucket(nzL) else zb := 0;
-      { the luma block at the same spot; NZ_BUCKETS = there is none }
-      if Length(lumaNz) > 0 then lz := NzBucket(lumaNz[(by * sy) * lumaW + bx * sx]) else lz := NZ_BUCKETS;
-      {$ifdef PJA_COSTS}CostKind := ckNz;{$endif}
-      node := 1;
-      for k := 5 downto 0 do begin
-        if m.fast then begin
-          if m.chroma then bit := cd.Code(m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node], (n shr k) and 1)
-          else bit := cd.Code(m.nz2[(za * NZ_BUCKETS + zb) * 64 + node], (n shr k) and 1);
-        end else begin
-          m.mxNz.Add(m.nz1[ctx * 64 + node].p);
-          m.mxNz.Add(m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].p);
-          m.mxNz.Add(m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].p);
-          m.mxNz.Add(32768 + 8192);
-          bit := cd.CodeP(m.mxNz.Mix(5 - k), (n shr k) and 1);
-          m.mxNz.Update(bit);
-          m.nz1[ctx * 64 + node].Update(bit, COUNTER_LIMIT);
-          m.nz2[(za * NZ_BUCKETS + zb) * 64 + node].Update(bit, COUNTER_LIMIT);
-          m.nz3[(lz * NZ_BUCKETS + ctx) * 64 + node].Update(bit, COUNTER_LIMIT);
-        end;
-        node := node * 2 + bit;
-      end;
-      n := node - 64;
-      if n > 49 then Exit(False);   { only possible decoding garbage }
-      nzc[by * cp.bw + bx] := n;
-      nzB := NzBucket(n);
-
-      { 2. the interior in zigzag, while nonzeros are left }
-      rem := n;
-      idx := 0;
-      while (rem > 0) and (idx <= 48) do begin
-        k := INTERIOR[idx];
-        nb := NeighbourMag(cp, base, bx, by - y0, k);
-        { the interior neighbours in this block, already coded: (u-1, v) and
-          (u, v-1); row 0 and column 0 come later }
-        pos := ZIGZAG[k]; u := pos shr 3; w := pos and 7;
-        if (u > 1) and (w > 1) then
-          ib := Abs(cp.coef[base + UNZIG[pos - 8]]) + Abs(cp.coef[base + UNZIG[pos - 1]])
-        else if u > 1 then ib := 2 * Abs(cp.coef[base + UNZIG[pos - 8]])
-        else if w > 1 then ib := 2 * Abs(cp.coef[base + UNZIG[pos - 1]])
-        else ib := -1;
-        if ib < 0 then mbI := NO_NEIGHBOUR else mbI := Clip(FineLog(ib), NO_NEIGHBOUR - 1);
-        if ib < 0 then ib := 0;
-        if nb < 0 then begin mbN := NO_NEIGHBOUR; mbS := Clip(FineLog(2 * ib), NO_NEIGHBOUR - 1); end
-        else begin mbN := Clip(FineLog(nb), NO_NEIGHBOUR - 1); mbS := Clip(FineLog(nb + ib), NO_NEIGHBOUR - 1); end;
-        kb := K_BUCKET_OF[k]; rb := RemBucket(rem);
-        if cd.encoding then v := cp.coef[base + k] else v := 0;
-        {$ifdef PJA_COSTS}CostKind := ckZero;{$endif}
-        { when every interior position left must be nonzero, nothing to code }
-        if rem >= INTERIOR_LEFT[idx] then bit := 1
-        else if m.fast then begin
-          if m.chroma then bit := CodeAvg(cd, m.fz[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN],
-                                          m.zero4[(kb * MAG_BUCKETS + mbS) * REM_BUCKETS + rb], Ord(v <> 0))
-          else bit := CodeAvg(cd, m.fz[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbS],
-                              m.zero1[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN], Ord(v <> 0));
-        end else
-          bit := CodeMix5(cd, m.mxZero, k, m.zero5[(k * (NZ_BUCKETS + 1) + lz) * REM_BUCKETS + rb],
-                         m.zero1[(k * REM_BUCKETS + rb) * MAG_BUCKETS + mbN],
-                         m.zero2[(k * MAG_BUCKETS + mbI) * 4 + Clip(mbN, 3)],
-                         m.zero3[k * RATIO_BUCKETS + RATIO_OF[INTERIOR_LEFT[idx], rem]],
-                         m.zero4[(kb * MAG_BUCKETS + mbS) * REM_BUCKETS + rb],
-                         Ord(v <> 0));
-        if bit = 1 then begin
-          x := Abs(v);
-          {$ifdef PJA_COSTS}CostKind := ckExpo;{$endif}
-          if cd.encoding then e := BitLen(x) else e := 0;
-          i := 1;
-          while i < MAX_EXP_AC do begin
-            if m.fast then begin
-              if CodeAvg(cd, m.fx[((kb * REM_BUCKETS + rb) * MAG_BUCKETS + mbS) * MAX_EXP_AC + i - 1],
-                         m.expo1[(kb * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1], Ord(e > i)) = 0 then Break;
-            end else
-            if CodeMix(cd, m.mxExpo, (i - 1) * K_BUCKETS + kb,
-                       m.expo1[(kb * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1],
-                       m.expo2[(kb * MAG_BUCKETS + mbI) * MAX_EXP_AC + i - 1],
-                       m.expo3[(kb * REM_BUCKETS + rb) * MAX_EXP_AC + i - 1],
-                       m.expo4[mbS * MAX_EXP_AC + i - 1],
-                       Ord(e > i)) = 0 then Break;
-            Inc(i);
-          end;
-          {$ifdef PJA_COSTS}CostKind := ckMant;{$endif}
-          CodeMantissa(cd, m.mant1, kb, K_BUCKETS, m.mant, MAX_EXP_AC, i, x);
-          {$ifdef PJA_COSTS}CostKind := ckSign;{$endif}
-          if haveA then ctx := Sgn3(cp.coef[abase + k]) else ctx := 1;
-          if haveL then ctx := ctx * 3 + Sgn3(cp.coef[lbase + k]) else ctx := ctx * 3 + 1;
-          bit := cd.Code(m.sign[kb * 9 + ctx], Ord(v < 0));
-          if not cd.encoding then
-            if bit = 1 then cp.coef[base + k] := -x else cp.coef[base + k] := x;
-          Dec(rem);
-        end;
-        Inc(idx);
-      end;
-      if rem > 0 then Exit(False);   { only possible decoding garbage }
-
-      { this block dequantized: the interior now, row 0 and column 0 as they
-        are coded, the DC last }
-      { fm marks the nonzero positions of fb, so that the loops below only
-        visit those }
-      FillChar(fb, SizeOf(fb), 0);
-      fm := 0;
-      i := 0; left := n;
-      while (left > 0) and (i <= 48) do begin
-        k := INTERIOR[i];
-        if cp.coef[base + k] <> 0 then begin
-          fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);
-          fm := fm or (QWord(1) shl ZIGZAG[k]);
-          Dec(left);
-        end;
-        Inc(i);
-      end;
-
-      { 3. row 0 and column 0, interleaved by frequency, each predicted from
-        the neighbour across its edge: the pixels have to continue across
-        the boundary, which in 1D DCT terms fixes the one unknown term. }
-      for ep := 0 to EDGE_POS - 1 do begin
-        if ep and 1 = 0 then begin u := 0; w := ep div 2 + 1; end   { row 0, from above }
-        else begin u := ep div 2 + 1; w := 0; end;                     { column 0, from the left }
-        k := UNZIG[u * 8 + w];
-        pb := NO_PRED; predF := 0;
-        { the boundary, extrapolated half a pixel from both sides, has to meet:
-          3*E7 - E6 of the neighbour against 3*E0 - E1 of this block, where
-          only this coefficient is unknown (E0 and E1 weigh it the same) }
-        if (u = 0) and haveA then begin
-          sum := 0;
-          mm := fm and (COL_INTERIOR shl w);
-          while mm <> 0 do begin
-            pos := BsfQWord(mm); mm := mm and (mm - 1);
-            sum := sum + W3[pos shr 3] * fb[pos];
-          end;
-          predF := DivRound(rowC[bx].eg[w] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
-          tmp := DivRound(5 * predF, 8);
-          pb := Clip(FineLog(tmp), NO_PRED - 1);
-        end else if (w = 0) and haveL then begin
-          sum := 0;
-          mm := fm and (ROW_INTERIOR shl (u * 8));
-          while mm <> 0 do begin
-            pos := BsfQWord(mm); mm := mm and (mm - 1);
-            sum := sum + W3[pos and 7] * fb[pos];
-          end;
-          predF := DivRound(leftC.eg[u] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
-          tmp := DivRound(5 * predF, 8);
-          pb := Clip(FineLog(tmp), NO_PRED - 1);
-        end;
-        { the neighbours' same coefficient: only the full model's counters
-          use it }
-        if m.fast then mbN := NO_NEIGHBOUR
-        else begin
-          a := 0; l := 0;
-          if haveA then a := Abs(cp.coef[abase + k]);
-          if haveL then l := Abs(cp.coef[lbase + k]);
-          if haveA and haveL then mbN := Clip(BitLen(a + l), NO_NEIGHBOUR - 1)
-          else if haveA or haveL then mbN := Clip(BitLen(2 * (a + l)), NO_NEIGHBOUR - 1)
-          else mbN := NO_NEIGHBOUR;
-        end;
-        { the previous coefficient along this same edge }
-        if ep >= 2 then begin
-          if u = 0 then prevB := Clip(BitLen(cp.coef[base + UNZIG[w - 1]]), 7)
-          else prevB := Clip(BitLen(cp.coef[base + UNZIG[(u - 1) * 8]]), 7);
-        end else prevB := 7;
-        { the interior coefficient next to it, already coded }
-        if u = 0 then ib := Clip(FineLog(cp.coef[base + UNZIG[8 + w]]), 11)
-        else ib := Clip(FineLog(cp.coef[base + UNZIG[u * 8 + 1]]), 11);
-        if cd.encoding then v := cp.coef[base + k] else v := 0;
-        {$ifdef PJA_COSTS}CostKind := ckEZero;{$endif}
-        if m.fast then
-          bit := CodeAvg(cd, m.fez[((ep * NZ_BUCKETS + nzB) * 8 + prevB) * PRED_BUCKETS + pb],
-                         m.ezero5[(ep * 12 + ib) * 4 + Clip(pb, 3)], Ord(v <> 0))
-        else
-        bit := CodeMix5(cd, m.mxEZero, ep, m.ezero5[(ep * 12 + ib) * 4 + Clip(pb, 3)],
-                       m.ezero1[ep * PRED_BUCKETS + pb],
-                       m.ezero2[ep * NZ_BUCKETS + nzB],
-                       m.ezero3[(ep * 8 + prevB) * PRED_BUCKETS + pb],
-                       m.ezero4[ep * MAG_BUCKETS + mbN],
-                       Ord(v <> 0));
-        if bit = 1 then begin
-          x := Abs(v);
-          {$ifdef PJA_COSTS}CostKind := ckEExpo;{$endif}
-          if cd.encoding then e := BitLen(x) else e := 0;
-          i := 1;
-          while i < MAX_EXP_AC do begin
-            if m.fast then begin
-              if m.chroma then
-                ctx := ((ep * PRED_BUCKETS + pb) * NZ_BUCKETS + nzB) * 8 * MAX_EXP_AC + i - 1
-              else
-                ctx := (((ep * NZ_BUCKETS + nzB) * PRED_BUCKETS + pb) * 8 + prevB) * MAX_EXP_AC + i - 1;
-              if CodeAvg(cd, m.fex[ctx], m.eexpo5[(ep * 12 + ib) * MAX_EXP_AC + i - 1], Ord(e > i)) = 0 then Break;
-            end else
-            if CodeMix5(cd, m.mxEExpo, (i - 1) * EDGE_POS + ep, m.eexpo5[(ep * 12 + ib) * MAX_EXP_AC + i - 1],
-                       m.eexpo1[(ep * PRED_BUCKETS + pb) * MAX_EXP_AC + i - 1],
-                       m.eexpo2[(ep * MAG_BUCKETS + mbN) * MAX_EXP_AC + i - 1],
-                       m.eexpo3[(pb * 8 + prevB) * MAX_EXP_AC + i - 1],
-                       m.eexpo4[(ep * NZ_BUCKETS + nzB) * MAX_EXP_AC + i - 1],
-                       Ord(e > i)) = 0 then Break;
-            Inc(i);
-          end;
-          {$ifdef PJA_COSTS}CostKind := ckEMant;{$endif}
-          CodeMantissa(cd, m.emant1, pb, PRED_BUCKETS, m.mant, MAX_EXP_AC, i, x);
-          {$ifdef PJA_COSTS}CostKind := ckESign;{$endif}
-          if pb = NO_PRED then sg := 1 else sg := Sgn3(predF);
-          bit := cd.Code(m.esign[((ep and 1) * 3 + sg) * PRED_BUCKETS + pb], Ord(v < 0));
-          if not cd.encoding then
-            if bit = 1 then cp.coef[base + k] := -x else cp.coef[base + k] := x;
-        end;
-      end;
-
-      for ep := 0 to EDGE_POS - 1 do begin
-        if ep and 1 = 0 then pos := ep div 2 + 1 else pos := (ep div 2 + 1) * 8;
-        k := UNZIG[pos];
-        if cp.coef[base + k] <> 0 then begin
-          fb[pos] := Dequant(cp.coef[base + k], q[k]);
-          fm := fm or (QWord(1) shl pos);
-        end;
-      end;
-
-      { 4. the DC, estimated pixel by pixel along both edges (Lepton's idea):
-        each boundary pixel, extrapolated with its gradient from the
-        neighbour and from this block (whose AC is all known now), says what
-        the DC must be. The mean of up to 16 estimates is the prediction,
-        and their spread the context. }
-      { this block's boundary without its DC, extrapolated the same way:
-        5*P0 - P1, per column (left edge) and per row (top edge) }
-      { linear in the coefficients, like FillCaches:
-          pc[i] = sum over u of B[u,i] * (sum over w of W5[w] fb[u,w])
-          pr[i] = sum over w of B[w,i] * (sum over u of W5[u] fb[u,w]) }
-      for i := 0 to 7 do begin pc[i] := 0; pr[i] := 0; end;
-      mm := fm;
-      while mm <> 0 do begin
-        pos := BsfQWord(mm);
-        mm := mm and (mm - 1);
-        AddKernels(fb[pos], KER_LEFT[pos], KER_TOP[pos], pc, pr);
-      end;
-      nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
-      if haveL then begin
-        for i := 0 to 7 do begin
-          est := (leftC.px[i] - pc[i]) div 4;
-          ests[nest] := est; Inc(nest);
-          if est < lo then lo := est;
-          if est > hi then hi := est;
-        end;
-      end;
-      if haveA then begin
-        for i := 0 to 7 do begin
-          est := (rowC[bx].px[i] - pr[i]) div 4;
-          ests[nest] := est; Inc(nest);
-          if est < lo then lo := est;
-          if est > hi then hi := est;
-        end;
-      end;
-      { the middle half of the sorted estimates }
-      if nest = 16 then Split16(ests) else if nest = 8 then Split8(ests);
-      total := 0;
-      for i := nest div 4 to nest - 1 - nest div 4 do total := total + ests[i];
-      if nest > 0 then nest := nest - 2 * (nest div 4);
-      { a pixel gets DC * BASIS[0,0]^2: back to a quantized DC }
-      if nest > 0 then begin
-        pred := DivRound(total, Int64(nest) * BASIS[0, 0] * BASIS[0, 0] * q[0]);
-        tmp := DivRound(hi - lo, Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]);
-        ctx := Clip(FineLog(tmp), ACT_BUCKETS - 2);
-      end else begin pred := 0; ctx := ACT_BUCKETS - 1; end;
-      if pred > 32767 then pred := 32767;
-      if pred < -32767 then pred := -32767;
-      {$ifdef PJA_COSTS}CostKind := ckDc;{$endif}
-      if cd.encoding then res := cp.coef[base] - Integer(pred) else res := 0;
-      { the neighbours' DC residuals, and how many neighbours there are }
-      rb2 := 0; nbs := 0;
-      if haveA then begin Inc(rb2, dcr[(by - 1) * cp.bw + bx]); Inc(nbs); end;
-      if haveL then begin Inc(rb2, dcr[by * cp.bw + bx - 1]); Inc(nbs); end;
-      rb2 := Clip(rb2, 19);
-      if m.fast then
-        bit := cd.Code(m.fdz[(rb2 * ACT_BUCKETS + ctx) * 3 + nbs], Ord(res <> 0))
-      else
-      bit := CodeMix(cd, m.mxDcZero, ctx, m.dcZero[ctx], m.dz2[rb2], m.dz3[nzB * 8 + ctx div 3],
-                     m.dz4[ctx * 3 + nbs], Ord(res <> 0));
-      if bit = 1 then begin
-        x := Abs(res);
-        if cd.encoding then e := BitLen(x) else e := 0;
-        i := 1;
-        while i < MAX_EXP_DC do begin
-          if m.fast then begin
-            if cd.Code(m.fdx[(ctx * 3 + nbs) * MAX_EXP_DC + i - 1], Ord(e > i)) = 0 then Break;
-          end else
-          if CodeMix(cd, m.mxDcExpo, i - 1, m.dcExpo[ctx * MAX_EXP_DC + i - 1], m.dx2[rb2 * MAX_EXP_DC + i - 1],
-                     m.dx3[(nzB * 8 + ctx div 3) * MAX_EXP_DC + i - 1],
-                     m.dx4[(ctx * 3 + nbs) * MAX_EXP_DC + i - 1], Ord(e > i)) = 0 then Break;
-          Inc(i);
-        end;
-        CodeMantissa(cd, m.dcMant1, ctx, ACT_BUCKETS, m.dcMant, MAX_EXP_DC, i, x);
-        bit := cd.Code(m.dcSign[ctx], Ord(res < 0));
-        if bit = 1 then res := -x else res := x;
-      end;
-      dcr[by * cp.bw + bx] := Clip(FineLog(res), 15);
-      if not cd.encoding then begin
-        x := Integer(pred) + res;
-        if (x < -32767) or (x > 32767) then Exit(False);
-        cp.coef[base] := x;
-      end;
-      fb[0] := Dequant(cp.coef[base], q[0]);
-      FillCaches(fb, fm or 1, rightC, rowC[bx]);
-      leftC := rightC;
-    end;
-  nzOut := nzc;
-  Result := True;
+  Result := cd.Code(c, bit);
 end;
+
+function DecodeWith(var dc: TArithDecoder; prob: Cardinal): Integer; inline;
+var xm: Cardinal; b: Byte;
+begin
+  { prob is a counter's or a squashed one: already in [1, 65535] }
+  xm := dc.x1 + Cardinal((QWord(dc.x2 - dc.x1) * prob) shr 16);
+  if dc.x <= xm then begin Result := 1; dc.x2 := xm; end
+  else begin Result := 0; dc.x1 := xm + 1; end;
+  while ((dc.x1 xor dc.x2) and $FF000000) = 0 do begin
+    dc.x1 := dc.x1 shl 8;
+    dc.x2 := (dc.x2 shl 8) or 255;
+    if dc.live <> nil then b := dc.live.Get(dc.p)
+    else if (dc.p >= 0) and (dc.p < Length(dc.d)) then b := dc.d[dc.p] else b := 0;
+    Inc(dc.p);
+    dc.x := (dc.x shl 8) or b;
+  end;
+end;
+
+procedure Learn(var c: TAdaptiveBit; bit: Integer); inline;
+var target: Integer; q: Int64;
+begin
+  if bit <> 0 then target := PROB_ONE - 1 else target := 1;
+  q := Int64(target - c.p) * RECIPROCAL[c.n];
+  q := SarInt64(q + (SarInt64(q, 63) and $FFFF), 16);
+  c.p := c.p + q;
+  if c.n < COUNTER_LIMIT then Inc(c.n);
+end;
+
+function DOne(var dc: TArithDecoder; var c: TAdaptiveBit): Integer;
+begin
+  Result := DecodeWith(dc, c.p);
+  Learn(c, Result);
+end;
+
+function DAvg(var dc: TArithDecoder; var a, b: TAdaptiveBit): Integer;
+begin
+  Result := DecodeWith(dc, Cardinal(SQUASH_T[(STRETCH_T[a.p shr 4] + STRETCH_T[b.p shr 4]) div 2 + 2048]) shl 4);
+  Learn(a, Result); Learn(b, Result);
+end;
+
+function DecOne(var cd: TCoder; var c: TAdaptiveBit; bit: Integer): Integer; inline;
+begin
+  Result := DOne(cd.dec, c);
+end;
+
+function DecAvg(var cd: TCoder; var a, b: TAdaptiveBit; bit: Integer): Integer; inline;
+begin
+  Result := DAvg(cd.dec, a, b);
+end;
+
+{$macro on}
+{ the full model and anything not specialized }
+{$define CC_NAME:=CodeComponent}{$define CC_FAST:=m.fast}{$define CC_ENC:=cd.encoding}
+{$define CC_AVG:=CodeAvg}{$define CC_ONE:=CodeOne}
+{$I pjacoef.inc}
+{ the fast model, encoding }
+{$define CC_NAME:=CodeComponentFast}{$define CC_FAST:=True}
+{$I pjacoef.inc}
+{ the fast model, decoding }
+{$define CC_NAME:=CodeComponentFastDec}{$define CC_ENC:=False}
+{$define CC_AVG:=DecAvg}{$define CC_ONE:=DecOne}
+{$I pjacoef.inc}
+{$undef CC_NAME}{$undef CC_FAST}{$undef CC_ENC}{$undef CC_AVG}{$undef CC_ONE}
+{$macro off}
 
 function BandCount(const j: TJpeg): Integer;
 var total: Int64; c: Integer;
@@ -1298,6 +1031,15 @@ threadvar
 
 function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean): Boolean;
 var c, nb: Integer; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
+  { the variant compiled for the model and the direction }
+  function CC(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
+              const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
+              out nzOut: TByteArr): Boolean;
+  begin
+    if not m.fast then Result := CodeComponent(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
+    else if cd.encoding then Result := CodeComponentFast(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
+    else Result := CodeComponentFastDec(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut);
+  end;
 begin
   nb := BandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
@@ -1306,17 +1048,17 @@ begin
   lumaNz := nil;
   for c := 0 to High(j.comp) do begin
     if c = 0 then
-      ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolLuma, [], 0, 0, 0,
+      ok := CC(cd, j.comp[c], j.qt[j.comp[c].tq], PoolLuma, [], 0, 0, 0,
                           m0 * j.comp[c].v, m1 * j.comp[c].v, lumaNz)
     else begin
       { how many luma blocks one of ours spans; a component sampled finer
         than the luma (H or V above it) maps to its first block }
       sx := j.comp[0].h div j.comp[c].h; sy := j.comp[0].v div j.comp[c].v;
       if (sx < 1) or (sy < 1) or (j.comp[c].bw * sx > j.comp[0].bw) or (j.comp[c].bh * sy > j.comp[0].bh) then
-        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, [], 0, 0, 0,
+        ok := CC(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, [], 0, 0, 0,
                             m0 * j.comp[c].v, m1 * j.comp[c].v, other)
       else
-        ok := CodeComponent(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, lumaNz, j.comp[0].bw, sx, sy,
+        ok := CC(cd, j.comp[c], j.qt[j.comp[c].tq], PoolChroma, lumaNz, j.comp[0].bw, sx, sy,
                             m0 * j.comp[c].v, m1 * j.comp[c].v, other);
     end;
     if not ok then Exit(False);
