@@ -55,6 +55,10 @@ measured against the old spelling.
   one. There is no mode that does both; shell globs separate them.
 - **The output's type comes from its content**: a JPEG-LS file comes back as
   `.jls`, a JPEG as `.jpg`, whatever the `.pja` is called.
+- **Never larger than the original by more than 32 bytes**: a file the codec
+  does not make smaller is stored as it is, and `a` and `list` say so.
+- **A write the system refuses is reported in its own words**, with the
+  error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (44 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (46 cells: round trips, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, every usage error).

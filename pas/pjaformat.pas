@@ -26,8 +26,10 @@ const
     .pjg, both dropped before being published. }
   VERSION = 3;
 
-  { no flag is defined yet }
-  KNOWN_FLAGS = 0;
+  { the payload is the original itself, stored: the codec would not have
+    made it smaller }
+  FLAG_STORED = 1;
+  KNOWN_FLAGS = FLAG_STORED;
 
   { magic(4) + version(1) + flags(1) + reserved(2) }
   HEADER_SIZE = 8;
@@ -52,11 +54,13 @@ type
   TPja = record
     orig_size: QWord;   { of the original file }
     hash: THash16;      { BLAKE3-128 of the original file }
-    payload: TBytes;    { the codec stream }
+    stored: Boolean;    { FLAG_STORED: the payload is the original }
+    payload: TBytes;    { the codec stream, or the original }
   end;
 
-{ The descriptor rules, shared by the reader and the writer. }
-function ValidateDescriptor(origSize: QWord; payloadSize: QWord): TPjaResult;
+{ The descriptor rules, shared by the reader and the writer. A stored
+  payload is the original, so its length has to be orig_size exactly. }
+function ValidateDescriptor(origSize: QWord; payloadSize: QWord; stored: Boolean = False): TPjaResult;
 
 { Header, then descriptor; only then is the payload handed out. }
 function Open(const data: TBytes; out p: TPja): TPjaResult;
@@ -66,7 +70,7 @@ function Open(const data: TBytes; out p: TPja): TPjaResult;
 function WrittenLength(payloadSize: Int64): Int64;
 
 function WritePja(const payload: TBytes; const hash: THash16; origSize: QWord;
-                  out bytes: TBytes): TPjaResult;
+                  out bytes: TBytes; stored: Boolean = False): TPjaResult;
 
 implementation
 
@@ -110,12 +114,13 @@ end;
 
 { ------------------------------------------------------------------------ }
 
-function ReadHeader(const data: TBytes): TPjaResult;
-var i: Integer; ver, flags: Byte;
+function ReadHeader(const data: TBytes; out flags: Byte): TPjaResult;
+var i: Integer; ver: Byte;
    { NOT `version`: Pascal is case-insensitive, and a variable `version`
      shadows the constant VERSION. It happened in the previous container: the
      comparison became `version > version`, always false. }
 begin
+  flags := 0;
   if Length(data) < HEADER_SIZE then Exit(PjaFail(peShortFile));
   for i := 0 to 3 do
     if data[i] <> MAGIC[i] then Exit(PjaFail(peNotPja));
@@ -128,8 +133,13 @@ begin
   Result := PjaFail(peNone);
 end;
 
-function ValidateDescriptor(origSize: QWord; payloadSize: QWord): TPjaResult;
+function ValidateDescriptor(origSize: QWord; payloadSize: QWord; stored: Boolean): TPjaResult;
 begin
+  if stored then begin
+    if payloadSize = 0 then Exit(PjaFail(pePayloadOutOfRange));
+    if origSize <> payloadSize then Exit(PjaFail(peBadOrigSize));
+    Exit(PjaFail(peNone));
+  end;
   if payloadSize < MIN_PAYLOAD then Exit(PjaFail(pePayloadOutOfRange));
   { An empty JPEG does not exist, and above High(Int64) no stream size can
     hold it. }
@@ -144,20 +154,21 @@ end;
   read before validation failed. }
 procedure Clear(out p: TPja);
 begin
-  p.orig_size := 0; FillChar(p.hash, SizeOf(p.hash), 0); p.payload := nil;
+  p.orig_size := 0; FillChar(p.hash, SizeOf(p.hash), 0); p.stored := False; p.payload := nil;
 end;
 
 function Open(const data: TBytes; out p: TPja): TPjaResult;
-var rest: SizeInt;
+var rest: SizeInt; flags: Byte;
 begin
   Clear(p);
-  Result := ReadHeader(data);
+  Result := ReadHeader(data, flags);
   if not Result.Ok then Exit;
   rest := Length(data) - HEADER_SIZE;
   if rest < DESCRIPTOR_SIZE then Exit(PjaFail(peShortFile));
   p.orig_size := U64(data, HEADER_SIZE);
   Move(data[HEADER_SIZE + 8], p.hash[0], 16);
-  Result := ValidateDescriptor(p.orig_size, QWord(rest - DESCRIPTOR_SIZE));
+  p.stored := (flags and FLAG_STORED) <> 0;
+  Result := ValidateDescriptor(p.orig_size, QWord(rest - DESCRIPTOR_SIZE), p.stored);
   if not Result.Ok then begin Clear(p); Exit; end;
   { Copy does NOT range-check, not even with $R+: it trims silently. The
     length is already validated above; this is what actually remains. }
@@ -175,17 +186,17 @@ begin
 end;
 
 function WritePja(const payload: TBytes; const hash: THash16; origSize: QWord;
-                  out bytes: TBytes): TPjaResult;
+                  out bytes: TBytes; stored: Boolean): TPjaResult;
 var total: Int64; i: Integer;
 begin
   bytes := nil;
-  Result := ValidateDescriptor(origSize, Length(payload));
+  Result := ValidateDescriptor(origSize, Length(payload), stored);
   if not Result.Ok then Exit;
   total := WrittenLength(Length(payload));
   if total < 0 then Exit(PjaFail(peOverflow));
   SetLength(bytes, total);
   for i := 0 to 3 do bytes[i] := MAGIC[i];
-  bytes[4] := VERSION; bytes[5] := 0; bytes[6] := 0; bytes[7] := 0;
+  bytes[4] := VERSION; bytes[5] := Ord(stored) * FLAG_STORED; bytes[6] := 0; bytes[7] := 0;
   PutU64(bytes, HEADER_SIZE, origSize);
   Move(hash[0], bytes[HEADER_SIZE + 8], 16);
   if Length(payload) > 0 then Move(payload[0], bytes[HEADER_SIZE + DESCRIPTOR_SIZE], Length(payload));

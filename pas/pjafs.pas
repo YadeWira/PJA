@@ -102,6 +102,8 @@ begin Result := GetFileAttributesW(PWideChar(W(p))) <> INVALID_FILE_ATTRIBUTES; 
 
 function LastError: LongInt; begin Result := LongInt(GetLastError); end;
 const E_NOT_FOUND = ERROR_FILE_NOT_FOUND; E_NOT_FOUND2 = ERROR_PATH_NOT_FOUND;
+  { something that is not a folder where one is needed }
+  E_NOT_DIR = ERROR_DIRECTORY;
 
 function MakeDir(const p: RawByteString): Boolean;
 begin Result := CreateDirectoryW(PWideChar(W(p)), nil); end;
@@ -146,6 +148,7 @@ begin Result := (Pos(#0, p) = 0) and (fpLstat(PChar(p), st) = 0); end;
 
 function LastError: LongInt; begin Result := fpgeterrno; end;
 const E_NOT_FOUND = ESysENOENT; E_NOT_FOUND2 = ESysENOENT;
+  E_NOT_DIR = ESysENOTDIR;
 
 function MakeDir(const p: RawByteString): Boolean;
 begin Result := fpMkdir(PChar(p), &777) = 0; end;
@@ -247,7 +250,9 @@ begin
   code := LastError;
   if (code <> E_NOT_FOUND) and (code <> E_NOT_FOUND2) then begin
     Result := IsDirectory(p);
-    if Result then code := 0;
+    { the name is taken by something that is not a folder: say that, not
+      "it exists" }
+    if Result then code := 0 else if EntryExists(p) then code := E_NOT_DIR;
     Exit;
   end;
   if not Parent(p, q) then begin code := -1; Exit(False); end;
@@ -255,7 +260,7 @@ begin
   if MakeDir(p) then begin code := 0; Exit(True); end;
   code := LastError;
   Result := IsDirectory(p);
-  if Result then code := 0;
+  if Result then code := 0 else if EntryExists(p) then code := E_NOT_DIR;
 end;
 
 { First free `<path>.corrupt[.N]`, looking at the entry and not at what it

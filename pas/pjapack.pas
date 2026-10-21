@@ -1,7 +1,9 @@
 { A whole file to a .pja and back: the codec (pjacodec) inside the format
   (pjaformat), in the order doc/FORMAT.md gives.
 
-  Pack: compress (which verifies its own stream), hash the original, write.
+  Pack: compress (which verifies its own stream), hash the original, write;
+  a stream no smaller than the original is not worth it, and the original
+  is stored instead (pjaformat.FLAG_STORED).
   Unpack: open the format, refuse a declared size above the caller's cap,
   decode with that size as the decoder's cap, check the length and the hash.
   What comes out of Unpack with ukOk is the original, byte for byte. }
@@ -77,7 +79,10 @@ begin
   Result := PackFail(ukOk);
   Result.codec := Compress(original, stream, True, threads, fast);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
-  Result.fmt := WritePja(stream, Blake3_128(original), Length(original), pja);
+  if Length(stream) >= Length(original) then
+    Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True)
+  else
+    Result.fmt := WritePja(stream, Blake3_128(original), Length(original), pja);
   if not Result.fmt.Ok then begin pja := nil; Result.err := ukFormat; end;
 end;
 
@@ -95,8 +100,11 @@ begin
   { the raw part of the stream can never be longer than the whole file }
   cap := p.orig_size;
   if cap > QWord(High(SizeInt)) then cap := QWord(High(SizeInt));
-  Result.codec := Decompress(p.payload, original, SizeInt(cap), threads);
-  if not Result.codec.Ok then begin original := nil; Result.err := ukCodec; Exit; end;
+  if p.stored then original := p.payload
+  else begin
+    Result.codec := Decompress(p.payload, original, SizeInt(cap), threads);
+    if not Result.codec.Ok then begin original := nil; Result.err := ukCodec; Exit; end;
+  end;
   if QWord(Length(original)) <> p.orig_size then begin original := nil; Exit(PackFail(ukSizeMismatch)); end;
   actual := Blake3_128(original);
   if not CompareMem(@actual[0], @expected[0], SizeOf(THash16)) then Result.err := ukHashMismatch;

@@ -36,6 +36,9 @@ check "--fast: every JPEG back byte for byte" bash -c "
   '$PJA' a -q --fast '$W'/in/*.jpg -o '$W/fast/' && '$PJA' x -q '$W'/fast/*.pja -o '$W/fastx/' &&
   for f in '$W'/in/*.jpg; do cmp -s \"\$f\" '$W/fastx/'\$(basename \"\$f\") || exit 1; done"
 check "--fast with x: rc 2" test "$(rc "$PJA" x --fast "$W/pja/grayscale.pja" -o "$W/fx.jpg")" -eq 2
+check "a file the codec cannot shrink is stored as is, and says so" bash -c "
+  '$PJA' a -f '$W/in/gray8.jls' -o '$W/st.pja' | grep -q 'stored as is' && '$PJA' list '$W/st.pja' | grep -q 'stored as is' &&
+  '$PJA' x -q '$W/st.pja' -o '$W/st.jls' && cmp -s '$W/in/gray8.jls' '$W/st.jls'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"
@@ -54,6 +57,9 @@ check "a dangling link also takes the name" test "$(rc "$PJA" x "$W/g.pja")" -eq
 check "  and nothing is created where it points" test ! -e "$W/nowhere"
 rm -f "$W/g.jpg"
 
+echo plain > "$W/plain"
+check "a write the system refuses: its own words, not just a number" bash -c "
+  ! '$PJA' a '$W/in/grayscale.jpg' -o '$W/plain/x.pja' 2> '$W/err.txt' && grep -q 'could not write it: [A-Za-z]' '$W/err.txt'"
 echo "--- what does not verify"
 python3 -I -c "
 import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[20] ^= 1; open(sys.argv[2], 'wb').write(d)" "$W/g.pja" "$W/h.pja"

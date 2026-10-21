@@ -29,12 +29,13 @@ begin Result := Copy(x, 0, Length(x)); Result[i] := v; end;
 
 { A .pja built by hand, without going through the writer: so the reader sees
   descriptors the writer refuses to produce. }
-function ByHand(origSize: QWord; const hash: THash16; const payload: TBytes): TBytes;
+function ByHand(origSize: QWord; const hash: THash16; const payload: TBytes; stored: Boolean = False): TBytes;
 var k: Integer;
 begin
   Result := nil; SetLength(Result, HEADER_SIZE + DESCRIPTOR_SIZE + Length(payload));
   for k := 0 to 3 do Result[k] := MAGIC[k];
   Result[4] := VERSION;
+  if stored then Result[5] := FLAG_STORED;
   for k := 0 to 7 do Result[8 + k] := Byte((origSize shr (8 * k)) and $FF);
   Move(hash[0], Result[16], 16);
   if Length(payload) > 0 then Move(payload[0], Result[32], Length(payload));
@@ -67,7 +68,12 @@ begin
     pr := Unpack(b, High(QWord), back, hx);
     Check(pr.Ok and Same(back, orig), '  Unpack gives the original byte for byte');
   end;
-  orig := ReadAll(files[0]); Pack(orig, b); Open(b, p); h := p.hash;
+  { a sample the codec does shrink, so that its .pja is a codec stream }
+  f := files[0];
+  for k := 0 to files.Count - 1 do
+    if ExtractFileName(files[k]) = 'color_plasma.jpg' then f := files[k];
+  orig := ReadAll(f); Pack(orig, b); Open(b, p); h := p.hash;
+  Check(not p.stored, 'the header and descriptor cases run on a codec stream');
 
   Writeln('--- Unpack: the caller''s cap and what does not verify');
   pr := Unpack(b, Length(orig) - 1, back, hx);
@@ -93,8 +99,9 @@ begin
   CheckR(Open(WithByte(b, 4, 2), p), 'OldVersion(2)', 'version 2 (the encrypted wrapper of .pjg)');
   CheckR(Open(WithByte(b, 4, 1), p), 'OldVersion(1)', 'version 1 (the dropped container)');
   CheckR(Open(WithByte(b, 4, 0), p), 'OldVersion(0)', 'version 0');
-  for k := 0 to 7 do
+  for k := 1 to 7 do
     CheckR(Open(WithByte(b, 5, 1 shl k), p), 'UnknownFlag', Format('flag bit %d', [k]));
+  CheckR(Open(WithByte(b, 5, FLAG_STORED), p), 'BadOrigSize', 'the stored flag on a codec stream: its length is not orig_size');
   CheckR(Open(WithByte(b, 6, 1), p), 'ReservedNotZero', 'reserved byte 6');
   CheckR(Open(WithByte(b, 7, $80), p), 'ReservedNotZero', 'reserved byte 7');
   CheckR(Open(Filled(200, $41), p), 'NotPja', 'garbage 0x41');
@@ -128,6 +135,45 @@ begin
     if not r.Ok then Check((p.orig_size = 0) and (Length(p.payload) = 0), '  and the reader leaves nothing read');
   end;
   Check(symmetric = Length(cases), Format('writer and reader agree on %d of %d', [symmetric, Length(cases)]));
+
+  Writeln('--- stored as is');
+  { the descriptor of a stored payload, in the writer and the reader }
+  other := Filled(100, $5C);
+  for i := 0 to 3 do begin
+    case i of
+      0: begin n := 100; f := 'None'; end;
+      1: begin n := 99; f := 'BadOrigSize'; end;
+      2: begin n := 101; f := 'BadOrigSize'; end;
+    else begin n := 0; f := 'BadOrigSize'; end;
+    end;
+    rw := WritePja(other, h, n, b, True);
+    r := Open(ByHand(n, h, other, True), p);
+    CheckR(rw, f, Format('stored, 100 B payload, orig_size %d: the writer', [n]));
+    CheckR(r, f, '  and the reader');
+  end;
+  CheckR(WritePja(nil, h, 0, b, True), 'PayloadOutOfRange', 'stored, empty');
+  WritePja(other, h, 100, b, True);
+  r := Open(b, p);
+  Check(r.Ok and p.stored and Same(p.payload, other), 'stored: comes back flagged, the payload as it was');
+  { a file the codec does not make smaller is stored, and comes back }
+  f := '';
+  for k := 0 to files.Count - 1 do
+    if ExtractFileName(files[k]) = 'gray8.jls' then f := files[k];
+  Check(f <> '', 'the sample the codec cannot shrink (gray8.jls) is there');
+  if f <> '' then begin
+    orig := ReadAll(f);
+    pr := Pack(orig, b);
+    r := Open(b, p);
+    Check(pr.Ok and r.Ok and p.stored and Same(p.payload, orig), '  Pack stores it as it is');
+    Check(Length(b) = Length(orig) + HEADER_SIZE + DESCRIPTOR_SIZE, '  32 bytes more than the original');
+    pr := Unpack(b, High(QWord), back, hx);
+    Check(pr.Ok and Same(back, orig), '  Unpack gives it back');
+    other := WithByte(b, Length(b) - 1, b[Length(b) - 1] xor 1);
+    pr := Unpack(other, High(QWord), back, hx);
+    Check(pr.err = ukHashMismatch, '  a bit of it changed: HashMismatch');
+    pr := Unpack(b, Length(orig) - 1, back, hx);
+    Check(pr.err = ukTooLarge, '  above the caller''s cap: TooLarge');
+  end;
 
   Writeln('--- the hash is just data');
   { The format recomputes nothing over the payload: the hash is of the

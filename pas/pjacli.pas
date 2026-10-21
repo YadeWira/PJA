@@ -276,7 +276,9 @@ begin
   if keepCorrupt then om := omKeep else om := omDelete;
   r := WriteVerified(path, data, expected, om, force, o);
   if not r.Ok then begin
-    Fail(path + ': could not write it (' + r.Text + ')');
+    { the system's own words for its error, and its number }
+    if r.code >= 0 then Fail(path + ': could not write it: ' + SysErrorMessage(r.code) + ' (' + r.Text + ')')
+    else Fail(path + ': could not write it (' + r.Text + ')');
     Exit;
   end;
   case o.kind of
@@ -284,6 +286,11 @@ begin
     ocDeleted: Fail(path + ': does not verify; nothing written');
     ocKept: Fail(path + ': does not verify; kept as ' + o.path);
   end;
+end;
+
+function StoredNote(const pja: TBytes): string;
+begin
+  if (Length(pja) > 5) and ((pja[5] and FLAG_STORED) <> 0) then Result := '  (stored as is)' else Result := '';
 end;
 
 procedure CompressOne(const f: string);
@@ -296,7 +303,9 @@ begin
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) and not quiet then
     Say(f + ' -> ' + path + '  ' + Human(Length(d)) + ' -> ' + Human(Length(pja)) +
-        Format('  %.2f%%', [100 * Length(pja) / Length(d)]));
+        Format('  %.2f%%', [100 * Length(pja) / Length(d)]) +
+        { the codec would not have made it smaller }
+        StoredNote(pja));
 end;
 
 procedure ExtractOne(const f: string);
@@ -324,8 +333,8 @@ begin
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   hex := '';
   for i := 0 to 15 do hex := hex + LowerCase(IntToHex(p.hash[i], 2));
-  Say(f + '  original ' + IntToStr(p.orig_size) + ' B, stored ' + IntToStr(Length(d)) + ' B' +
-      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + '  blake3-128 ' + hex);
+  Say(f + '  original ' + IntToStr(p.orig_size) + ' B, .pja ' + IntToStr(Length(d)) + ' B' +
+      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + '  blake3-128 ' + hex);
 end;
 
 var

@@ -87,6 +87,11 @@ Check ((Test-Path 'cli\h.jpg.corrupt') -and -not (Test-Path 'cli\h.jpg')) '--kee
 Check (($LASTEXITCODE -eq 1) -and -not (Test-Path 'cli\m.jpg')) '--max-output below the original: refused'
 & .\pja.exe a -th4 x.jpg 2>$null; Check ($LASTEXITCODE -eq 2) 'glued -th4: rc 2'
 & .\pja.exe list 'cli\g.pja' > cli\list.txt; Check ((Get-Content cli\list.txt) -match 'original') 'list'
+$o = & .\pja.exe a -f 'in\gray8.jls' -o 'cli\st.pja'
+Check (($LASTEXITCODE -eq 0) -and ($o -match 'stored as is')) 'a file the codec cannot shrink: stored as is'
+Set-Content -Path 'cli\plain' -Value 'x'
+$e = & .\pja.exe a 'in\grayscale.jpg' -o 'cli\plain\x.pja' 2>&1 | Out-String
+Check (($LASTEXITCODE -eq 1) -and ($e -match 'could not write it: [A-Za-z]')) "a write the system refuses, in its words: $($e.Trim())"
 New-Item -ItemType Directory -Force -Path 'cli\dir' | Out-Null
 & .\pja.exe a -q 'cli\dir' 2>$null; Check ($LASTEXITCODE -eq 1) 'a directory as input: rc 1'
 

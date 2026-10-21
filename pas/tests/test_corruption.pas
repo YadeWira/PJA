@@ -65,7 +65,10 @@ begin
   Inc(c.cells);
   r := Open(data, p);
   if not r.Ok then begin Inc(c.rejected); Note(c.errors, r.Text); Exit; end;
-  if (p.orig_size <> original.orig_size) or not CompareMem(@p.hash, @original.hash, 16) then Inc(c.desc_differs)
+  { the stored flag is part of what a .pja says: off on a stored file, the
+    same bytes read as a codec stream }
+  if (p.orig_size <> original.orig_size) or (p.stored <> original.stored) or
+     not CompareMem(@p.hash, @original.hash, 16) then Inc(c.desc_differs)
   else if not Same(p.payload, original.payload) then Inc(c.payload_differs)
   else Inc(c.reads_same);
 end;

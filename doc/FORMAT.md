@@ -28,14 +28,19 @@ it.
 HEADER - 8 B
   magic        4 B   "PJA\x01"
   version      1 B   3        (1 was a multi-file container, 2 the encrypted .pjg wrapper)
-  flags        1 B   0: none is defined
+  flags        1 B   bit 0: stored (the payload is the original itself); the rest 0
   reserved     2 B   0
 
 DESCRIPTOR - 24 B
   orig_size    u64 LE   the original's length
   hash         16 B     BLAKE3-128 of the original
 
-PAYLOAD - the rest: the codec stream
+PAYLOAD - the rest: the codec stream, or with the stored flag the original
+
+A file the codec does not make smaller (a JPEG-LS file of noise, for
+instance) is stored as it is: 32 bytes more than the original, never
+more. Its descriptor is stricter: `orig_size` has to be the payload's
+length exactly.
 ```
 
 The hash is BLAKE3 truncated to 128 bits, in Pascal (`pas/pjablake3.pas`),
@@ -79,7 +84,8 @@ Each row is a case with its expected result, and it is in the tests.
 | wrong magic, garbage, zeros | `NotPja` |
 | version 4 or higher | `FutureVersion(n)` |
 | versions 0, 1 and 2 | `OldVersion(n)` |
-| any flag | `UnknownFlag` |
+| any flag but bit 0 | `UnknownFlag` |
+| the stored flag on a codec stream (its length is not `orig_size`) | `BadOrigSize` |
 | a reserved byte other than 0 | `ReservedNotZero` |
 
 ### 3.2 Descriptor (in the writer **and** in the reader, with the same verdict)
@@ -91,12 +97,14 @@ Each row is a case with its expected result, and it is in the tests.
 | `orig_size` = 65,536 x payload | accepted |
 | `orig_size` = 65,536 x payload + 1 | `RatioExceeded`, without multiplying (by dividing: no overflow) |
 | 5 B payload | `PayloadOutOfRange` |
+| stored: `orig_size` other than the payload's length | `BadOrigSize` |
+| stored: an empty payload | `PayloadOutOfRange` |
 
 ### 3.3 Corruption (`test_corruption`)
 
 - **The format alone:** every bit of the 19 sample files packed, every value
   of the header and descriptor bytes, every truncation and appended data:
-  1,030,417 variants. None **reads the same** as the original: every byte
+  1,029,301 variants. None **reads the same** as the original: every byte
   means something. Those the format cannot reject (a bit in the payload)
   read a different payload, and step 5 gives them away.
 - **End to end, with the codec:** 6,157 variants of the 12 smaller files

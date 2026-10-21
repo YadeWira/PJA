@@ -10,6 +10,7 @@ claims a huge output.
 | rule | value | why |
 |---|---|---|
 | payload >= 6 B | the codec stream's version and model bytes and header length | no empty or impossible payload |
+| stored: `orig_size` = payload, payload >= 1 B | the payload is the original | a stored file cannot claim another size |
 | `orig_size` >= 1 | | an empty file does not exist |
 | `orig_size` <= 2^63 - 1 | | no stream size can hold more |
 | `orig_size` <= 65,536 x payload | see below | rejects before decoding |
