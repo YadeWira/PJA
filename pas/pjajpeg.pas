@@ -126,8 +126,10 @@ function Decompose(const data: TBytes; out j: TJpeg): TJpegResult;
   and their cuts -- and leaves the coefficients allocated at zero, for the
   model to fill. The padding bits are not in raw: the caller sets them. }
 function ParseHeaders(const raw: TBytes; out j: TJpeg): TJpegResult;
-{ Encodes the scans again with their tables and interleaves them into raw. }
-function Recompose(const j: TJpeg; out data: TBytes): TJpegResult;
+{ Encodes the scans again with their tables and interleaves them into raw.
+  expected: the size the caller expects (the original's, when there is
+  one), to allocate the output once; 0 if unknown. }
+function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt = 0): TJpegResult;
 { Decompose + Recompose + compare with the original. The only thing that
   allows a JPEG to be stored as coefficients. }
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
@@ -446,42 +448,41 @@ begin
   else Result := SizeInt(j.mcusx) * j.mcusy;
 end;
 
-{ u div d and u mod d with one 32-bit division when both fit, which is
-  always for a real image: a 64-bit one costs two to three times as much. }
-procedure DivMod32(u, d: SizeInt; out q, r: SizeInt); inline;
-var q32: Cardinal;
-begin
-  if (u >= 0) and (d > 0) and (u <= High(LongInt)) and (d <= High(LongInt)) then begin
-    q32 := Cardinal(u) div Cardinal(d);
-    q := q32; r := u - SizeInt(q32) * d;
-  end else begin
-    q := u div d; r := u mod d;
-  end;
-end;
-
-{ The blocks of unit u of the scan, in stream order (A.2). }
-procedure BlocksOf(const j: TJpeg; const s: TScan; u: SizeInt; out un: TUnit; out n: Integer);
-var i, x, y: Integer; mx, my, uq, ur: SizeInt;
+{ The blocks of the unit at column ux, row uy of the scan, in stream order
+  (A.2): a block of the component's grid for a single-component scan, an
+  MCU otherwise. }
+procedure BlocksAt(const j: TJpeg; const s: TScan; ux, uy: SizeInt; out un: TUnit; out n: Integer);
+var i, x, y: Integer;
 begin
   n := 0;
   if s.ncomp = 1 then begin
-    with j.comp[s.comp[0]] do begin
-      un[0].c := s.comp[0];
-      DivMod32(u, bwReal, uq, ur);
-      un[0].idx := uq * bw + ur;
-    end;
+    un[0].c := s.comp[0];
+    un[0].idx := uy * j.comp[s.comp[0]].bw + ux;
     n := 1;
     Exit;
   end;
-  DivMod32(u, j.mcusx, my, mx);
   for i := 0 to s.ncomp - 1 do
     with j.comp[s.comp[i]] do
       for y := 0 to v - 1 do
         for x := 0 to h - 1 do begin
           un[n].c := s.comp[i];
-          un[n].idx := (my * v + y) * bw + mx * h + x;
+          un[n].idx := (uy * v + y) * bw + ux * h + x;
           Inc(n);
         end;
+end;
+
+{ How many units a row of the scan has. }
+function UnitsPerRow(const j: TJpeg; const s: TScan): SizeInt;
+begin
+  if s.ncomp = 1 then Result := j.comp[s.comp[0]].bwReal else Result := j.mcusx;
+end;
+
+{ The blocks of unit u of the scan. }
+procedure BlocksOf(const j: TJpeg; const s: TScan; u: SizeInt; out un: TUnit; out n: Integer);
+var w: SizeInt;
+begin
+  w := UnitsPerRow(j, s);
+  BlocksAt(j, s, u mod w, u div w, un, n);
 end;
 
 { ---------- sequential scan ---------- }
@@ -1511,7 +1512,7 @@ end;
   entropy-coded data. }
 function DecodeScan(const data: TBytes; first: SizeInt; var j: TJpeg; var s: TScan;
                     out last: SizeInt): TJpegResult;
-var rd: TBitReader; total, u: SizeInt; un: TUnit; n, i, pb, rst: Integer;
+var rd: TBitReader; total, u, w, ux, uy: SizeInt; un: TUnit; n, i, pb, rst: Integer;
     pred: array[0..3] of Integer; e: TJpegError; st: TProgState;
 
   function Padding: Boolean;
@@ -1532,6 +1533,7 @@ begin
   FillChar(pred, SizeOf(pred), 0);
   st := Default(TProgState);
   total := UnitCount(j, s);
+  w := UnitsPerRow(j, s); ux := 0; uy := 0;
   rst := 0;
   for u := 0 to total - 1 do begin
     if (s.ri > 0) and (u > 0) and (u mod s.ri = 0) then begin
@@ -1542,7 +1544,9 @@ begin
       FillChar(pred, SizeOf(pred), 0);
       st.eobrun := 0;
     end;
-    BlocksOf(j, s, u, un, n);
+    { the unit's position kept as it goes, not divided out of u }
+    BlocksAt(j, s, ux, uy, un, n);
+    Inc(ux); if ux = w then begin ux := 0; Inc(uy); end;
     for i := 0 to n - 1 do begin
       e := DecodeUnitBlock(rd, j, s, un[i], pred, st);
       if e <> jeNone then Exit(Fail(e, rd.p));
@@ -1561,12 +1565,13 @@ end;
 
 {$ifdef PJA_FAST}{$push}{$R-}{$Q-}{$endif}
 function EncodeScan(var wr: TBitWriter; const j: TJpeg; const s: TScan): Boolean;
-var total, u: SizeInt; un: TUnit; n, i, rst: Integer; pred: array[0..3] of Integer;
+var total, u, w, ux, uy: SizeInt; un: TUnit; n, i, rst: Integer; pred: array[0..3] of Integer;
     st: TProgState;
 begin
   FillChar(pred, SizeOf(pred), 0);
   st := Default(TProgState);
   total := UnitCount(j, s);
+  w := UnitsPerRow(j, s); ux := 0; uy := 0;
   rst := 0;
   for u := 0 to total - 1 do begin
     if (s.ri > 0) and (u > 0) and (u mod s.ri = 0) then begin
@@ -1576,7 +1581,9 @@ begin
       Inc(rst);
       FillChar(pred, SizeOf(pred), 0);
     end;
-    BlocksOf(j, s, u, un, n);
+    { the unit's position kept as it goes, not divided out of u }
+    BlocksAt(j, s, ux, uy, un, n);
+    Inc(ux); if ux = w then begin ux := 0; Inc(uy); end;
     for i := 0 to n - 1 do
       if not EncodeUnitBlock(wr, j, s, un[i], pred, st) then Exit(False);
   end;
@@ -1843,12 +1850,19 @@ begin
 end;
 
 {$ifdef PJA_FAST}{$push}{$R-}{$Q-}{$endif}
-function Recompose(const j: TJpeg; out data: TBytes): TJpegResult;
-var wr: TBitWriter; i: Integer; from: SizeInt;
+function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt): TJpegResult;
+var wr: TBitWriter; i: Integer; from, room: SizeInt;
 begin
   data := nil;
   wr := Default(TBitWriter);
-  SetLength(wr.d, Length(j.raw) * 4 + 4096);
+  { the writers keep 16 bytes of room ahead. What a damaged stream claims
+  is not allocated beyond the coefficients' own memory, already taken; the
+  buffer grows past that as the output does }
+  if expected > 0 then begin
+    room := Length(j.raw);
+    for i := 0 to High(j.comp) do room := room + 2 * Length(j.comp[i].coef);
+    SetLength(wr.d, Min(expected, room) + 64);
+  end else SetLength(wr.d, Length(j.raw) * 4 + 4096);
   from := 0;
   for i := 0 to High(j.scans) do begin
     wr.CopyFrom(j.raw, from, j.scans[i].cut);
@@ -1860,7 +1874,9 @@ begin
       if not EncodeScan(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
   end;
   wr.CopyFrom(j.raw, from, Length(j.raw));
-  data := Copy(wr.d, 0, wr.n);
+  { the buffer itself, cut to its length: no copy }
+  SetLength(wr.d, wr.n);
+  data := wr.d;
   Result := Success;
 end;
 
@@ -1870,8 +1886,12 @@ var other: TBytes; k: SizeInt;
 begin
   Result := Decompose(data, j);
   if not Result.Ok then Exit;
-  Result := Recompose(j, other);
+  Result := Recompose(j, other, Length(data));
   if not Result.Ok then Exit;
+  { the same bytes and length: the common case in one comparison; the
+    first difference is only looked for when there is one }
+  if (Length(other) = Length(data)) and
+     ((Length(data) = 0) or CompareMem(@other[0], @data[0], Length(data))) then Exit(Success);
   for k := 0 to Min(High(other), High(data)) do
     if other[k] <> data[k] then Exit(Fail(jeNoRoundTrip, k));
   if Length(other) <> Length(data) then Exit(Fail(jeNoRoundTrip, Min(Length(other), Length(data))));

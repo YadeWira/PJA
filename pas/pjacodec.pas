@@ -65,9 +65,12 @@ type
   JPEG-LS files ignore it. }
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True;
                   threads: Integer = 1; fast: Boolean = False): TCodecResult;
-{ stream -> JPEG. maxRaw caps the raw part a damaged stream can claim. }
+{ stream -> JPEG. maxRaw caps the raw part a damaged stream can claim.
+  expected: the JPEG's size when the caller knows it (the .pja does), to
+  allocate it once; 0 if not. Only a hint: the result is not checked
+  against it here. }
 function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt = 1 shl 28;
-                    threads: Integer = 1): TCodecResult;
+                    threads: Integer = 1; expected: SizeInt = 0): TCodecResult;
 
 implementation
 
@@ -381,7 +384,7 @@ begin
       if (r[b].last - r[b].first <> Length(enc[b].output)) or
          ((Length(enc[b].output) > 0) and not CompareMem(@stream[r[b].first], @enc[b].output[0], Length(enc[b].output))) then
         Exit;
-    cr.jpeg := Recompose(h.j, back);
+    cr.jpeg := Recompose(h.j, back, Length(jpeg));
     if not cr.jpeg.Ok or (Length(back) <> Length(jpeg)) or
        ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then Exit;
     Result := True;
@@ -432,7 +435,8 @@ begin
   end;
 end;
 
-function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
+function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
+                    expected: SizeInt): TCodecResult;
 var h: THead; jobs: array of TBandJob; r: array of TRange; b: Integer; len: Int64;
 begin
   jpeg := nil;
@@ -461,7 +465,7 @@ begin
   RunBands(jobs, threads);
   for b := 0 to h.nb - 1 do
     if not jobs[b].ok then Exit(CodecFail(ceBadStream));
-  if h.isLs then Result.jpeg := RecomposeJls(h.jl, jpeg) else Result.jpeg := Recompose(h.j, jpeg);
+  if h.isLs then Result.jpeg := RecomposeJls(h.jl, jpeg) else Result.jpeg := Recompose(h.j, jpeg, expected);
   if not Result.jpeg.Ok then begin jpeg := nil; Result.err := ceBadStream; end;
 end;
 

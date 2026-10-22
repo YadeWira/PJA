@@ -106,7 +106,7 @@ begin
     { the full model only: a stream of another model is not this codec's }
     if (n >= 2) and (PByte(src)[1] <> 0) then Exit(ZS_ERR_DATA);
     { cap is the original's exact size: the raw part cannot be larger }
-    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), 1);
+    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), 1, SizeInt(cap));
     if not r.Ok or (SizeUInt(Length(jpeg)) <> cap) then Exit(ZS_ERR_DATA);
     if Length(jpeg) > 0 then Move(jpeg[0], dst^, Length(jpeg));
     Result := Length(jpeg);

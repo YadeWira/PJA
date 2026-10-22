@@ -16,7 +16,7 @@ var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, po
     nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
     q: array[0..63] of Integer; rq: array[0..63] of Double; dq0, dc4, dc8: Int64; rq0, rc4, rc8: Double; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
     pc, pr: TLanes; ests: TEstimates; i2: Integer; tmp: Int64;
-    fb: TBlockF; fm, mm, zm: QWord; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
+    fb: TBlockF; fm, mm, zm, zm0: QWord; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
 begin
   for k := 0 to 63 do begin
     q[k] := 1;
@@ -27,6 +27,7 @@ begin
   dq0 := Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]; rq0 := 1 / dq0;
   dc4 := 4 * dq0; rc4 := 1 / dc4; dc8 := 8 * dq0; rc8 := 1 / dc8;
   FillChar(fb, SizeOf(fb), 0);
+  zm0 := 0;
   rowC := nil; SetLength(rowC, cp.bw);
   leftC := Default(TEdgeCache);
   nzc := nil; SetLength(nzc, cp.bw * cp.bh);
@@ -42,7 +43,7 @@ begin
 
       { 1. how many interior (7x7) coefficients are nonzero, as a 6-bit tree }
       n := 0;
-      if CC_ENC then n := Ones(NonzeroMask(@cp.coef[base]) and INTERIOR_ZZ);
+      if CC_ENC then begin zm0 := NonzeroMask(@cp.coef[base]); n := Ones(zm0 and INTERIOR_ZZ); end;
       if haveA then nzA := nzc[(by - 1) * cp.bw + bx] else nzA := 0;
       if haveL then nzL := nzc[by * cp.bw + bx - 1] else nzL := 0;
       if haveA and haveL then ctx := NzBucket((nzA + nzL + 1) div 2)
@@ -152,7 +153,8 @@ begin
       fm := 0;
       { exactly the n nonzero interior coefficients: decoding checked that
         n were coded }
-      zm := NonzeroMask(@cp.coef[base]) and INTERIOR_ZZ;
+      { encoding, the block has not changed since it was counted }
+      if CC_ENC then zm := zm0 and INTERIOR_ZZ else zm := NonzeroMask(@cp.coef[base]) and INTERIOR_ZZ;
       while zm <> 0 do begin
         k := BsfQWord(zm); zm := zm and (zm - 1);
         fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);

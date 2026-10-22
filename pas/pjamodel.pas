@@ -494,17 +494,19 @@ threadvar
   RawDirty: Boolean;
 
 procedure RawReset(const raw: TBytes; len: SizeInt);
-var e: TAdaptiveBit; i, b, node, c1, c2: SizeInt; h: Cardinal;
+var e: TAdaptiveBit; i, b, node, c1, c2: SizeInt; h: Cardinal; o0, o1, o2: TBits;
 begin
+  { the threadvars once: each use of one is a call to find this thread's }
+  o0 := RawO0; o1 := RawO1; o2 := RawO2;
   e := Default(TAdaptiveBit); e.Init;
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
     node := 1;
     h := Hash2(c2, c1);
     for b := 7 downto 0 do begin
-      RawO0[node] := e;
-      RawO1[c1 * 256 + node] := e;
-      RawO2[(h shl 8) or Cardinal(node)] := e;
+      o0[node] := e;
+      o1[c1 * 256 + node] := e;
+      o2[(h shl 8) or Cardinal(node)] := e;
       node := node * 2 + (raw[i] shr b) and 1;
     end;
     c2 := c1; c1 := raw[i];
@@ -513,6 +515,7 @@ end;
 
 function CodeRaw(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
 var mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
+    o0, o1, o2: TBits;
 begin
   {$ifdef PJA_COSTS}CostKind := ckRaw;{$endif}
   len := cd.Direct(Cardinal(Length(raw)), 32);
@@ -522,6 +525,7 @@ begin
     NewBits(RawO0, 256); NewBits(RawO1, 256 * 256); NewBits(RawO2, 1 shl O2_BITS);
   end;
   RawDirty := True;
+  o0 := RawO0; o1 := RawO1; o2 := RawO2;
   mx.Init(4, 8);
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
@@ -529,16 +533,16 @@ begin
     h := Hash2(c2, c1);
     for b := 7 downto 0 do begin
       if cd.encoding then bit := (raw[i] shr b) and 1 else bit := 0;
-      mx.Add(RawO0[node].p);
-      mx.Add(RawO1[c1 * 256 + node].p);
-      mx.Add(RawO2[(h shl 8) or Cardinal(node)].p);
+      mx.Add(o0[node].p);
+      mx.Add(o1[c1 * 256 + node].p);
+      mx.Add(o2[(h shl 8) or Cardinal(node)].p);
       mx.Add(32768);
       p := mx.Mix(7 - b);
       bit := cd.CodeP(p, bit);
       mx.Update(bit);
-      RawO0[node].Update(bit, COUNTER_LIMIT);
-      RawO1[c1 * 256 + node].Update(bit, COUNTER_LIMIT);
-      RawO2[(h shl 8) or Cardinal(node)].Update(bit, COUNTER_LIMIT);
+      o0[node].Update(bit, COUNTER_LIMIT);
+      o1[c1 * 256 + node].Update(bit, COUNTER_LIMIT);
+      o2[(h shl 8) or Cardinal(node)].Update(bit, COUNTER_LIMIT);
       node := node * 2 + bit;
     end;
     if not cd.encoding then raw[i] := Byte(node - 256);

@@ -434,3 +434,19 @@ Decompression is now faster than packJPG's and the stream smaller;
 compression is within 3%. On 30 of the photos this round took the fast
 model from about 27 to about 23 Gcycles compressing (-15%) and from about 24 to 21
 decompressing (-13%).
+
+Then compression's own part, the same way (no stream changes): the raw
+model's tables read through locals (each use of a threadvar was a call),
+the rebuilt JPEG allocated once at the size expected (capped by the
+coefficients' memory, so a damaged `.pja` cannot make it allocate what it
+claims) and handed back without a copy, the round trip compared with one
+`CompareMem`, the nonzero mask computed once per block when encoding, and
+the scan's units walked by position instead of divided out. Compressing
+the 151 photos, three alternating rounds: 121.6, 121.5 and 126.9 Gcycles
+against packJPG's 124.5, 125.5 and 124.9, so about 2% faster (median);
+decompressing 112.9 to 123.8 against 115.3 to 133.9. Both ways now at or
+below packJPG, with a stream 0.43% smaller.
+
+Tried and left out: turning the overflow and range checks off in the JPEG
+decoder's block routine gave about 1%, not enough to give up the rule that
+the decoders stay checked in every build.

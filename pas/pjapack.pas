@@ -107,7 +107,7 @@ begin
   if cap > QWord(High(SizeInt)) then cap := QWord(High(SizeInt));
   if p.stored then original := p.payload
   else begin
-    Result.codec := Decompress(p.payload, original, SizeInt(cap), threads);
+    Result.codec := Decompress(p.payload, original, SizeInt(cap), threads, SizeInt(cap));
     if not Result.codec.Ok then begin original := nil; Result.err := ukCodec; Exit; end;
   end;
   if QWord(Length(original)) <> p.orig_size then begin original := nil; Exit(PackFail(ukSizeMismatch)); end;
