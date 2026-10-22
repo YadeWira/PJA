@@ -46,7 +46,6 @@ implementation
 const
   IV: array[0..7] of LongWord = ($6A09E667, $BB67AE85, $3C6EF372, $A54FF53A,
                                  $510E527F, $9B05688C, $1F83D9AB, $5BE0CD19);
-  MSG_PERMUTATION: array[0..15] of Integer = (2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8);
   CHUNK_START = 1;
   CHUNK_END = 2;
   PARENT = 4;
@@ -60,45 +59,161 @@ type
 { The arithmetic of the hash is modulo 2^32: wrapping is the algorithm, not
   a mistake to catch. }
 {$push}{$Q-}{$R-}
-procedure G(var s: TWords16; a, b, c, d: Integer; mx, my: LongWord); inline;
-begin
-  s[a] := s[a] + s[b] + mx; s[d] := RorDWord(s[d] xor s[a], 16);
-  s[c] := s[c] + s[d];      s[b] := RorDWord(s[b] xor s[c], 12);
-  s[a] := s[a] + s[b] + my; s[d] := RorDWord(s[d] xor s[a], 8);
-  s[c] := s[c] + s[d];      s[b] := RorDWord(s[b] xor s[c], 7);
-end;
-
-{ The compression function: the full 16-word state. }
+{ The compression function: the full 16-word state. Unrolled, the message
+  schedule written out, every word a local: the compiler keeps what it can
+  in registers. (A loop over arrays that permutes the message ran at 28
+  cycles a byte; this one at a fraction of that.) }
 procedure Compress(const cv: TCv; const blockBytes; counter: QWord; blockLen, flags: LongWord;
                    out s: TWords16);
-var m, t: TWords16; i, r: Integer; p: PByte;
+var m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15: LongWord;
+    s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15: LongWord;
+    p: PByte;
 begin
   p := @blockBytes;
-  for i := 0 to 15 do
-    m[i] := LongWord(p[4 * i]) or (LongWord(p[4 * i + 1]) shl 8) or
-            (LongWord(p[4 * i + 2]) shl 16) or (LongWord(p[4 * i + 3]) shl 24);
-  for i := 0 to 7 do s[i] := cv[i];
-  s[8] := IV[0]; s[9] := IV[1]; s[10] := IV[2]; s[11] := IV[3];
-  s[12] := LongWord(counter); s[13] := LongWord(counter shr 32);
-  s[14] := blockLen; s[15] := flags;
-  for r := 0 to 6 do begin
-    G(s, 0, 4, 8, 12, m[0], m[1]);
-    G(s, 1, 5, 9, 13, m[2], m[3]);
-    G(s, 2, 6, 10, 14, m[4], m[5]);
-    G(s, 3, 7, 11, 15, m[6], m[7]);
-    G(s, 0, 5, 10, 15, m[8], m[9]);
-    G(s, 1, 6, 11, 12, m[10], m[11]);
-    G(s, 2, 7, 8, 13, m[12], m[13]);
-    G(s, 3, 4, 9, 14, m[14], m[15]);
-    if r < 6 then begin
-      for i := 0 to 15 do t[i] := m[MSG_PERMUTATION[i]];
-      m := t;
-    end;
-  end;
-  for i := 0 to 7 do begin
-    s[i] := s[i] xor s[i + 8];
-    s[i + 8] := s[i + 8] xor cv[i];
-  end;
+  m0 := LEtoN(PLongWord(p)[0]);
+  m1 := LEtoN(PLongWord(p)[1]);
+  m2 := LEtoN(PLongWord(p)[2]);
+  m3 := LEtoN(PLongWord(p)[3]);
+  m4 := LEtoN(PLongWord(p)[4]);
+  m5 := LEtoN(PLongWord(p)[5]);
+  m6 := LEtoN(PLongWord(p)[6]);
+  m7 := LEtoN(PLongWord(p)[7]);
+  m8 := LEtoN(PLongWord(p)[8]);
+  m9 := LEtoN(PLongWord(p)[9]);
+  m10 := LEtoN(PLongWord(p)[10]);
+  m11 := LEtoN(PLongWord(p)[11]);
+  m12 := LEtoN(PLongWord(p)[12]);
+  m13 := LEtoN(PLongWord(p)[13]);
+  m14 := LEtoN(PLongWord(p)[14]);
+  m15 := LEtoN(PLongWord(p)[15]);
+  s0 := cv[0]; s1 := cv[1]; s2 := cv[2]; s3 := cv[3];
+  s4 := cv[4]; s5 := cv[5]; s6 := cv[6]; s7 := cv[7];
+  s8 := IV[0]; s9 := IV[1]; s10 := IV[2]; s11 := IV[3];
+  s12 := LongWord(counter); s13 := LongWord(counter shr 32);
+  s14 := blockLen; s15 := flags;
+    { round 1 }
+    s0 := s0 + s4 + m0; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m1; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m2; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m3; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m4; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m5; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m6; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m7; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m8; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m9; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m10; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m11; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m12; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m13; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m14; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m15; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 2 }
+    s0 := s0 + s4 + m2; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m6; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m3; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m10; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m7; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m0; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m4; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m13; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m1; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m11; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m12; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m5; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m9; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m14; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m15; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m8; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 3 }
+    s0 := s0 + s4 + m3; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m4; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m10; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m12; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m13; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m2; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m7; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m14; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m6; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m5; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m9; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m0; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m11; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m15; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m8; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m1; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 4 }
+    s0 := s0 + s4 + m10; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m7; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m12; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m9; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m14; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m3; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m13; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m15; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m4; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m0; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m11; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m2; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m5; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m8; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m1; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m6; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 5 }
+    s0 := s0 + s4 + m12; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m13; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m9; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m11; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m15; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m10; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m14; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m8; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m7; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m2; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m5; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m3; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m0; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m1; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m6; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m4; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 6 }
+    s0 := s0 + s4 + m9; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m14; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m11; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m5; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m8; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m12; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m15; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m1; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m13; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m3; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m0; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m10; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m2; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m6; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m4; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m7; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+    { round 7 }
+    s0 := s0 + s4 + m11; s12 := RorDWord(s12 xor s0, 16); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 12);
+    s0 := s0 + s4 + m15; s12 := RorDWord(s12 xor s0, 8); s8 := s8 + s12; s4 := RorDWord(s4 xor s8, 7);
+    s1 := s1 + s5 + m5; s13 := RorDWord(s13 xor s1, 16); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 12);
+    s1 := s1 + s5 + m0; s13 := RorDWord(s13 xor s1, 8); s9 := s9 + s13; s5 := RorDWord(s5 xor s9, 7);
+    s2 := s2 + s6 + m1; s14 := RorDWord(s14 xor s2, 16); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 12);
+    s2 := s2 + s6 + m9; s14 := RorDWord(s14 xor s2, 8); s10 := s10 + s14; s6 := RorDWord(s6 xor s10, 7);
+    s3 := s3 + s7 + m8; s15 := RorDWord(s15 xor s3, 16); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 12);
+    s3 := s3 + s7 + m6; s15 := RorDWord(s15 xor s3, 8); s11 := s11 + s15; s7 := RorDWord(s7 xor s11, 7);
+    s0 := s0 + s5 + m14; s15 := RorDWord(s15 xor s0, 16); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 12);
+    s0 := s0 + s5 + m10; s15 := RorDWord(s15 xor s0, 8); s10 := s10 + s15; s5 := RorDWord(s5 xor s10, 7);
+    s1 := s1 + s6 + m2; s12 := RorDWord(s12 xor s1, 16); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 12);
+    s1 := s1 + s6 + m12; s12 := RorDWord(s12 xor s1, 8); s11 := s11 + s12; s6 := RorDWord(s6 xor s11, 7);
+    s2 := s2 + s7 + m3; s13 := RorDWord(s13 xor s2, 16); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 12);
+    s2 := s2 + s7 + m4; s13 := RorDWord(s13 xor s2, 8); s8 := s8 + s13; s7 := RorDWord(s7 xor s8, 7);
+    s3 := s3 + s4 + m7; s14 := RorDWord(s14 xor s3, 16); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 12);
+    s3 := s3 + s4 + m13; s14 := RorDWord(s14 xor s3, 8); s9 := s9 + s14; s4 := RorDWord(s4 xor s9, 7);
+  s[0] := s0 xor s8; s[1] := s1 xor s9; s[2] := s2 xor s10; s[3] := s3 xor s11;
+  s[4] := s4 xor s12; s[5] := s5 xor s13; s[6] := s6 xor s14; s[7] := s7 xor s15;
+  s[8] := s8 xor cv[0]; s[9] := s9 xor cv[1]; s[10] := s10 xor cv[2]; s[11] := s11 xor cv[3];
+  s[12] := s12 xor cv[4]; s[13] := s13 xor cv[5]; s[14] := s14 xor cv[6]; s[15] := s15 xor cv[7];
 end;
 {$pop}
 

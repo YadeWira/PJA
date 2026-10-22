@@ -9,7 +9,8 @@ register, and the differential showed it as an intermittent failure, 1 run in
 
 The rule is about style and not flow: it is enough for the body to use
 `Result` (assigned, or passed to something that fills it, like WriteStr or an
-out parameter).
+out parameter). A pure `assembler` function is the exception: it returns
+in the register its calling convention names.
 Usage: results.py <pas_dir>"""
 import re, sys, glob, os
 
@@ -24,6 +25,10 @@ def review(f):
         nxt = re.search(r'\n(function|procedure|constructor|destructor)\s', unit_body[start:])
         body = unit_body[start: start + (nxt.start() if nxt else len(unit_body))]
         if re.match(r'\s*(stdcall|cdecl)?\s*;?\s*external\b', body) or re.search(r'\bexternal\b', body.split('\n', 1)[0]):
+            continue
+        # a pure assembler function returns in a register, by its convention;
+        # a forward declaration has its body further down
+        if re.search(r'\b(assembler|forward)\b', body.split('\n', 1)[0], re.I):
             continue
         without_exit = re.sub(r'\bExit\s*\([^)]*\)', '', body, flags=re.I)
         if not re.search(r'\bResult\b', without_exit, re.I):

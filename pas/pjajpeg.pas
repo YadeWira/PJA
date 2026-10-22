@@ -131,6 +131,9 @@ function Recompose(const j: TJpeg; out data: TBytes): TJpegResult;
 { Decompose + Recompose + compare with the original. The only thing that
   allows a JPEG to be stored as coefficients. }
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
+{ A bit per coefficient of a block of 64 (zigzag order), set where it is
+  not zero. }
+function NonzeroMask(cf: PSmallInt): QWord;
 
 implementation
 
@@ -209,9 +212,29 @@ type
     procedure CopyFrom(const src: TBytes; first, last: SizeInt);
   end;
 
-procedure TBitReader.Fill;
-var c: Byte;
+{ Whether a byte of w is FF: where the same byte of not w is zero. The
+  subtraction wraps on purpose. }
+{$push}{$Q-}{$R-}
+function HasFF(w: QWord): Boolean; inline;
 begin
+  Result := (((not w) - QWord($0101010101010101)) and w and QWord($8080808080808080)) <> 0;
+end;
+{$pop}
+
+procedure TBitReader.Fill;
+var c: Byte; w: QWord; k, i: Integer;
+begin
+  { several bytes at once while none of the next 8 is FF (no stuffing, no
+    marker): the same bits as one at a time }
+  while (nbits <= 48) and not stopped and (p <= Length(d) - 8) do begin
+    w := BEtoN(PQWord(@d[p])^);
+    if HasFF(w) then Break;
+    k := (64 - nbits) shr 3;
+    if k > 7 then k := 7;
+    buf := (buf shl (8 * k)) or (w shr (64 - 8 * k));
+    for i := 0 to k - 1 do sizes[(nload + i) and 15] := 1;
+    Inc(nload, k); Inc(p, k); Inc(nbits, 8 * k);
+  end;
   while (nbits <= 56) and not stopped do begin
     if p >= Length(d) then begin stopped := True; Exit; end;
     c := d[p];
@@ -277,10 +300,18 @@ begin
 end;
 
 procedure TBitWriter.Drain;
-var b: Byte;
+var b: Byte; w: DWord;
 begin
   { at most 6 whole bytes wait, each one twice with its stuffing }
   if n + 16 > Length(d) then SetLength(d, 2 * Length(d) + 4096);
+  { the 4 oldest bytes at once when none is FF (Bits drains at 32) }
+  if nacc >= 32 then begin
+    w := DWord(acc shr (nacc - 32));
+    if not HasFF(w) then begin
+      PDWord(@d[n])^ := NtoBE(w);
+      Inc(n, 4); Dec(nacc, 32);
+    end;
+  end;
   while nacc >= 8 do begin
     Dec(nacc, 8);
     b := Byte((acc shr nacc) and $FF);
@@ -415,20 +446,34 @@ begin
   else Result := SizeInt(j.mcusx) * j.mcusy;
 end;
 
+{ u div d and u mod d with one 32-bit division when both fit, which is
+  always for a real image: a 64-bit one costs two to three times as much. }
+procedure DivMod32(u, d: SizeInt; out q, r: SizeInt); inline;
+var q32: Cardinal;
+begin
+  if (u >= 0) and (d > 0) and (u <= High(LongInt)) and (d <= High(LongInt)) then begin
+    q32 := Cardinal(u) div Cardinal(d);
+    q := q32; r := u - SizeInt(q32) * d;
+  end else begin
+    q := u div d; r := u mod d;
+  end;
+end;
+
 { The blocks of unit u of the scan, in stream order (A.2). }
 procedure BlocksOf(const j: TJpeg; const s: TScan; u: SizeInt; out un: TUnit; out n: Integer);
-var i, x, y: Integer; mx, my: SizeInt;
+var i, x, y: Integer; mx, my, uq, ur: SizeInt;
 begin
   n := 0;
   if s.ncomp = 1 then begin
     with j.comp[s.comp[0]] do begin
       un[0].c := s.comp[0];
-      un[0].idx := (u div bwReal) * bw + (u mod bwReal);
+      DivMod32(u, bwReal, uq, ur);
+      un[0].idx := uq * bw + ur;
     end;
     n := 1;
     Exit;
   end;
-  mx := u mod j.mcusx; my := u div j.mcusx;
+  DivMod32(u, j.mcusx, my, mx);
   for i := 0 to s.ncomp - 1 do
     with j.comp[s.comp[i]] do
       for y := 0 to v - 1 do
@@ -443,20 +488,36 @@ end;
 
 function DecodeBlock(var rd: TBitReader; var j: TJpeg; const s: TScan; i: Integer; const b: TBlockRef;
                      var pred: Integer): TJpegError;
-var e: TJpegError; t, v, k, rs, r, base: Integer;
+var e: TJpegError; t, v, k, rs, r, lu: Integer; base: SizeInt; cf: PSmallInt; ac: ^THuff;
 begin
   base := b.idx * 64;
+  { the block's bounds checked once; then it is written through a pointer }
+  if (base < 0) or (base + 63 >= Length(j.comp[b.c].coef)) then
+    raise ERangeError.Create('DecodeBlock: block outside its component');
+  cf := @j.comp[b.c].coef[base];
+  ac := @s.ac[i];
   e := DecodeSymbol(rd, s.dc[i], t);
   if e <> jeNone then Exit(e);
   if t > 11 then Exit(jeBadCode);
   if not rd.Bits(t, v) then Exit(jeTruncated);
   pred := pred + Extend(v, t);
   if (pred < -32767) or (pred > 32767) then Exit(jeCoefOutOfRange);
-  j.comp[b.c].coef[base] := pred;
+  cf[0] := pred;
   k := 1;
   while k <= 63 do begin
-    e := DecodeSymbol(rd, s.ac[i], rs);
-    if e <> jeNone then Exit(e);
+    { with 26 bits waiting no code (16) and its extra bits (10) can run
+      out: the table's answer is all there is to it. Otherwise, and for
+      codes longer than the table, DecodeSymbol, with every error it knows }
+    if rd.nbits < 26 then rd.Fill;
+    lu := 0;
+    if rd.nbits >= 26 then lu := ac^.lut[Integer(rd.buf shr (rd.nbits - LUT_BITS)) and ((1 shl LUT_BITS) - 1)];
+    if lu <> 0 then begin
+      Dec(rd.nbits, lu shr 8);
+      rs := lu and 255;
+    end else begin
+      e := DecodeSymbol(rd, ac^, rs);
+      if e <> jeNone then Exit(e);
+    end;
     r := rs shr 4; t := rs and 15;
     if t = 0 then begin
       if r <> 15 then Break;   { EOB }
@@ -466,8 +527,13 @@ begin
     if t > 10 then Exit(jeBadCode);
     Inc(k, r);
     if k > 63 then Exit(jeBadCode);
-    if not rd.Bits(t, v) then Exit(jeTruncated);
-    j.comp[b.c].coef[base + k] := Extend(v, t);
+    { Bits, without its refill when the bits are already there }
+    if rd.nbits >= t then begin
+      Dec(rd.nbits, t);
+      v := Integer((rd.buf shr rd.nbits) and ((QWord(1) shl t) - 1));
+    end else if not rd.Bits(t, v) then Exit(jeTruncated);
+    if v < (1 shl (t - 1)) then v := v - (1 shl t) + 1;
+    cf[k] := v;
     Inc(k);
   end;
   Result := jeNone;
@@ -480,30 +546,31 @@ end;
   the encoder then visits only those, instead of asking each of the 63. }
 {$ifdef CPUX86_64}
 {$asmmode intel}
-function NonzeroMask(cf: PSmallInt): QWord;
-var p: PSmallInt; m: QWord;
-begin
-  p := cf;
-  { SSE2, part of x86-64: compare 8 coefficients with 0 at a time, pack the
-    word masks to bytes, take their top bits }
-  asm
-    mov rax, p
-    pxor xmm7, xmm7
-    xor rdx, rdx
-    mov rcx, 56
-  @loop:
-    movdqu xmm0, [rax + rcx * 2]
-    pcmpeqw xmm0, xmm7
-    packsswb xmm0, xmm0
-    pmovmskb r8d, xmm0
-    and r8d, 255
-    shl rdx, 8
-    or rdx, r8
-    sub rcx, 8
-    jns @loop
-    mov m, rdx
-  end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm7'];
-  Result := not m;
+{ SSE2, part of x86-64: compare 8 coefficients with 0 at a time, pack the
+  word masks to bytes, take their top bits. No frame; the argument in the
+  first register of the platform's convention; only registers no caller
+  keeps anything in (xmm6 and up are the caller's on Win64). }
+function NonzeroMask(cf: PSmallInt): QWord; assembler; nostackframe;
+asm
+  {$ifdef WIN64}
+  mov r9, rcx
+  {$else}
+  mov r9, rdi
+  {$endif}
+  pxor xmm1, xmm1
+  xor rax, rax
+  mov rcx, 56
+@loop:
+  movdqu xmm0, [r9 + rcx * 2]
+  pcmpeqw xmm0, xmm1
+  packsswb xmm0, xmm0
+  pmovmskb r8d, xmm0
+  and r8d, 255
+  shl rax, 8
+  or rax, r8
+  sub rcx, 8
+  jns @loop
+  not rax
 end;
 {$else}
 function NonzeroMask(cf: PSmallInt): QWord;

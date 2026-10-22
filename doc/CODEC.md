@@ -390,3 +390,47 @@ where both the time and the ratio are. What is left of the gap to packJPG on
 one thread is spread over the whole coefficient loop, about 200 cycles per
 binary decision; closing it would take that loop in assembly, which was
 judged not worth it.
+
+## Speed, one thread against packJPG (21/10/2026)
+
+The fast model's goal: packJPG's ratio and speed on one thread. Profiled
+with `perf`, and again without changing a bit of any stream (the suite, and
+both models and the no-assembly path compared with the previous build):
+
+- **the edge predictions' divisions**: two 64-bit `idiv` per edge
+  coefficient (40 to 90 cycles each on the Broadwell measured), by a divisor
+  that depends only on the quantizer. Its reciprocal is computed once per
+  component; a multiplication in double and one integer comparison each way
+  give exactly `DivRound`'s quotient while the numerator is below 2^50, and
+  the division itself does the rest. The same for the DC's two. About -4%
+  both ways.
+- **BLAKE3** at 28 cycles a byte: a loop that permuted the message in an
+  array. Unrolled, the schedule written out and every word a local, 9.5. The
+  official vectors still pass.
+- **the kernel sums** of FillCaches and the DC estimates: one routine per
+  block that keeps the accumulators in registers, instead of one call per
+  coefficient that read and wrote 16 Int64 in memory. About -4% compressing.
+- **the interior's nonzeros** counted and visited through the block's
+  nonzero mask (SSE2) instead of 49 compared one by one.
+- **the JPEG's Huffman decoding**: with 26 bits waiting no code and its
+  extra bits can run out, so the table's answer is used directly; the block
+  checked against its component once and written through a pointer. The bit
+  reader takes up to 7 bytes at once and the writer puts 4 when none is FF.
+- smaller: the squash and stretch tables in 16 bits (16 KB together, not
+  32), the bucket functions as tables, the mantissa bits through the fused
+  coder, a frame-less `NonzeroMask`, 32-bit division for an MCU's position.
+
+The 151 photos, 1 thread, `--fast --no-verify` against packJPG's default
+(which does not verify either), alternating runs, cycles in user space
+(the machine was shared, about 15 to 20 of load):
+
+| | packJPG 5.0f | PJA `--fast` |
+|---|---|---|
+| size | 60,084,653 | 59,827,219 (-0.43%) |
+| compress | 125.5 to 126.6 Gcycles | 128.6 to 130.5 (+2.8%) |
+| decompress | 117.4 to 119.8 Gcycles | 115.0 to 115.2 (-3%) |
+
+Decompression is now faster than packJPG's and the stream smaller;
+compression is within 3%. On 30 of the photos this round took the fast
+model from about 27 to about 23 Gcycles compressing (-15%) and from about 24 to 21
+decompressing (-13%).

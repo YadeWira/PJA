@@ -14,14 +14,19 @@ function CC_NAME(var cd: TCoder; var cp: TComponent; const qt: array of Word; va
 var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, pos, u, w, idx: SizeInt;
     nzc, dcr: array of Byte; haveA, haveL: Boolean; rb2, nbs: Integer; res, x, e, i, ep: Integer;
     nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
-    q: array[0..63] of Integer; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
-    pc, pr: array[0..7] of Int64; ests: TEstimates; i2: Integer; tmp: Int64;
-    fb: TBlockF; fm, mm: QWord; left: Integer; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
+    q: array[0..63] of Integer; rq: array[0..63] of Double; dq0, dc4, dc8: Int64; rq0, rc4, rc8: Double; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
+    pc, pr: TLanes; ests: TEstimates; i2: Integer; tmp: Int64;
+    fb: TBlockF; fm, mm, zm: QWord; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
 begin
   for k := 0 to 63 do begin
     q[k] := 1;
     if (k < Length(qt)) and (qt[k] > 0) then q[k] := qt[k];
+    rq[k] := 1 / (2 * Int64(BASIS[0, 0]) * q[k]);
   end;
+  { the DC's divisors: the spread's, and the mean's of 4 or 8 estimates }
+  dq0 := Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]; rq0 := 1 / dq0;
+  dc4 := 4 * dq0; rc4 := 1 / dc4; dc8 := 8 * dq0; rc8 := 1 / dc8;
+  FillChar(fb, SizeOf(fb), 0);
   rowC := nil; SetLength(rowC, cp.bw);
   leftC := Default(TEdgeCache);
   nzc := nil; SetLength(nzc, cp.bw * cp.bh);
@@ -37,8 +42,7 @@ begin
 
       { 1. how many interior (7x7) coefficients are nonzero, as a 6-bit tree }
       n := 0;
-      if CC_ENC then
-        for i := 0 to 48 do if cp.coef[base + INTERIOR[i]] <> 0 then Inc(n);
+      if CC_ENC then n := Ones(NonzeroMask(@cp.coef[base]) and INTERIOR_ZZ);
       if haveA then nzA := nzc[(by - 1) * cp.bw + bx] else nzA := 0;
       if haveL then nzL := nzc[by * cp.bw + bx - 1] else nzL := 0;
       if haveA and haveL then ctx := NzBucket((nzA + nzL + 1) div 2)
@@ -143,18 +147,16 @@ begin
       { this block dequantized: the interior now, row 0 and column 0 as they
         are coded, the DC last }
       { fm marks the nonzero positions of fb, so that the loops below only
-        visit those }
-      FillChar(fb, SizeOf(fb), 0);
+        visit those; fb is zero everywhere else (cleared once, then after
+        each block where it was written) }
       fm := 0;
-      i := 0; left := n;
-      while (left > 0) and (i <= 48) do begin
-        k := INTERIOR[i];
-        if cp.coef[base + k] <> 0 then begin
-          fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);
-          fm := fm or (QWord(1) shl ZIGZAG[k]);
-          Dec(left);
-        end;
-        Inc(i);
+      { exactly the n nonzero interior coefficients: decoding checked that
+        n were coded }
+      zm := NonzeroMask(@cp.coef[base]) and INTERIOR_ZZ;
+      while zm <> 0 do begin
+        k := BsfQWord(zm); zm := zm and (zm - 1);
+        fb[ZIGZAG[k]] := Dequant(cp.coef[base + k], q[k]);
+        fm := fm or (QWord(1) shl ZIGZAG[k]);
       end;
 
       { 3. row 0 and column 0, interleaved by frequency, each predicted from
@@ -175,7 +177,7 @@ begin
             pos := BsfQWord(mm); mm := mm and (mm - 1);
             sum := sum + W3[pos shr 3] * fb[pos];
           end;
-          predF := DivRound(rowC[bx].eg[w] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
+          predF := DivRoundR(rowC[bx].eg[w] - sum, 2 * Int64(BASIS[0, 0]) * q[k], rq[k]);
           tmp := DivRound(5 * predF, 8);
           pb := Clip(FineLog(tmp), NO_PRED - 1);
         end else if (w = 0) and haveL then begin
@@ -185,7 +187,7 @@ begin
             pos := BsfQWord(mm); mm := mm and (mm - 1);
             sum := sum + W3[pos and 7] * fb[pos];
           end;
-          predF := DivRound(leftC.eg[u] - sum, 2 * Int64(BASIS[0, 0]) * q[k]);
+          predF := DivRoundR(leftC.eg[u] - sum, 2 * Int64(BASIS[0, 0]) * q[k], rq[k]);
           tmp := DivRound(5 * predF, 8);
           pb := Clip(FineLog(tmp), NO_PRED - 1);
         end;
@@ -271,12 +273,8 @@ begin
           pc[i] = sum over u of B[u,i] * (sum over w of W5[w] fb[u,w])
           pr[i] = sum over w of B[w,i] * (sum over u of W5[u] fb[u,w]) }
       for i := 0 to 7 do begin pc[i] := 0; pr[i] := 0; end;
-      mm := fm;
-      while mm <> 0 do begin
-        pos := BsfQWord(mm);
-        mm := mm and (mm - 1);
-        AddKernels(fb[pos], KER_LEFT[pos], KER_TOP[pos], pc, pr);
-      end;
+      SumKernels(fb, fm, KER_LEFT, pc);
+      SumKernels(fb, fm, KER_TOP, pr);
       nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
       if haveL then begin
         for i := 0 to 7 do begin
@@ -301,8 +299,10 @@ begin
       if nest > 0 then nest := nest - 2 * (nest div 4);
       { a pixel gets DC * BASIS[0,0]^2: back to a quantized DC }
       if nest > 0 then begin
-        pred := DivRound(total, Int64(nest) * BASIS[0, 0] * BASIS[0, 0] * q[0]);
-        tmp := DivRound(hi - lo, Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]);
+        if nest = 8 then pred := DivRoundR(total, dc8, rc8)
+        else if nest = 4 then pred := DivRoundR(total, dc4, rc4)
+        else pred := DivRound(total, Int64(nest) * dq0);
+        tmp := DivRoundR(hi - lo, dq0, rq0);
         ctx := Clip(FineLog(tmp), ACT_BUCKETS - 2);
       end else begin pred := 0; ctx := ACT_BUCKETS - 1; end;
       if pred > 32767 then pred := 32767;
@@ -344,6 +344,8 @@ begin
       end;
       fb[0] := Dequant(cp.coef[base], q[0]);
       FillCaches(fb, fm or 1, rightC, rowC[bx]);
+      mm := fm or 1;
+      while mm <> 0 do begin fb[BsfQWord(mm)] := 0; mm := mm and (mm - 1); end;
       leftC := rightC;
     end;
   nzOut := nzc;

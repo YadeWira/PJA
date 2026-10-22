@@ -170,6 +170,22 @@ begin
   if a >= 0 then Result := (a + b div 2) div b else Result := -((-a + b div 2) div b);
 end;
 
+{ DivRound by a b > 0 known in advance, with rb = 1 / b: a 64-bit division
+  costs 40 to 90 cycles on the machines measured, a multiplication a few.
+  The product is off from the exact quotient by less than 1 while n < 2^50,
+  and one comparison each way corrects that: the result is DivRound's,
+  exactly. Anything larger takes the division itself. }
+function DivRoundR(const a, b: Int64; rb: Double): Int64; inline;
+var n, q: Int64;
+begin
+  if a >= 0 then n := a + b div 2 else n := -a + b div 2;
+  if (n >= 0) and (n < Int64(1) shl 50) then begin
+    q := Trunc(n * rb);
+    if q * b > n then Dec(q) else if (q + 1) * b <= n then Inc(q);
+  end else q := n div b;
+  if a >= 0 then Result := q else Result := -q;
+end;
+
 procedure NewBits(var b: TBits; n: SizeInt);
 var i: SizeInt; e: TAdaptiveBit;
 begin
@@ -189,8 +205,11 @@ end;
 { ---------- logistic mixing ---------- }
 
 var
-  SQUASH_T: array[0..4095] of Integer;     { stretch domain -2048..2047 -> 12-bit probability }
-  STRETCH_T: array[0..4095] of Integer;    { 12-bit probability -> stretch domain }
+  { 16 bits each, not 32: the two together take 16 KB instead of 32, the
+    whole L1 data cache of many machines, and the fast model reads both for
+    every bit it codes }
+  SQUASH_T: array[0..4095] of Word;        { stretch domain -2048..2047 -> 12-bit probability }
+  STRETCH_T: array[0..4095] of SmallInt;   { 12-bit probability -> stretch domain }
 
 { x div 2^n, truncating toward zero exactly like `div`, without a division. }
 function TruncShr(x: Integer; n: Integer): Integer; inline;
@@ -302,62 +321,54 @@ begin
   Result := r;
 end;
 
-{ a1[i] += k1[i] * f and a2[i] += k2[i] * f over 8 Int64 lanes, with pmuldq
-  (signed 32 x 32 -> 64 bits): f and every k fit in 32 bits (the kernels
-  are below 2^27, a dequantized coefficient within 2^22), so the products
-  are exact. }
-procedure AddKernelsSse41(f: Int64; k1, k2, a1, a2: PInt64);
-var pk1, pk2, pa1, pa2: PInt64; ff: Int64;
+{ acc[i] += k[pos, i] * fb[pos] over the 8 Int64 lanes, for every pos set in
+  mask: the accumulators stay in registers for the whole block. pmuldq
+  (signed 32 x 32 -> 64 bits): fb[pos] and every k fit in 32 bits (the
+  kernels are below 2^27, a dequantized coefficient within 2^22), so the
+  products are exact, and integer sums do not depend on their order. Only
+  xmm0-xmm5, which no caller keeps anything in on either ABI. }
+procedure SumKernelsSse41(fb: PInt64; mask: QWord; k, acc: PInt64);
+var pf, pk, pa: PInt64; m: QWord;
 begin
-  pk1 := k1; pk2 := k2; pa1 := a1; pa2 := a2; ff := f;
+  pf := fb; pk := k; pa := acc; m := mask;
   asm
-    mov rax, pk1
-    mov rcx, pk2
-    mov rdx, pa1
-    mov r8, pa2
-    movq xmm7, ff
-    punpcklqdq xmm7, xmm7
-    movdqu xmm0, [rax]
-    movdqu xmm1, [rax + 16]
-    movdqu xmm2, [rax + 32]
-    movdqu xmm3, [rax + 48]
-    pmuldq xmm0, xmm7
-    pmuldq xmm1, xmm7
-    pmuldq xmm2, xmm7
-    pmuldq xmm3, xmm7
-    movdqu xmm4, [rdx]
-    paddq xmm4, xmm0
-    movdqu [rdx], xmm4
-    movdqu xmm4, [rdx + 16]
-    paddq xmm4, xmm1
-    movdqu [rdx + 16], xmm4
-    movdqu xmm4, [rdx + 32]
-    paddq xmm4, xmm2
-    movdqu [rdx + 32], xmm4
-    movdqu xmm4, [rdx + 48]
-    paddq xmm4, xmm3
-    movdqu [rdx + 48], xmm4
-    movdqu xmm0, [rcx]
-    movdqu xmm1, [rcx + 16]
-    movdqu xmm2, [rcx + 32]
-    movdqu xmm3, [rcx + 48]
-    pmuldq xmm0, xmm7
-    pmuldq xmm1, xmm7
-    pmuldq xmm2, xmm7
-    pmuldq xmm3, xmm7
-    movdqu xmm4, [r8]
-    paddq xmm4, xmm0
-    movdqu [r8], xmm4
-    movdqu xmm4, [r8 + 16]
-    paddq xmm4, xmm1
-    movdqu [r8 + 16], xmm4
-    movdqu xmm4, [r8 + 32]
-    paddq xmm4, xmm2
-    movdqu [r8 + 32], xmm4
-    movdqu xmm4, [r8 + 48]
-    paddq xmm4, xmm3
-    movdqu [r8 + 48], xmm4
-  end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm7'];
+    mov rax, pf
+    mov rcx, pk
+    mov rdx, pa
+    mov r9, m
+    movdqu xmm0, [rdx]
+    movdqu xmm1, [rdx + 16]
+    movdqu xmm2, [rdx + 32]
+    movdqu xmm3, [rdx + 48]
+    test r9, r9
+    jz @done
+  @loop:
+    bsf r8, r9
+    lea r10, [r9 - 1]
+    and r9, r10
+    movq xmm4, [rax + r8 * 8]
+    punpcklqdq xmm4, xmm4
+    shl r8, 6
+    movdqu xmm5, [rcx + r8]
+    pmuldq xmm5, xmm4
+    paddq xmm0, xmm5
+    movdqu xmm5, [rcx + r8 + 16]
+    pmuldq xmm5, xmm4
+    paddq xmm1, xmm5
+    movdqu xmm5, [rcx + r8 + 32]
+    pmuldq xmm5, xmm4
+    paddq xmm2, xmm5
+    movdqu xmm5, [rcx + r8 + 48]
+    pmuldq xmm5, xmm4
+    paddq xmm3, xmm5
+    test r9, r9
+    jnz @loop
+  @done:
+    movdqu [rdx], xmm0
+    movdqu [rdx + 16], xmm1
+    movdqu [rdx + 32], xmm2
+    movdqu [rdx + 48], xmm3
+  end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
 end;
 
 { w[i] := clamp(w[i] + TruncShr(st[i] * err, 14)) over the 8 lanes. The
@@ -657,7 +668,7 @@ begin
   mxEExpo.Init(6, MAX_EXP_AC * EDGE_POS);
 end;
 
-function NzBucket(n: Integer): Integer;
+function NzBucketOf(n: Integer): Integer;
 begin
   case n of
     0..4: Result := n;
@@ -670,7 +681,7 @@ begin
   end;
 end;
 
-function RemBucket(n: Integer): Integer;
+function RemBucketOf(n: Integer): Integer;
 begin
   case n of
     1..4: Result := n - 1;
@@ -682,6 +693,31 @@ begin
   end;
 end;
 
+var
+  { the two above for 0..63, filled from them at start }
+  NZ_BUCKET_T, REM_BUCKET_T: array[0..63] of Byte;
+
+function NzBucket(n: Integer): Integer; inline;
+begin
+  if (n < 0) or (n > 63) then Result := NzBucketOf(n) else Result := NZ_BUCKET_T[n];
+end;
+
+function RemBucket(n: Integer): Integer; inline;
+begin
+  if (n < 0) or (n > 63) then Result := RemBucketOf(n) else Result := REM_BUCKET_T[n];
+end;
+
+{ The bits set in x, inline: FPC's PopCnt is a call to a routine that
+  counts by table. The multiplications wrap on purpose. }
+{$push}{$Q-}{$R-}
+function Ones(x: QWord): Integer; inline;
+begin
+  x := x - ((x shr 1) and QWord($5555555555555555));
+  x := (x and QWord($3333333333333333)) + ((x shr 2) and QWord($3333333333333333));
+  x := (x + (x shr 4)) and QWord($0F0F0F0F0F0F0F0F);
+  Result := Integer((x * QWord($0101010101010101)) shr 56);
+end;
+{$pop}
 
 { log2 in half steps: 0 -> 0, 1 -> 1, 2 -> 2, 3 -> 3, 4..5 -> 4, 6..7 -> 5, 8..11 -> 6... }
 function FineLog(v: Int64): Integer; inline;
@@ -735,17 +771,27 @@ begin
   c5.Update(Result, COUNTER_LIMIT);
 end;
 
+function DOne(var dc: TArithDecoder; var c: TAdaptiveBit): Integer; forward;
+function EOne(var e: TArithEncoder; var c: TAdaptiveBit; bit: Integer): Integer; forward;
+
 { Mantissa of a magnitude of bit length e: the bit below the top with
-  mant1[e * m1stride + m1], the rest with mant[e][bit]. }
+  mant1[e * m1stride + m1], the rest with mant[e][bit]. Through the fused
+  EOne / DOne: TCoder.Code's arithmetic, without its layers. }
 procedure CodeMantissa(var cd: TCoder; var mant1: TBits; m1, m1stride: Integer; var mant: TBits;
                        maxE, e: Integer; var a: Integer);
 var i, b: Integer;
 begin
-  if not cd.encoding then a := 1 shl (e - 1);
-  for i := e - 2 downto 0 do begin
-    if i = e - 2 then b := cd.Code(mant1[e * m1stride + m1], (a shr i) and 1)
-    else b := cd.Code(mant[e * maxE + i], (a shr i) and 1);
-    if not cd.encoding then a := a or (b shl i);
+  if cd.encoding then begin
+    for i := e - 2 downto 0 do
+      if i = e - 2 then EOne(cd.enc, mant1[e * m1stride + m1], (a shr i) and 1)
+      else EOne(cd.enc, mant[e * maxE + i], (a shr i) and 1);
+  end else begin
+    a := 1 shl (e - 1);
+    for i := e - 2 downto 0 do begin
+      if i = e - 2 then b := DOne(cd.dec, mant1[e * m1stride + m1])
+      else b := DOne(cd.dec, mant[e * maxE + i]);
+      a := a or (b shl i);
+    end;
   end;
 end;
 
@@ -797,6 +843,11 @@ end;
 type
   TByteArr = array of Byte;
 
+type
+  { a coefficient's contribution to 8 values; 8 such values }
+  TKernels = array[0..63, 0..7] of Int64;
+  TLanes = array[0..7] of Int64;
+
 var
   { 3*BASIS[i,0] - BASIS[i,1] = 2 * (B0 + (B0 - B1) / 2): this block's edge
     extrapolated half a pixel outwards, doubled (the edge predictions);
@@ -808,13 +859,16 @@ var
   { what the coefficient at a position (u * 8 + v) adds per unit to each of
     the 8 values of FillCaches's px (right and bottom edges) and of the DC
     estimate's pc and pr (left and top edges) }
-  KER_RIGHT, KER_BOTTOM, KER_LEFT, KER_TOP: array[0..63, 0..7] of Int64;
+  KER_RIGHT, KER_BOTTOM, KER_LEFT, KER_TOP: TKernels;
   { UNZIG[natural position] = zigzag index }
   UNZIG: array[0..63] of Byte;
   { interior positions (u, v >= 1) in zigzag order, and how many of them are
     left from each one on, itself included }
   INTERIOR: array[0..48] of Byte;
   INTERIOR_LEFT: array[0..48] of Byte;
+  { the interior positions as a mask over the zigzag indices, NonzeroMask's
+    order }
+  INTERIOR_ZZ: QWord;
   { RATIO_OF[left, rem] = rem * 16 div left, for rem < left }
   RATIO_OF: array[1..49, 0..48] of Byte;
 
@@ -909,22 +963,24 @@ end;
     bottom.eg[v] = sum over u of fb[u,v] * (3 B[u,7] - B[u,6])
     right.px[y]  = sum over u of B[u,y] * (sum over v of fb[u,v] * (5 B[v,7] - B[v,6]))
     bottom.px[y] = sum over v of B[v,y] * (sum over u of fb[u,v] * (5 B[u,7] - B[u,6])) }
-{ a1 += k1 * f and a2 += k2 * f, 8 lanes each }
-procedure AddKernels(f: Int64; const k1, k2: array of Int64; var a1, a2: array of Int64); inline;
-var y: Integer;
+{ acc[y] += k[pos, y] * fb[pos], for every pos set in mask }
+procedure SumKernels(const fb: TBlockF; mask: QWord; const k: TKernels; var acc: TLanes); inline;
+var pos, y: Integer;
 begin
   {$ifdef CPUX86_64}
-  if UseSse41 then AddKernelsSse41(f, @k1[0], @k2[0], @a1[0], @a2[0]) else
+  if UseSse41 then SumKernelsSse41(@fb[0], mask, @k[0, 0], @acc[0]) else
   {$endif}
-  for y := 0 to 7 do begin
-    a1[y] := a1[y] + k1[y] * f;
-    a2[y] := a2[y] + k2[y] * f;
+  while mask <> 0 do begin
+    pos := BsfQWord(mask);
+    mask := mask and (mask - 1);
+    for y := 0 to 7 do acc[y] := acc[y] + k[pos, y] * fb[pos];
   end;
 end;
 
 procedure FillCaches(const fb: TBlockF; mask: QWord; out right, bottom: TEdgeCache);
-var pos, u, v, y: Integer; f: Int64;
+var pos, u, v, y: Integer; f: Int64; m0: QWord;
 begin
+  m0 := mask;
   for y := 0 to 7 do begin right.eg[y] := 0; bottom.eg[y] := 0; right.px[y] := 0; bottom.px[y] := 0; end;
   while mask <> 0 do begin
     pos := BsfQWord(mask);
@@ -933,8 +989,9 @@ begin
     u := pos shr 3; v := pos and 7;
     right.eg[u] := right.eg[u] + E3[v] * f;
     bottom.eg[v] := bottom.eg[v] + E3[u] * f;
-    AddKernels(f, KER_RIGHT[pos], KER_BOTTOM[pos], right.px, bottom.px);
   end;
+  SumKernels(fb, m0, KER_RIGHT, right.px);
+  SumKernels(fb, m0, KER_BOTTOM, bottom.px);
 end;
 
 { What the coefficient routine (pjacoef.inc) codes a counter's bit with.
@@ -1583,9 +1640,13 @@ procedure InitUnzig;
 var k, n: Integer;
 begin
   for k := 0 to 63 do UNZIG[ZIGZAG[k]] := k;
-  n := 0;
+  for k := 0 to 63 do begin NZ_BUCKET_T[k] := NzBucketOf(k); REM_BUCKET_T[k] := RemBucketOf(k); end;
+  n := 0; INTERIOR_ZZ := 0;
   for k := 1 to 63 do
-    if (ZIGZAG[k] shr 3 > 0) and (ZIGZAG[k] and 7 > 0) then begin INTERIOR[n] := k; Inc(n); end;
+    if (ZIGZAG[k] shr 3 > 0) and (ZIGZAG[k] and 7 > 0) then begin
+      INTERIOR[n] := k; Inc(n);
+      INTERIOR_ZZ := INTERIOR_ZZ or (QWord(1) shl k);
+    end;
   for k := 0 to 48 do INTERIOR_LEFT[k] := 49 - k;
   for k := 1 to 49 do
     for n := 0 to 48 do
