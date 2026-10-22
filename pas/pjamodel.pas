@@ -987,6 +987,52 @@ begin
   Learn(a, Result); Learn(b, Result);
 end;
 
+{ the encoding side, fused the same way }
+procedure EncodeWith(var e: TArithEncoder; bit: Integer; prob: Cardinal); inline;
+var xm: Cardinal;
+begin
+  xm := e.x1 + Cardinal((QWord(e.x2 - e.x1) * prob) shr 16);
+  if bit <> 0 then e.x2 := xm else e.x1 := xm + 1;
+  while ((e.x1 xor e.x2) and $FF000000) = 0 do begin
+    if e.live <> nil then e.live.Put(Byte(e.x2 shr 24))
+    else begin
+      if e.n >= Length(e.d) then SetLength(e.d, 2 * Length(e.d));
+      e.d[e.n] := Byte(e.x2 shr 24);
+    end;
+    Inc(e.n);
+    e.x1 := e.x1 shl 8;
+    e.x2 := (e.x2 shl 8) or 255;
+  end;
+end;
+
+function EOne(var e: TArithEncoder; var c: TAdaptiveBit; bit: Integer): Integer;
+begin
+  {$ifdef PJA_COSTS}if CollectCosts then AddCost(c.p, bit);{$endif}
+  EncodeWith(e, bit, c.p);
+  Learn(c, bit);
+  Result := bit;
+end;
+
+function EAvg(var e: TArithEncoder; var a, b: TAdaptiveBit; bit: Integer): Integer;
+var p: Cardinal;
+begin
+  p := Cardinal(SQUASH_T[(STRETCH_T[a.p shr 4] + STRETCH_T[b.p shr 4]) div 2 + 2048]) shl 4;
+  {$ifdef PJA_COSTS}if CollectCosts then AddCost(p, bit);{$endif}
+  EncodeWith(e, bit, p);
+  Learn(a, bit); Learn(b, bit);
+  Result := bit;
+end;
+
+function EncOne(var cd: TCoder; var c: TAdaptiveBit; bit: Integer): Integer; inline;
+begin
+  Result := EOne(cd.enc, c, bit);
+end;
+
+function EncAvg(var cd: TCoder; var a, b: TAdaptiveBit; bit: Integer): Integer; inline;
+begin
+  Result := EAvg(cd.enc, a, b, bit);
+end;
+
 function DecOne(var cd: TCoder; var c: TAdaptiveBit; bit: Integer): Integer; inline;
 begin
   Result := DOne(cd.dec, c);
@@ -1002,8 +1048,9 @@ end;
 {$define CC_NAME:=CodeComponent}{$define CC_FAST:=m.fast}{$define CC_ENC:=cd.encoding}
 {$define CC_AVG:=CodeAvg}{$define CC_ONE:=CodeOne}
 {$I pjacoef.inc}
-{ the fast model, encoding }
-{$define CC_NAME:=CodeComponentFast}{$define CC_FAST:=True}
+{ the fast model, encoding, the coder fused }
+{$define CC_NAME:=CodeComponentFast}{$define CC_FAST:=True}{$define CC_ENC:=True}
+{$define CC_AVG:=EncAvg}{$define CC_ONE:=EncOne}
 {$I pjacoef.inc}
 { the fast model, decoding }
 {$define CC_NAME:=CodeComponentFastDec}{$define CC_ENC:=False}

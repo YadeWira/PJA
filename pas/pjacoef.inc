@@ -2,9 +2,9 @@
   times by pjamodel with these macros:
     CC_NAME  the routine's name
     CC_FAST  the fast model (a constant True, or m.fast)
-    CC_ENC   encoding (a constant False, or cd.encoding)
-    CC_AVG   two counters averaged: CodeAvg, or the fused DecAvg
-    CC_ONE   one counter: CodeOne, or the fused DecOne
+    CC_ENC   encoding (a constant True or False, or cd.encoding)
+    CC_AVG   two counters averaged: CodeAvg, or the fused EncAvg / DecAvg
+    CC_ONE   one counter: CodeOne, or the fused EncOne / DecOne
   A constant condition lets FPC drop the branches that cannot run, and the
   fused routines skip the coder's layers; every variant codes the same bits
   (the codec suite demands identical streams). }

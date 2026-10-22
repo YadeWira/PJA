@@ -476,9 +476,48 @@ end;
 { The block as a standard encoder writes it (F.1.2): ZRL only before a nonzero
   coefficient, EOB if zeros are left at the end. }
 {$ifdef PJA_FAST}{$push}{$R-}{$Q-}{$endif}
+{ A bit per coefficient of a block (zigzag order), set where it is not zero:
+  the encoder then visits only those, instead of asking each of the 63. }
+{$ifdef CPUX86_64}
+{$asmmode intel}
+function NonzeroMask(cf: PSmallInt): QWord;
+var p: PSmallInt; m: QWord;
+begin
+  p := cf;
+  { SSE2, part of x86-64: compare 8 coefficients with 0 at a time, pack the
+    word masks to bytes, take their top bits }
+  asm
+    mov rax, p
+    pxor xmm7, xmm7
+    xor rdx, rdx
+    mov rcx, 56
+  @loop:
+    movdqu xmm0, [rax + rcx * 2]
+    pcmpeqw xmm0, xmm7
+    packsswb xmm0, xmm0
+    pmovmskb r8d, xmm0
+    and r8d, 255
+    shl rdx, 8
+    or rdx, r8
+    sub rcx, 8
+    jns @loop
+    mov m, rdx
+  end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm7'];
+  Result := not m;
+end;
+{$else}
+function NonzeroMask(cf: PSmallInt): QWord;
+var k: Integer;
+begin
+  Result := 0;
+  for k := 0 to 63 do
+    if cf[k] <> 0 then Result := Result or (QWord(1) shl k);
+end;
+{$endif}
+
 function EncodeBlock(var wr: TBitWriter; const j: TJpeg; const s: TScan; i: Integer; const b: TBlockRef;
                      var pred: Integer): Boolean;
-var k, r, v, t, diff, sym: Integer; cf: PSmallInt; dc, ac: ^THuff;
+var k, r, v, t, diff, sym, last: Integer; cf: PSmallInt; dc, ac: ^THuff; nz: QWord;
 begin
   { the block and the tables through pointers: the encoder reads data that
     Decompose (or the model) already validated, and BlocksOf keeps base + 63
@@ -491,10 +530,16 @@ begin
   if dc^.len[t] = 0 then Exit(False);
   { the code and its extra bits in one go: at most 16 + 16 bits }
   wr.Bits((dc^.code[t] shl t) or ((diff - Ord(diff < 0)) and ((1 shl t) - 1)), dc^.len[t] + t);
-  r := 0;
-  for k := 1 to 63 do begin
+  { only the nonzero AC coefficients: the run of zeros before each one is
+    the gap from the last one }
+  nz := NonzeroMask(cf) and not QWord(1);
+  last := 0;
+  while nz <> 0 do begin
+    k := BsfQWord(nz);
+    nz := nz and (nz - 1);
+    r := k - last - 1;
+    last := k;
     v := cf[k];
-    if v = 0 then begin Inc(r); Continue; end;
     while r > 15 do begin
       if ac^.len[$F0] = 0 then Exit(False);
       wr.Bits(ac^.code[$F0], ac^.len[$F0]);
@@ -504,8 +549,9 @@ begin
     sym := (r shl 4) or t;
     if ac^.len[sym] = 0 then Exit(False);
     wr.Bits((ac^.code[sym] shl t) or ((v - Ord(v < 0)) and ((1 shl t) - 1)), ac^.len[sym] + t);
-    r := 0;
   end;
+  { zeros after the last nonzero one: an end of block }
+  r := 63 - last;
   if r > 0 then begin
     if ac^.len[0] = 0 then Exit(False);
     wr.Bits(ac^.code[0], ac^.len[0]);
