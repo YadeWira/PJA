@@ -1,12 +1,16 @@
 ﻿# PJA on Windows: the same streams as on Linux, round trips, and the CLI's
 # refusals. Run from the folder windows_pkg.sh makes:
-#   pwsh -NoProfile -File .\windows.ps1
-# It writes results.txt next to itself.
+#   pwsh -NoProfile -File .\windows.ps1                                   (64-bit)
+#   pwsh -NoProfile -File .\windows.ps1 -Exe pja32.exe -Ref pja32_ref.exe  (32-bit)
+# It writes results-<exe>.txt next to itself.
+param([string]$Exe = 'pja.exe', [string]$Ref = 'pja_ref.exe')
 $ErrorActionPreference = 'Continue'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
-$out = Join-Path $here 'results.txt'
-Set-Content -Path $out -Value "PJA Windows test $(Get-Date -Format s)" -Encoding utf8
+$pja = Join-Path $here $Exe; $pjaRef = Join-Path $here $Ref
+Remove-Item -Recurse -Force win_*, back_*, cli -ErrorAction SilentlyContinue
+$out = Join-Path $here "results-$Exe.txt"
+Set-Content -Path $out -Value "PJA Windows test, $Exe and $Ref, $(Get-Date -Format s)" -Encoding utf8
 $script:fails = 0; $script:cells = 0
 function Log($s) { Add-Content -Path $out -Value $s -Encoding utf8 }
 function Check($ok, $what) {
@@ -47,53 +51,53 @@ foreach ($n in 'fotoñandú', '写真') {
 Log "inputs: $($inputs.Count)"
 
 Log '--- the same streams as Linux'
-& .\pja.exe a -q -th 1 -o win_full\ -- @inputs; Log "  rc $LASTEXITCODE"
+& $pja a -q -th 1 -o win_full\ -- @inputs; Log "  rc $LASTEXITCODE"
 SameAs 'win_full' $linFull 'full model, 1 thread: .pja identical to Linux'
-& .\pja.exe a -q -th 1 --fast -o win_fast\ -- @inputs; Log "  rc $LASTEXITCODE"
+& $pja a -q -th 1 --fast -o win_fast\ -- @inputs; Log "  rc $LASTEXITCODE"
 SameAs 'win_fast' $linFast 'fast model, 1 thread: .pja identical to Linux'
-& .\pja.exe a -q -th 4 -o win_full4\ -- @inputs
+& $pja a -q -th 4 -o win_full4\ -- @inputs
 SameAs 'win_full4' $linFull 'full model, -th 4: identical'
 $env:PJA_NOASM = '1'
-& .\pja.exe a -q -th 1 --fast -o win_noasm\ -- @inputs
+& $pja a -q -th 1 --fast -o win_noasm\ -- @inputs
 Remove-Item Env:PJA_NOASM
 SameAs 'win_noasm' $linFast 'fast model without asm: identical'
-& .\pja_ref.exe a -q -th 2 -o win_ref\ -- @inputs
+& $pjaRef a -q -th 2 -o win_ref\ -- @inputs
 SameAs 'win_ref' $linFull 'checked build, -th 2: identical'
 
 Log '--- round trips'
 $lf = Get-ChildItem -LiteralPath (Join-Path $here 'lin_full') | ForEach-Object { $_.FullName }
-& .\pja.exe x -q -th 1 -o back_full\ -- @lf; Log "  rc $LASTEXITCODE"
+& $pja x -q -th 1 -o back_full\ -- @lf; Log "  rc $LASTEXITCODE"
 SameAs 'back_full' $orig 'Linux .pja (full) extracted on Windows: the originals'
 $lq = Get-ChildItem -LiteralPath (Join-Path $here 'lin_fast') | ForEach-Object { $_.FullName }
-& .\pja.exe x -q -th 8 -o back_fast\ -- @lq; Log "  rc $LASTEXITCODE"
+& $pja x -q -th 8 -o back_fast\ -- @lq; Log "  rc $LASTEXITCODE"
 SameAs 'back_fast' $orig 'Linux .pja (fast) extracted with -th 8: the originals'
 
 Log '--- the CLI'
 New-Item -ItemType Directory -Force -Path cli | Out-Null
 Copy-Item -LiteralPath 'in\grayscale.jpg' -Destination 'cli\g.jpg'
-& .\pja.exe a -q 'cli\g.jpg'; Check ($LASTEXITCODE -eq 0) 'a into the same folder'
+& $pja a -q 'cli\g.jpg'; Check ($LASTEXITCODE -eq 0) 'a into the same folder'
 Set-Content -Path 'cli\g.jpg' -Value 'old'
-& .\pja.exe x -q 'cli\g.pja' 2>$null; Check ($LASTEXITCODE -eq 1) 'x over an existing file: rc 1'
+& $pja x -q 'cli\g.pja' 2>$null; Check ($LASTEXITCODE -eq 1) 'x over an existing file: rc 1'
 Check ((Get-Content 'cli\g.jpg') -eq 'old') '  the file is untouched'
-& .\pja.exe x -q -f 'cli\g.pja'; Check ($LASTEXITCODE -eq 0) 'with -f: rc 0'
+& $pja x -q -f 'cli\g.pja'; Check ($LASTEXITCODE -eq 0) 'with -f: rc 0'
 Check ((Sha 'cli\g.jpg') -eq $orig['grayscale.jpg']) '  replaced by the original'
 $b = [IO.File]::ReadAllBytes((Join-Path $here 'cli\g.pja')); $b[20] = $b[20] -bxor 1
 [IO.File]::WriteAllBytes((Join-Path $here 'cli\h.pja'), $b)
-& .\pja.exe x -q 'cli\h.pja' 2>$null; Check ($LASTEXITCODE -eq 1) 'a hash bit changed: rc 1'
+& $pja x -q 'cli\h.pja' 2>$null; Check ($LASTEXITCODE -eq 1) 'a hash bit changed: rc 1'
 Check (-not (Test-Path 'cli\h.jpg')) '  nothing written under the name'
-& .\pja.exe x -q --keep-corrupt 'cli\h.pja' 2>$null
+& $pja x -q --keep-corrupt 'cli\h.pja' 2>$null
 Check ((Test-Path 'cli\h.jpg.corrupt') -and -not (Test-Path 'cli\h.jpg')) '--keep-corrupt: h.jpg.corrupt only'
-& .\pja.exe x -q --max-output=100 -o 'cli\m.jpg' 'cli\g.pja' 2>$null
+& $pja x -q --max-output=100 -o 'cli\m.jpg' 'cli\g.pja' 2>$null
 Check (($LASTEXITCODE -eq 1) -and -not (Test-Path 'cli\m.jpg')) '--max-output below the original: refused'
-& .\pja.exe a -th4 x.jpg 2>$null; Check ($LASTEXITCODE -eq 2) 'glued -th4: rc 2'
-& .\pja.exe list 'cli\g.pja' > cli\list.txt; Check ((Get-Content cli\list.txt) -match 'original') 'list'
-$o = & .\pja.exe a -f 'in\gray8.jls' -o 'cli\st.pja'
+& $pja a -th4 x.jpg 2>$null; Check ($LASTEXITCODE -eq 2) 'glued -th4: rc 2'
+& $pja list 'cli\g.pja' > cli\list.txt; Check ((Get-Content cli\list.txt) -match 'original') 'list'
+$o = & $pja a -f 'in\gray8.jls' -o 'cli\st.pja'
 Check (($LASTEXITCODE -eq 0) -and ($o -match 'stored as is')) 'a file the codec cannot shrink: stored as is'
 Set-Content -Path 'cli\plain' -Value 'x'
-$e = & .\pja.exe a 'in\grayscale.jpg' -o 'cli\plain\x.pja' 2>&1 | Out-String
+$e = & $pja a 'in\grayscale.jpg' -o 'cli\plain\x.pja' 2>&1 | Out-String
 Check (($LASTEXITCODE -eq 1) -and ($e -match 'could not write it: [A-Za-z]')) "a write the system refuses, in its words: $($e.Trim())"
 New-Item -ItemType Directory -Force -Path 'cli\dir' | Out-Null
-& .\pja.exe a -q 'cli\dir' 2>$null; Check ($LASTEXITCODE -eq 1) 'a directory as input: rc 1'
+& $pja a -q 'cli\dir' 2>$null; Check ($LASTEXITCODE -eq 1) 'a directory as input: rc 1'
 
 Log '--- names'
 Check (Test-Path -LiteralPath 'win_full\fotoñandú.pja') 'a name in the ANSI code page: written under its own name'

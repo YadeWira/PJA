@@ -14,6 +14,7 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (a photo is usually one band). Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
+| `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, and the `.pja` is the same byte for byte |
 | `--fast` | `a`: a JPEG goes with the fast model: about 1.5 times as fast to extract, about 1.7% larger (`CODEC.md`). `x` needs no switch |
 | `-n`, `--dry-run` | do everything but write |
 | `-q`, `--quiet` | only errors |
@@ -26,7 +27,9 @@ stderr.
 ## Nothing written that did not verify
 
 - `a` writes the `.pja` only after the codec has decompressed its own stream
-  and compared it with the input.
+  and compared it with the input (unless `--no-verify` is asked for: a
+  program that checks on its own, such as an archiver, need not pay for it
+  twice).
 - `x` does, in order: validate the format; refuse a declared size above
   `--max-output` **before** decoding; decode with that size as the cap;
   check the size **and** the hash; and only then write.
@@ -60,5 +63,5 @@ measured against the old spelling.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (46 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (48 cells: round trips, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, every usage error).

@@ -45,17 +45,20 @@ suite compresses the same files with both, with and without assembly and with
 several threads, and demands identical streams. The JPEG and JPEG-LS
 decoders stay checked in every build.
 
-**Windows (64-bit)**: cross-compiled from Linux with the `x86_64-win64` units
-FreePascal ships (`fpc -Twin64 -Px86_64`). `pas/tests/windows_pkg.sh DIR`
-builds `pja.exe`, a checked `pja_ref.exe`, the samples and the `.pja` files
-Linux makes of them; `windows.ps1`, run on Windows, demands the very same
-`.pja` files (full and fast model, with and without assembly, 1 to 4
-threads), every original back from the Linux ones, the CLI's refusals, and
-names outside the ANSI code page. Checked on Windows 10 on 21/10/2026: 24
-cells, 0 failures. The arguments are read in UTF-16 there and the program
-runs in UTF-8: through the ANSI code page a name like `写真.jpg` could not
-be opened at all. 32-bit Windows needs the `i386-win32` units, not
-installed here.
+**Windows (64 and 32 bits)**: cross-compiled from Linux, `x86_64-win64`
+with the units FreePascal ships (`fpc -Twin64 -Px86_64`), `i386-win32` with
+a cross compiler built from FreePascal's sources (the 32-bit build has no
+assembly: the Pascal path, which the suite holds to the same streams).
+`pas/tests/windows_pkg.sh DIR` builds `pja.exe`, a checked `pja_ref.exe`
+(and, with `PPC386` and `RTL386` set, `pja32.exe` and `pja32_ref.exe`), the
+samples and the `.pja` files Linux makes of them; `windows.ps1`, run on
+Windows, demands the very same `.pja` files (full and fast model, with and
+without assembly, 1 to 4 threads), every original back from the Linux ones,
+the CLI's refusals, and names outside the ANSI code page. Checked on
+Windows 10 on 21/10/2026, 64-bit and 32-bit builds: 24 cells each, 0
+failures. The arguments are read in UTF-16 there and the program runs in
+UTF-8: through the ANSI code page a name like `写真.jpg` could not be opened
+at all. The 32-bit build's speed is not measured yet.
 
 ## Layout
 

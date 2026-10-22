@@ -39,8 +39,12 @@ type
   end;
 
 { The original file (JPEG or JPEG-LS) -> .pja. fast: the codec's fast model
-  (pjacodec.Compress). }
-function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fast: Boolean = False): TPackResult;
+  (pjacodec.Compress). verify: decompress the stream and compare it with
+  the original before writing (the default); without it, a codec bug would
+  only show when extracting, where the hash catches it. The JPEG's own round
+  trip (pjajpeg.VerifyRoundTrip) runs either way. }
+function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fast: Boolean = False;
+              verify: Boolean = True): TPackResult;
 
 { .pja -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch, `original` holds what was decoded and `expected` the hash
@@ -72,12 +76,13 @@ begin
   Result.err := e;
 end;
 
-function Pack(const original: TBytes; out pja: TBytes; threads: Integer; fast: Boolean): TPackResult;
+function Pack(const original: TBytes; out pja: TBytes; threads: Integer; fast: Boolean;
+              verify: Boolean): TPackResult;
 var stream: TBytes;
 begin
   pja := nil;
   Result := PackFail(ukOk);
-  Result.codec := Compress(original, stream, True, threads, fast);
+  Result.codec := Compress(original, stream, verify, threads, fast);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
   if Length(stream) >= Length(original) then
     Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True)
