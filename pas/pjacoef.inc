@@ -14,7 +14,7 @@ function CC_NAME(var cd: TCoder; var cp: TComponent; const qt: array of Word; va
 var bx, by, k, n, nzA, nzL, ctx, node, bit, rem, v, a, l, base, abase, lbase, pos, u, w, idx: SizeInt;
     nzc, dcr: array of Byte; haveA, haveL: Boolean; rb2, nbs: Integer; res, x, e, i, ep: Integer;
     nb, ib, mbN, mbI, mbS, kb, rb, za, zb, pb, prevB, nzB, sg, lz: Integer;
-    q: array[0..63] of Integer; rq: array[0..63] of Double; dq0, dc4, dc8: Int64; rq0, rc4, rc8: Double; sum, predF, pred, est, lo, hi, total, f: Int64; nest: Integer;
+    q: array[0..63] of Integer; rq: array[0..63] of Double; dq0, dc4, dc8: Int64; rq0, rc4, rc8: Double; sum, predF, pred, lo, hi, total, f: Int64; nest: Integer;
     pc, pr: TLanes; ests: TEstimates; i2: Integer; tmp: Int64;
     fb: TBlockF; fm, mm, zm, zm0: QWord; leftC: TEdgeCache; rowC: array of TEdgeCache; rightC: TEdgeCache;
 begin
@@ -27,7 +27,7 @@ begin
   dq0 := Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]; rq0 := 1 / dq0;
   dc4 := 4 * dq0; rc4 := 1 / dc4; dc8 := 8 * dq0; rc8 := 1 / dc8;
   FillChar(fb, SizeOf(fb), 0);
-  zm0 := 0;
+  zm0 := 0; mbI := 0;
   rowC := nil; SetLength(rowC, cp.bw);
   leftC := Default(TEdgeCache);
   nzc := nil; SetLength(nzc, cp.bw * cp.bh);
@@ -86,14 +86,11 @@ begin
         nb := NeighbourMag(cp, base, bx, by - y0, k);
         { the interior neighbours in this block, already coded: (u-1, v) and
           (u, v-1); row 0 and column 0 come later }
-        pos := ZIGZAG[k]; u := pos shr 3; w := pos and 7;
-        if (u > 1) and (w > 1) then
-          ib := Abs(cp.coef[base + UNZIG[pos - 8]]) + Abs(cp.coef[base + UNZIG[pos - 1]])
-        else if u > 1 then ib := 2 * Abs(cp.coef[base + UNZIG[pos - 8]])
-        else if w > 1 then ib := 2 * Abs(cp.coef[base + UNZIG[pos - 1]])
-        else ib := -1;
-        if ib < 0 then mbI := NO_NEIGHBOUR else mbI := Clip(FineLog(ib), NO_NEIGHBOUR - 1);
-        if ib < 0 then ib := 0;
+        { both when there are both, twice the one there is; none for (1, 1):
+          from tables per position, without a branch }
+        ib := IB_WA[idx] * Abs(cp.coef[base + IB_NA[idx]]) + IB_WB[idx] * Abs(cp.coef[base + IB_NB[idx]]);
+        if not CC_FAST then
+          if IB_NONE[idx] then mbI := NO_NEIGHBOUR else mbI := Clip(FineLog(ib), NO_NEIGHBOUR - 1);
         if nb < 0 then begin mbN := NO_NEIGHBOUR; mbS := Clip(FineLog(2 * ib), NO_NEIGHBOUR - 1); end
         else begin mbN := Clip(FineLog(nb), NO_NEIGHBOUR - 1); mbS := Clip(FineLog(nb + ib), NO_NEIGHBOUR - 1); end;
         kb := K_BUCKET_OF[k]; rb := RemBucket(rem);
@@ -255,13 +252,14 @@ begin
         end;
       end;
 
-      for ep := 0 to EDGE_POS - 1 do begin
-        if ep and 1 = 0 then pos := ep div 2 + 1 else pos := (ep div 2 + 1) * 8;
-        k := UNZIG[pos];
-        if cp.coef[base + k] <> 0 then begin
-          fb[pos] := Dequant(cp.coef[base + k], q[k]);
-          fm := fm or (QWord(1) shl pos);
-        end;
+      { the nonzero ones of row 0 and column 0, from the mask: no question
+        per coefficient }
+      if CC_ENC then zm := zm0 and EDGE_ZZ else zm := NonzeroMask(@cp.coef[base]) and EDGE_ZZ;
+      while zm <> 0 do begin
+        k := BsfQWord(zm); zm := zm and (zm - 1);
+        pos := ZIGZAG[k];
+        fb[pos] := Dequant(cp.coef[base + k], q[k]);
+        fm := fm or (QWord(1) shl pos);
       end;
 
       { 4. the DC, estimated pixel by pixel along both edges (Lepton's idea):
@@ -277,25 +275,29 @@ begin
       for i := 0 to 7 do begin pc[i] := 0; pr[i] := 0; end;
       SumKernels(fb, fm, KER_LEFT, pc);
       SumKernels(fb, fm, KER_TOP, pr);
-      nest := 0; total := 0; lo := High(Int64); hi := Low(Int64);
+      nest := 0; total := 0; lo := 0; hi := 0;
       if haveL then begin
         for i := 0 to 7 do begin
-          est := (leftC.px[i] - pc[i]) div 4;
-          ests[nest] := est; Inc(nest);
-          if est < lo then lo := est;
-          if est > hi then hi := est;
+          ests[nest] := (leftC.px[i] - pc[i]) div 4; Inc(nest);
         end;
       end;
       if haveA then begin
         for i := 0 to 7 do begin
-          est := (rowC[bx].px[i] - pr[i]) div 4;
-          ests[nest] := est; Inc(nest);
-          if est < lo then lo := est;
-          if est > hi then hi := est;
+          ests[nest] := (rowC[bx].px[i] - pr[i]) div 4; Inc(nest);
         end;
       end;
-      { the middle half of the sorted estimates }
-      if nest = 16 then Split16(ests) else if nest = 8 then Split8(ests);
+      { the middle half of the sorted estimates; the split leaves the
+        smallest and the largest at the ends, where their extremes are taken
+        without a branch }
+      if nest = 16 then begin
+        Split16(ests);
+        lo := Min64(Min64(ests[0], ests[1]), Min64(ests[2], ests[3]));
+        hi := Max64(Max64(ests[12], ests[13]), Max64(ests[14], ests[15]));
+      end else if nest = 8 then begin
+        Split8(ests);
+        lo := Min64(ests[0], ests[1]);
+        hi := Max64(ests[6], ests[7]);
+      end;
       total := 0;
       for i := nest div 4 to nest - 1 - nest div 4 do total := total + ests[i];
       if nest > 0 then nest := nest - 2 * (nest div 4);

@@ -450,3 +450,25 @@ below packJPG, with a stream 0.43% smaller.
 Tried and left out: turning the overflow and range checks off in the JPEG
 decoder's block routine gave about 1%, not enough to give up the rule that
 the decoders stay checked in every build.
+
+Then the branches. Decoding mispredicted about 178 million of them on 30
+photos, some 15% of the cycles, and much of it on data the code compared
+in order to choose between two values: the sign of a neighbour (`Sgn3`),
+the extremes of the DC estimates, the sign of an edge prediction before its
+division. Those became comparisons and masks; the extremes are taken from
+the ends the partition network already leaves them at; the edge's nonzero
+coefficients and the in-block neighbour come from the nonzero mask and
+from tables per position. About -6% decompressing, -3% compressing. The
+151 photos, three alternating rounds:
+
+| | packJPG 5.0f | PJA `--fast` |
+|---|---|---|
+| compress | 130.4, 133.4, 131.9 Gcycles | 120.4, 122.5, 130.2 (median -7.7%) |
+| decompress | 126.2, 122.9, 121.4 | 111.7, 109.5, 106.6 (-11.5%) |
+
+Tried and dropped, each measured: the arithmetic encoder's interval update
+without a branch (+3%: the predictor already gets it right from the
+model's own branches on the same bit), `FineLog` without a branch (more
+instructions, slower), the position kernels in 32 bits (half the cache,
+no faster), NeighbourMag's weights and divisor set up once per block (no
+faster: the routine has no registers to spare).

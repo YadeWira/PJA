@@ -176,14 +176,16 @@ end;
   and one comparison each way corrects that: the result is DivRound's,
   exactly. Anything larger takes the division itself. }
 function DivRoundR(const a, b: Int64; rb: Double): Int64; inline;
-var n, q: Int64;
+var n, q, sg: Int64;
 begin
-  if a >= 0 then n := a + b div 2 else n := -a + b div 2;
+  { |a| and the sign put back without a branch: sg is 0 or all ones }
+  sg := SarInt64(a, 63);
+  n := (a xor sg) - sg + b div 2;
   if (n >= 0) and (n < Int64(1) shl 50) then begin
     q := Trunc(n * rb);
     if q * b > n then Dec(q) else if (q + 1) * b <= n then Inc(q);
   end else q := n div b;
-  if a >= 0 then Result := q else Result := -q;
+  Result := (q xor sg) - sg;
 end;
 
 procedure NewBits(var b: TBits; n: SizeInt);
@@ -814,9 +816,11 @@ begin
   CodeMantissa(cd, mant1, m1, m1stride, mant, maxE, i, a);
 end;
 
+{ 0, 1 or 2 for a negative, zero or positive v. Comparisons, not branches:
+  the sign of a neighbour is as unpredictable as the data. }
 function Sgn3(v: Int64): Integer; inline;
 begin
-  if v < 0 then Result := 0 else if v = 0 then Result := 1 else Result := 2;
+  Result := Ord(v > 0) - Ord(v < 0) + 1;
 end;
 
 
@@ -873,6 +877,13 @@ var
   { the interior positions as a mask over the zigzag indices, NonzeroMask's
     order }
   INTERIOR_ZZ: QWord;
+  { the same for row 0 and column 0 without the DC }
+  EDGE_ZZ: QWord;
+  { the interior neighbours in the block of INTERIOR[idx], already coded:
+    (u-1, v) and (u, v-1), weights 1 and 1 when both are interior, 2 and 0
+    when one is, none (both weights 0, at the DC) for (1, 1) }
+  IB_NA, IB_NB, IB_WA, IB_WB: array[0..48] of Byte;
+  IB_NONE: array[0..48] of Boolean;
   { RATIO_OF[left, rem] = rem * 16 div left, for rem < left }
   RATIO_OF: array[1..49, 0..48] of Byte;
 
@@ -919,6 +930,20 @@ begin
   m := SarInt64(d, 63);      { all ones when b < a }
   a := a + (d and m);
   b := b - (d and m);
+end;
+
+function Min64(a, b: Int64): Int64; inline;
+var d: Int64;
+begin
+  d := b - a;
+  Result := a + (d and SarInt64(d, 63));
+end;
+
+function Max64(a, b: Int64): Int64; inline;
+var d: Int64;
+begin
+  d := b - a;
+  Result := b - (d and SarInt64(d, 63));
 end;
 
 type
@@ -1641,17 +1666,28 @@ begin
 end;
 
 procedure InitUnzig;
-var k, n: Integer;
+var k, n, pos, u, w: Integer;
 begin
   for k := 0 to 63 do UNZIG[ZIGZAG[k]] := k;
   for k := 0 to 63 do begin NZ_BUCKET_T[k] := NzBucketOf(k); REM_BUCKET_T[k] := RemBucketOf(k); end;
-  n := 0; INTERIOR_ZZ := 0;
+  n := 0; INTERIOR_ZZ := 0; EDGE_ZZ := 0;
+  for k := 1 to 63 do
+    if (ZIGZAG[k] shr 3 = 0) or (ZIGZAG[k] and 7 = 0) then EDGE_ZZ := EDGE_ZZ or (QWord(1) shl k);
   for k := 1 to 63 do
     if (ZIGZAG[k] shr 3 > 0) and (ZIGZAG[k] and 7 > 0) then begin
       INTERIOR[n] := k; Inc(n);
       INTERIOR_ZZ := INTERIOR_ZZ or (QWord(1) shl k);
     end;
   for k := 0 to 48 do INTERIOR_LEFT[k] := 49 - k;
+  for k := 0 to 48 do begin
+    pos := ZIGZAG[INTERIOR[k]]; u := pos shr 3; w := pos and 7;
+    IB_NA[k] := 0; IB_NB[k] := 0; IB_WA[k] := 0; IB_WB[k] := 0; IB_NONE[k] := False;
+    if (u > 1) and (w > 1) then begin
+      IB_NA[k] := UNZIG[pos - 8]; IB_WA[k] := 1; IB_NB[k] := UNZIG[pos - 1]; IB_WB[k] := 1;
+    end else if u > 1 then begin IB_NA[k] := UNZIG[pos - 8]; IB_WA[k] := 2; end
+    else if w > 1 then begin IB_NA[k] := UNZIG[pos - 1]; IB_WA[k] := 2; end
+    else IB_NONE[k] := True;
+  end;
   for k := 1 to 49 do
     for n := 0 to 48 do
       if n < k then RATIO_OF[k, n] := n * 16 div k else RATIO_OF[k, n] := 0;
