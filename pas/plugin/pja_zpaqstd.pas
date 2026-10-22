@@ -4,17 +4,19 @@
 
     pas/plugin/build.sh      -> codecs/pja.so, pja.dll (64 and 32 bits)
 
-  Three exported C functions:
+  Two exported C functions:
   - zpaqstd_codec_v1: the codec. compress() gets a file's block (the file and
     zpaq-std's list of fragments after it) and gives back the PJA codec stream
     (pjacodec.Compress), which keeps every byte after the end of the JPEG; it
     does not verify the stream itself, since zpaq-std decodes every block and
     compares before writing it. decompress() is pjacodec.Decompress, with
-    zpaq-std's exact original size as the cap.
+    zpaq-std's exact original size as the cap. data(ZS_DATA_INFO) is the
+    card zpaq-std shows in codecinfoex (author, repo, license, commit,
+    format); the codec has no other data, and no ZPAQL decoder yet (-sat
+    only).
   - zpaqstd_detect_v1: 1 if PJA takes the file, looking only at its bytes: a
     JPEG or JPEG-LS file that PJA's layer 1 rebuilds byte for byte. No global
     state, so several threads can ask at once.
-  - nothing else: no ZPAQL decoder yet (-sat only).
 
   Levels: 2 = the full model, the stream frozen as pja4-full (stream version
   4, model byte 0). The fast model (level 1) joins once its stream is frozen.
@@ -135,6 +137,32 @@ begin
 end;
 
 const
+  ZS_DATA_INFO = 3;
+  { the card zpaq-std shows in codecinfoex: key=value lines. The commit is
+    the one build.sh sets in PJA_COMMIT, empty when built otherwise }
+  INFO: AnsiString =
+    'name=pja'#10 +
+    'version=stream v4 full'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    'format=PJA codec stream v4, model byte 0 (the full model); JPEG and JPEG-LS'#10 +
+    'notes=lossless: the original rebuilt byte for byte; no ZPAQL decoder yet (-sat only)'#10;
+
+{ data(): only the card; anything else is not this codec's }
+function CodecData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  if what = ZS_DATA_INFO then begin
+    if size <> nil then size^ := Length(INFO);
+    Result := PAnsiChar(INFO);
+  end else begin
+    if size <> nil then size^ := 0;
+    Result := nil;
+  end;
+end;
+
+const
   ZsCodec: TZsCodec = (
     abi: ZS_CODEC_ABI;
     name: 'pja';
@@ -145,7 +173,7 @@ const
     compress_: @CodecCompress;
     decompress_: @CodecDecompress;
     query: nil;
-    data: nil
+    data: @CodecData
   );
 
 function zpaqstd_codec_v1: PZsCodec; cdecl;

@@ -12,6 +12,8 @@ PAS=$(cd "$(dirname "$0")/.." && pwd); OUT=${1:?usage: build.sh <out dir>}
 mkdir -p "$OUT"; OUT=$(realpath "$OUT"); B=$OUT/build
 rm -rf "$B"; mkdir -p "$B/lin" "$B/win" "$B/w32"
 SRC=$PAS/plugin/pja_zpaqstd.pas
+# the commit the plugin's info card names (codecinfoex in zpaq-std)
+export PJA_COMMIT=${PJA_COMMIT:-$(git -C "$PAS" describe --always --dirty --abbrev=7 2>/dev/null || true)}
 run() { "$@" > "$B/fpc.log" 2>&1 || { cat "$B/fpc.log"; exit 1; }; }
 # -Cg: position-independent code, needed by a shared library
 run $FPC -O3 -dPJA_FAST -Cg -Fu"$PAS" -Fi"$PAS" -FU"$B/lin" -o"$B/lin/pja.so" "$SRC"
