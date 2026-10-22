@@ -60,6 +60,17 @@ failures. The arguments are read in UTF-16 there and the program runs in
 UTF-8: through the ANSI code page a name like `写真.jpg` could not be opened
 at all. The 32-bit build's speed is not measured yet.
 
+**As a library: the zpaq-std plugin.** `pas/plugin/pja_zpaqstd.pas` is PJA
+as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
+(codecs for specific formats), on its plugin ABI 1: `pas/plugin/build.sh
+DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
+`pja.dll`, to go in zpaq-std's `codecs/` folder. It detects JPEG and JPEG-LS
+files by their bytes, writes the full-model stream (`pja stream v4 full`),
+and leaves verification to zpaq-std, which decodes every block before
+writing it. No ZPAQL decoder yet, so only `-sat`. Checked on 21/10/2026 on
+Linux and on Windows 10 (64 and 32 bits): 44 files, the same streams on all
+three, and every file back, including archives made on another system.
+
 ## Layout
 
 | | |
@@ -74,6 +85,7 @@ at all. The 32-bit build's speed is not measured yet.
 | `pas/pjapack.pas` | codec and format together, in the order that makes it safe |
 | `pas/pjafs.pas` | writing the output: no links followed, no half-written files, nothing unverified under its name |
 | `pas/pjacli.pas` | the `pja` command |
+| `pas/plugin/` | PJA as a zpaq-std codec plugin |
 | `doc/` | `CODEC.md` (how the codec works, what was measured and tried), `FORMAT.md`, `POLICY.md`, `CLI.md` |
 
 ## Testing
