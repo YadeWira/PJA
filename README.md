@@ -100,6 +100,7 @@ three, and every file back, including archives made on another system.
 | `pas/pjafs.pas` | writing the output: no links followed, no half-written files, nothing unverified under its name |
 | `pas/pjacli.pas` | the `pja` command |
 | `pas/plugin/` | PJA as a zpaq-std codec plugin |
+| `tools/zpaql/` | a compiler to ZPAQL and a ZPAQL interpreter, for the plugin's decoder (Python, build time only) |
 | `doc/` | `CODEC.md` (how the codec works, what was measured and tried), `FORMAT.md`, `POLICY.md`, `CLI.md` |
 
 ## Testing
