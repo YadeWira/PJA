@@ -888,10 +888,10 @@ var
   RATIO_OF: array[1..49, 0..48] of Byte;
 
 const
-  { A dequantized coefficient is clamped here: the predictions multiply it by
-    the basis three times over, and a hostile DQT of 16 bits times a coefficient
-    of 15 would overflow Int64. A legitimate 8-bit JPEG stays below 2047 * 255. }
-  MAX_DEQUANT = 1 shl 22;
+  { A dequantized coefficient is clamped here. A real 8-bit JPEG's DCT
+    coefficients stay below 2^14; with this bound every product the
+    predictions take (a kernel below 2^15.5 times it) fits in 31 bits. }
+  MAX_DEQUANT = 1 shl 15;
 
 type
   { What a finished block leaves for the next ones: along one of its edges
@@ -922,11 +922,23 @@ const
   COL_INTERIOR = QWord($0101010101010100);
   ROW_INTERIOR = QWord($FE);
 
-{ a, b := min, max, without a branch }
+{ The predictions' arithmetic is 32-bit, wrapping, as a 32-bit machine (and
+  the ZPAQL decoder for zpaq-std) does it: sums, differences and products
+  are kept in Int64, which gives the same value modulo 2^32 wherever it is
+  cut, and W32 cuts them to 32 bits right before anything that is not a
+  sum or a product (a division, a comparison, a logarithm, a sign). On
+  real JPEGs nothing ever wraps (0 of 611 million values checked); on a
+  hostile one it wraps the same way everywhere. }
+function W32(x: Int64): Int64; inline;
+begin
+  Result := LongInt(x);
+end;
+
+{ a, b := min, max, without a branch; the difference wraps as in 32 bits }
 procedure CompareSwap(var a, b: Int64); inline;
 var d, m: Int64;
 begin
-  d := b - a;
+  d := W32(b - a);
   m := SarInt64(d, 63);      { all ones when b < a }
   a := a + (d and m);
   b := b - (d and m);
@@ -935,14 +947,14 @@ end;
 function Min64(a, b: Int64): Int64; inline;
 var d: Int64;
 begin
-  d := b - a;
+  d := W32(b - a);
   Result := a + (d and SarInt64(d, 63));
 end;
 
 function Max64(a, b: Int64): Int64; inline;
 var d: Int64;
 begin
-  d := b - a;
+  d := W32(b - a);
   Result := b - (d and SarInt64(d, 63));
 end;
 
@@ -1021,6 +1033,10 @@ begin
   end;
   SumKernels(fb, m0, KER_RIGHT, right.px);
   SumKernels(fb, m0, KER_BOTTOM, bottom.px);
+  for y := 0 to 7 do begin
+    right.eg[y] := W32(right.eg[y]); bottom.eg[y] := W32(bottom.eg[y]);
+    right.px[y] := W32(right.px[y]); bottom.px[y] := W32(bottom.px[y]);
+  end;
 end;
 
 { What the coefficient routine (pjacoef.inc) codes a counter's bit with.
@@ -1692,17 +1708,19 @@ begin
     for n := 0 to 48 do
       if n < k then RATIO_OF[k, n] := n * 16 div k else RATIO_OF[k, n] := 0;
   for k := 0 to 7 do begin
-    W3[k] := 3 * BASIS[k, 0] - BASIS[k, 1];
+    { the edge weights over 8 and the kernels over BASIS[0, 0]: every
+      product they take fits in 32 bits (MAX_DEQUANT) }
+    W3[k] := (3 * BASIS[k, 0] - BASIS[k, 1]) div 8;
     W5[k] := 5 * BASIS[k, 0] - BASIS[k, 1];
-    E3[k] := 3 * BASIS[k, 7] - BASIS[k, 6];
+    E3[k] := (3 * BASIS[k, 7] - BASIS[k, 6]) div 8;
     E5[k] := 5 * BASIS[k, 7] - BASIS[k, 6];
   end;
   for n := 0 to 63 do
     for k := 0 to 7 do begin
-      KER_RIGHT[n, k] := BASIS[n shr 3, k] * E5[n and 7];
-      KER_BOTTOM[n, k] := BASIS[n and 7, k] * E5[n shr 3];
-      KER_LEFT[n, k] := BASIS[n shr 3, k] * W5[n and 7];
-      KER_TOP[n, k] := BASIS[n and 7, k] * W5[n shr 3];
+      KER_RIGHT[n, k] := DivRound(BASIS[n shr 3, k] * E5[n and 7], BASIS[0, 0]);
+      KER_BOTTOM[n, k] := DivRound(BASIS[n and 7, k] * E5[n shr 3], BASIS[0, 0]);
+      KER_LEFT[n, k] := DivRound(BASIS[n shr 3, k] * W5[n and 7], BASIS[0, 0]);
+      KER_TOP[n, k] := DivRound(BASIS[n and 7, k] * W5[n shr 3], BASIS[0, 0]);
     end;
 end;
 

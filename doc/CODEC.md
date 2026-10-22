@@ -475,7 +475,8 @@ faster: the routine has no registers to spare).
 
 ## The fast model, closed (22/10/2026)
 
-The fast model's stream (version 4, model byte 1) is frozen as it is. The
+The fast model is closed: no more work on it (its stream moved to version 5
+with the full model's, below, at no cost in size). The
 151 photos, one thread, in one quiet session (load about 5), two rounds
 each, cycles in user space:
 
@@ -523,4 +524,32 @@ selector, -0.03% to -0.09%; eight hashed contexts more for the interior
 zero flag, -0.01%. A `--max` model would have to be designed as a whole,
 every decision at once; the estimate, 2% to 4% under the full model at 3
 to 6 times its time, with no guarantee. Not done.
+
+## Stream version 5: the predictions in 32 bits (22/10/2026)
+
+For zpaq-std, PJA's stream has to be decodable by a ZPAQL program, and
+ZPAQL has only 32-bit registers. The edge predictions and the DC estimates
+were the only 64-bit arithmetic in the models: a dequantized coefficient
+(up to 2^22) times the kernels (up to 2^27). Version 5 rescales them so
+that every product fits in 31 bits and every value the predictions use
+fits in 32:
+
+- a dequantized coefficient is clamped to 2^15 (a real 8-bit JPEG's DCT
+  coefficients stay below 2^14);
+- the edge weights (3 B0 - B1) are divided by 8, so the edge prediction
+  divides by 724 q instead of 2 B00 q;
+- the DC kernels are divided by B00 (rounded), so the DC estimate divides
+  by B00 q0 instead of B00^2 q0.
+
+The arithmetic is defined as a 32-bit machine's, wrapping: sums and
+products are kept in Int64, which gives the same value modulo 2^32
+wherever it is cut, and `W32` cuts them to 32 bits right before anything
+else (a division, a comparison, the partition network's differences, a
+logarithm, a sign). On real files nothing wraps: 0 of 611 million values
+checked on 151 photos and the 73-file corpus. A hostile file wraps the
+same way in Pascal and in ZPAQL.
+
+What it costs: nothing. The 151 photos, full model, 58,848,193 -> 58,848,272
+bytes (+0.0001%); the corpus -0.0001%; the fast model on 30 photos +5
+bytes in 10.6 MB. Streams of version 4 are no longer read.
 

@@ -79,7 +79,7 @@ as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
 (codecs for specific formats), on its plugin ABI 1: `pas/plugin/build.sh
 DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
 `pja.dll`, to go in zpaq-std's `codecs/` folder. It detects JPEG and JPEG-LS
-files by their bytes, writes the full-model stream (`pja stream v4 full`),
+files by their bytes, writes the full-model stream (`pja stream v5 full`),
 and leaves verification to zpaq-std, which decodes every block before
 writing it. No ZPAQL decoder yet, so only `-sat`. Checked on 21/10/2026 on
 Linux and on Windows 10 (64 and 32 bits): 44 files, the same streams on all

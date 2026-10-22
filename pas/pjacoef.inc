@@ -21,10 +21,12 @@ begin
   for k := 0 to 63 do begin
     q[k] := 1;
     if (k < Length(qt)) and (qt[k] > 0) then q[k] := qt[k];
-    rq[k] := 1 / (2 * Int64(BASIS[0, 0]) * q[k]);
+    { the edge weights are over 8: 2 * BASIS[0, 0] / 8 = 724 }
+    rq[k] := 1 / (724 * Int64(q[k]));
   end;
   { the DC's divisors: the spread's, and the mean's of 4 or 8 estimates }
-  dq0 := Int64(BASIS[0, 0]) * BASIS[0, 0] * q[0]; rq0 := 1 / dq0;
+  { the kernels are over BASIS[0, 0]: one factor of it, not two }
+  dq0 := Int64(BASIS[0, 0]) * q[0]; rq0 := 1 / dq0;
   dc4 := 4 * dq0; rc4 := 1 / dc4; dc8 := 8 * dq0; rc8 := 1 / dc8;
   FillChar(fb, SizeOf(fb), 0);
   zm0 := 0; mbI := 0;
@@ -176,8 +178,8 @@ begin
             pos := BsfQWord(mm); mm := mm and (mm - 1);
             sum := sum + W3[pos shr 3] * fb[pos];
           end;
-          predF := DivRoundR(rowC[bx].eg[w] - sum, 2 * Int64(BASIS[0, 0]) * q[k], rq[k]);
-          tmp := DivRound(5 * predF, 8);
+          predF := DivRoundR(W32(rowC[bx].eg[w] - sum), 724 * Int64(q[k]), rq[k]);
+          tmp := DivRound(W32(5 * predF), 8);
           pb := Clip(FineLog(tmp), NO_PRED - 1);
         end else if (w = 0) and haveL then begin
           sum := 0;
@@ -186,8 +188,8 @@ begin
             pos := BsfQWord(mm); mm := mm and (mm - 1);
             sum := sum + W3[pos and 7] * fb[pos];
           end;
-          predF := DivRoundR(leftC.eg[u] - sum, 2 * Int64(BASIS[0, 0]) * q[k], rq[k]);
-          tmp := DivRound(5 * predF, 8);
+          predF := DivRoundR(W32(leftC.eg[u] - sum), 724 * Int64(q[k]), rq[k]);
+          tmp := DivRound(W32(5 * predF), 8);
           pb := Clip(FineLog(tmp), NO_PRED - 1);
         end;
         { the neighbours' same coefficient: only the full model's counters
@@ -278,12 +280,12 @@ begin
       nest := 0; total := 0; lo := 0; hi := 0;
       if haveL then begin
         for i := 0 to 7 do begin
-          ests[nest] := (leftC.px[i] - pc[i]) div 4; Inc(nest);
+          ests[nest] := W32(leftC.px[i] - pc[i]) div 4; Inc(nest);
         end;
       end;
       if haveA then begin
         for i := 0 to 7 do begin
-          ests[nest] := (rowC[bx].px[i] - pr[i]) div 4; Inc(nest);
+          ests[nest] := W32(rowC[bx].px[i] - pr[i]) div 4; Inc(nest);
         end;
       end;
       { the middle half of the sorted estimates; the split leaves the
@@ -300,13 +302,14 @@ begin
       end;
       total := 0;
       for i := nest div 4 to nest - 1 - nest div 4 do total := total + ests[i];
+      total := W32(total);
       if nest > 0 then nest := nest - 2 * (nest div 4);
       { a pixel gets DC * BASIS[0,0]^2: back to a quantized DC }
       if nest > 0 then begin
         if nest = 8 then pred := DivRoundR(total, dc8, rc8)
         else if nest = 4 then pred := DivRoundR(total, dc4, rc4)
         else pred := DivRound(total, Int64(nest) * dq0);
-        tmp := DivRoundR(hi - lo, dq0, rq0);
+        tmp := DivRoundR(W32(hi - lo), dq0, rq0);
         ctx := Clip(FineLog(tmp), ACT_BUCKETS - 2);
       end else begin pred := 0; ctx := ACT_BUCKETS - 1; end;
       if pred > 32767 then pred := 32767;

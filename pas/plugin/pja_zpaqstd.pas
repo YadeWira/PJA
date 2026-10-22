@@ -18,10 +18,10 @@
     JPEG or JPEG-LS file that PJA's layer 1 rebuilds byte for byte. No global
     state, so several threads can ask at once.
 
-  Levels: 2 = the full model, the stream frozen as pja4-full (stream version
-  4, model byte 0). The fast model (level 1) joins once its stream is frozen.
+  Levels: 2 = the full model, the stream frozen as pja5-full (stream version
+  5, model byte 0). The fast model (level 1) joins once its stream is frozen.
 
-  CONTRACT with zpaq-std: the library field starts with "pja stream v4 full"
+  CONTRACT with zpaq-std: the library field starts with "pja stream v5 full"
   for as long as this plugin writes and reads that stream. A later stream
   needs a new codec name or a new library field, never a silent change. }
 library pja_zpaqstd;
@@ -142,12 +142,12 @@ const
     the one build.sh sets in PJA_COMMIT, empty when built otherwise }
   INFO: AnsiString =
     'name=pja'#10 +
-    'version=' + PJA_VERSION + ' (stream v4 full)'#10 +
+    'version=' + PJA_VERSION + ' (stream v5 full)'#10 +
     'author=Yade Bravo (YadeWira)'#10 +
     'repo=https://github.com/YadeWira/PJA'#10 +
     'license=MIT'#10 +
     'commit=' + {$I %PJA_COMMIT%} + #10 +
-    'format=PJA codec stream v4, model byte 0 (the full model); JPEG and JPEG-LS'#10 +
+    'format=PJA codec stream v5, model byte 0 (the full model); JPEG and JPEG-LS'#10 +
     'notes=lossless: the original rebuilt byte for byte; no ZPAQL decoder yet (-sat only)'#10;
 
 { data(): only the card; anything else is not this codec's }
@@ -166,7 +166,7 @@ const
   ZsCodec: TZsCodec = (
     abi: ZS_CODEC_ABI;
     name: 'pja';
-    library_: 'pja stream v4 full (YadeWira/PJA)';
+    library_: 'pja stream v5 full (YadeWira/PJA)';
     min_level: LEVEL_FULL;
     max_level: LEVEL_FULL;
     bound: @CodecBound;
