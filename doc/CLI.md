@@ -15,7 +15,7 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, and the `.pja` is the same byte for byte |
-| `--fast` | `a`: a JPEG goes with the fast model: about 1.5 times as fast to extract, about 1.7% larger (`CODEC.md`). `x` needs no switch |
+| `--fast` | `a`: a JPEG goes with the fast model: about 1.75 times as fast both ways, 1.7% larger than the full model, and on one thread smaller and about 9% faster than packJPG 5.0f (`CODEC.md`). `x` needs no switch |
 | `-n`, `--dry-run` | do everything but write |
 | `-q`, `--quiet` | only errors |
 | `--` | everything after it is a file, even if it starts with a dash |

@@ -472,3 +472,55 @@ model's own branches on the same bit), `FineLog` without a branch (more
 instructions, slower), the position kernels in 32 bits (half the cache,
 no faster), NeighbourMag's weights and divisor set up once per block (no
 faster: the routine has no registers to spare).
+
+## The fast model, closed (22/10/2026)
+
+The fast model's stream (version 4, model byte 1) is frozen as it is. The
+151 photos, one thread, in one quiet session (load about 5), two rounds
+each, cycles in user space:
+
+| | packJPG 5.0f | PJA `--fast` | PJA full |
+|---|---|---|---|
+| size | 60,084,653 | 59,827,219 (-0.43%) | 58,848,193 (-2.06%) |
+| compress | 123.5, 125.1 Gcycles | 112.0, 113.2 (-9.4%) | 195.9, 195.0 (+57%) |
+| decompress | 115.2, 117.2 | 104.7, 105.3 (-9.6%) | 186.6, 186.4 (+61%) |
+
+Two more ideas measured and left out: counters in 2 bytes instead of 4
+(probability in 11 bits, count in 5) cost +0.37% for about 1% of speed:
+the counters' memory is not the lever it looked like; precision is what
+matters (in 12 bits alone, +0.44%). And a count limit of 63 instead of 255
+would make the fast model 0.08% smaller at no cost in time, but it changes
+the frozen stream.
+
+## A heavier model, explored (22/10/2026)
+
+How much more a JPEG can give, measured with the author's archived TCIJ, a
+JPEG compressor built on paq8px v216's JPEG model (GPL: used as a yardstick
+only; nothing of its code is in PJA). On 30 photos it is 8.9% smaller than
+PJA's full model, about 30 times slower; on 10 baseline photos, 5.7%. Two
+kinds of files stand out: one with repeated content where its match model
+takes 55% off, and the progressive ones, where PJA is 20% smaller (paq8px
+does not model progressive scans). Taking its parts out one at a time, on
+the 10 baseline photos:
+
+| TCIJ | against PJA full |
+|---|---|
+| everything | -5.7% |
+| without its 14 APM stages | -5.2% |
+| without the general and match models | -4.3% |
+| its JPEG model only, 49 contexts, no APM | -3.8% |
+| the same with 20 contexts | -2.4% |
+| with 10 contexts | +0.75% |
+| with 5 contexts | +2.8% |
+
+PJA's full model is worth about 10 to 12 of those contexts, at a fraction of
+the cost. The rest of the distance is not in any one part: many contexts
+combining several predictions, counters with a bit history that know how
+much to trust themselves, two inputs per context, mixing in two layers,
+APM stages with rich contexts. Tried in PJA one piece at a time, each gave
+next to nothing: an APM after each mixer selected by the mixer's own
+selector, -0.03% to -0.09%; eight hashed contexts more for the interior
+zero flag, -0.01%. A `--max` model would have to be designed as a whole,
+every decision at once; the estimate, 2% to 4% under the full model at 3
+to 6 times its time, with no guarantee. Not done.
+

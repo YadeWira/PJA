@@ -37,6 +37,8 @@ interface
 uses SysUtils, pjajpeg, pjajls;
 
 const
+  { PJA's release: the command and the zpaq-std plugin say this one }
+  PJA_VERSION = '0.0.1';
   STREAM_VERSION = 4;
   { the header: version, model, header stream length }
   STREAM_HEADER = 6;

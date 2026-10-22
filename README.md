@@ -21,6 +21,20 @@ Measured on 19/10/2026 (`doc/CODEC.md`):
 | arithmetic-coded JPEG | 244 | **23.66%** | 21.48% |
 | JPEG-LS photos | 16 | **15.6%** | — (it rebuilds 2 of 9 real JPEG-LS test files; PJA 8) |
 
+And how fast, on the 151 photos with one thread, measured on 22/10/2026
+against packJPG's default (which does not verify either, so PJA with
+`--no-verify`):
+
+| | packJPG 5.0f | PJA `--fast` | PJA (full model) |
+|---|---|---|---|
+| compressed | 60,084,653 | **59,827,219** (-0.43%) | **58,848,193** (-2.06%) |
+| compress | 38.7 s | **34.6 s** (-9%) | 58.5 s |
+| decompress | 34.1 s | **31.7 s** (-10%) | 57.7 s |
+
+`--fast` is smaller and faster than packJPG both ways; the full model is 2%
+smaller still, at 1.7 times the time. With several threads the full model
+splits each photo into bands.
+
 What it handles: baseline, extended and progressive JPEG with Huffman or
 arithmetic coding, 8 bits, any subsampling, restart markers, and the oddities
 real encoders leave (extra restart markers, EOB runs cut by the table, data

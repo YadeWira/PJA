@@ -142,7 +142,7 @@ const
     the one build.sh sets in PJA_COMMIT, empty when built otherwise }
   INFO: AnsiString =
     'name=pja'#10 +
-    'version=stream v4 full'#10 +
+    'version=' + PJA_VERSION + ' (stream v4 full)'#10 +
     'author=Yade Bravo (YadeWira)'#10 +
     'repo=https://github.com/YadeWira/PJA'#10 +
     'license=MIT'#10 +

@@ -20,7 +20,6 @@ uses
   SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajls, pjapack, pjafs;
 
 const
-  PJA_VERSION = '0.1';
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
   { the largest input read whole into memory }
   MAX_INPUT = QWord(1) shl 31;
