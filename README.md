@@ -83,8 +83,11 @@ files by their bytes, writes the full-model stream (`pja stream v5 full`),
 and leaves verification to zpaq-std, which decodes every block before
 writing it. Every block also carries PJA's decoder in ZPAQL, so that any
 zpaq reads the archive without the plugin: it is compiled from
-`pas/plugin/zpaql/` with `tools/zpaql/` (37,745 bytes of ZPAQL), and covers
+`pas/plugin/zpaql/` with `tools/zpaql/` (40,547 bytes of ZPAQL), and covers
 stage 1, sequential Huffman JPEG, which is all the plugin takes for now.
+Its memory is sized for each block: the plugin tells zpaq-std how much
+the decoder will need for that file (2 MB for a small one, 16 MB for a
+photo of 200 KB, at most 256 MB).
 Checked on 22/10/2026 with zpaq-std 1.4.0 on Linux and on Windows 10 (64
 and 32 bits): every block decoded by the ZPAQL as by the plugin (134 of
 the 151 photos, 56 files of the corpus; the rest progressive), and every

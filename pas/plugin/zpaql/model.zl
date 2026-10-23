@@ -202,16 +202,16 @@ def neighbourmag(coef, base, bx, byr, k, bw):
     s = 0
     ws = 0
     if byr > 0:
-        s = s + 2 * iabs(H[coef + base - bw * 64 + k])
+        s = s + 2 * iabs(cget(coef, base - bw * 64 + k))
         ws += 2
         if bx > 0:
-            s = s + iabs(H[coef + base - bw * 64 - 64 + k])
+            s = s + iabs(cget(coef, base - bw * 64 - 64 + k))
             ws += 1
         if bx + 1 < bw:
-            s = s + iabs(H[coef + base - bw * 64 + 64 + k])
+            s = s + iabs(cget(coef, base - bw * 64 + 64 + k))
             ws += 1
     if bx > 0:
-        s = s + 2 * iabs(H[coef + base - 64 + k])
+        s = s + 2 * iabs(cget(coef, base - 64 + k))
         ws += 2
     if ws == 0:
         return -1
@@ -334,7 +334,7 @@ def component(c, y0, y1, sx, sy, lumaw):
             while rem > 0 and idx <= 48:
                 k = INTERIOR[idx]
                 nb = neighbourmag(coef, base, bx, by - y0, k, bw)
-                ib = IB_WA[idx] * iabs(H[coef + base + IB_NA[idx]]) + IB_WB[idx] * iabs(H[coef + base + IB_NB[idx]])
+                ib = IB_WA[idx] * iabs(cget(coef, base + IB_NA[idx])) + IB_WB[idx] * iabs(cget(coef, base + IB_NB[idx]))
                 if IB_NONE[idx]:
                     mbi = NO_NEIGHBOUR
                 else:
@@ -371,17 +371,17 @@ def component(c, y0, y1, sx, sy, lumaw):
                         i += 1
                     x = mantissa(mb + T_MANT1, kb, K_BUCKETS, mb + T_MANT, MAX_EXP_AC, i)
                     if hava:
-                        ctx = sgn3(H[coef + abase + k])
+                        ctx = sgn3(cget(coef, abase + k))
                     else:
                         ctx = 1
                     if havl:
-                        ctx = ctx * 3 + sgn3(H[coef + lbase + k])
+                        ctx = ctx * 3 + sgn3(cget(coef, lbase + k))
                     else:
                         ctx = ctx * 3 + 1
                     if code1(mb + T_SIGN + kb * 9 + ctx):
-                        H[coef + base + k] = -x
+                        cset(coef, base + k, -x)
                     else:
-                        H[coef + base + k] = x
+                        cset(coef, base + k, x)
                     rem -= 1
                 idx += 1
             if rem > 0:
@@ -389,7 +389,7 @@ def component(c, y0, y1, sx, sy, lumaw):
             # the interior, dequantized
             for idx in range(49):
                 k = INTERIOR[idx]
-                v = H[coef + base + k]
+                v = cget(coef, base + k)
                 if v:
                     FB[zigzag[k]] = dequant(v, QK[k])
             # 3. row 0 and column 0, interleaved, each predicted across its edge
@@ -418,9 +418,9 @@ def component(c, y0, y1, sx, sy, lumaw):
                 a = 0
                 l = 0
                 if hava:
-                    a = iabs(H[coef + abase + k])
+                    a = iabs(cget(coef, abase + k))
                 if havl:
-                    l = iabs(H[coef + lbase + k])
+                    l = iabs(cget(coef, lbase + k))
                 if hava and havl:
                     mbn = clip(bitlen(a + l), NO_NEIGHBOUR - 1)
                 elif hava or havl:
@@ -429,15 +429,15 @@ def component(c, y0, y1, sx, sy, lumaw):
                     mbn = NO_NEIGHBOUR
                 if ep >= 2:
                     if u == 0:
-                        prevb = clip(bitlen(H[coef + base + UNZIG[w - 1]]), 7)
+                        prevb = clip(bitlen(cget(coef, base + UNZIG[w - 1])), 7)
                     else:
-                        prevb = clip(bitlen(H[coef + base + UNZIG[(u - 1) * 8]]), 7)
+                        prevb = clip(bitlen(cget(coef, base + UNZIG[(u - 1) * 8])), 7)
                 else:
                     prevb = 7
                 if u == 0:
-                    ib = clip(finelog(H[coef + base + UNZIG[8 + w]]), 11)
+                    ib = clip(finelog(cget(coef, base + UNZIG[8 + w])), 11)
                 else:
-                    ib = clip(finelog(H[coef + base + UNZIG[u * 8 + 1]]), 11)
+                    ib = clip(finelog(cget(coef, base + UNZIG[u * 8 + 1])), 11)
                 pb3 = clip(pb, 3)
                 bit = codemix5(mxezero, ep, mb + T_EZERO5 + (ep * 12 + ib) * 4 + pb3,
                                mb + T_EZERO1 + ep * PRED_BUCKETS + pb,
@@ -461,16 +461,16 @@ def component(c, y0, y1, sx, sy, lumaw):
                     else:
                         sg = sgn3(predf)
                     if code1(mb + T_ESIGN + ((ep & 1) * 3 + sg) * PRED_BUCKETS + pb):
-                        H[coef + base + k] = -x
+                        cset(coef, base + k, -x)
                     else:
-                        H[coef + base + k] = x
+                        cset(coef, base + k, x)
             for ep in range(EDGE_POS):
                 if (ep & 1) == 0:
                     pos = ep // 2 + 1
                 else:
                     pos = (ep // 2 + 1) * 8
                 k = UNZIG[pos]
-                v = H[coef + base + k]
+                v = cget(coef, base + k)
                 if v:
                     FB[pos] = dequant(v, QK[k])
             # 4. the DC, from the boundary pixels' estimates
@@ -548,7 +548,7 @@ def component(c, y0, y1, sx, sy, lumaw):
             x = pred + res
             if sgt(x, 32767) or slt(x, -32767):
                 error()
-            H[coef + base] = x
+            cset(coef, base, x)
             FB[0] = dequant(x, QK[0])
             fillcaches(rowc + bx * 16)
             for pos in range(64):

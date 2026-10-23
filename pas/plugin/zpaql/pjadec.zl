@@ -6,7 +6,6 @@ STR = array(4096)        # stretch: 12-bit probability -> -2048..2047 (two's com
 RECIP = array(256)       # 65536 / (n + 1.5), rounded
 O0 = array(256)
 O1 = array(65536)
-O2 = array(1 << O2_BITS)
 
 x1 = 0
 x2 = 0
@@ -130,6 +129,39 @@ def upd(addr, bit, limit):
 def hash2(c2, c1):
     return (((c2 << 8) | c1) * 2654435761) >> (32 - O2_BITS + 8)
 
+# The order-2 counters: Pascal's table of 2^O2_BITS, or, when the raw bytes
+# are few, only the ones they touch (at most 8 a byte) in a hash map of
+# twice that many slots, each a key (the index + 1, 0 = empty) and the
+# counter: the same counters, in far less memory.
+o2map = 0
+o2bits = 0
+
+def o2init(n):
+    global o2map, o2bits
+    o2bits = 1
+    while (1 << o2bits) < 16 * n:
+        o2bits += 1
+    if o2bits + 1 >= O2_BITS:
+        o2bits = 0
+        o2map = alloc(1 << O2_BITS)
+    else:
+        o2map = alloc(2 << o2bits)
+
+def o2addr(idx):
+    if o2bits == 0:
+        return o2map + idx
+    mask = (1 << o2bits) - 1
+    slot = ((idx * 2654435761) >> (32 - o2bits)) & mask
+    while True:
+        a = o2map + 2 * slot
+        key = H[a]
+        if key == idx + 1:
+            return a + 1
+        if key == 0:
+            H[a] = idx + 1
+            return a + 1
+        slot = (slot + 1) & mask
+
 def coderaw(maxlen):
     """the raw bytes, into RAW (rawbase, rawlen)"""
     global rawbase, rawlen
@@ -138,6 +170,7 @@ def coderaw(maxlen):
         error()
     rawbase = alloc(n + 4)
     rawlen = n
+    o2init(n)
     m = mxnew(4, 8)
     c1 = 0
     c2 = 0
@@ -147,13 +180,14 @@ def coderaw(maxlen):
         for b in range(8):
             mxadd(m, cp(O0[node]))
             mxadd(m, cp(O1[c1 * 256 + node]))
-            mxadd(m, cp(O2[(h << 8) | node]))
+            a2 = o2addr((h << 8) | node)
+            mxadd(m, cp(H[a2]))
             mxadd(m, 32768)
             bit = decode(mxmix(m, 7 - b))
             mxupd(m, bit)
             upd(base(O0) + node, bit, COUNTER_LIMIT)
             upd(base(O1) + c1 * 256 + node, bit, COUNTER_LIMIT)
-            upd(base(O2) + ((h << 8) | node), bit, COUNTER_LIMIT)
+            upd(a2, bit, COUNTER_LIMIT)
             node = node * 2 + bit
         H[rawbase + i] = node - 256
         c2 = c1
@@ -163,14 +197,35 @@ def coderaw(maxlen):
 
 # ---------------------------------------------------------------- memory
 
-HMAX = 67108864          # 2^26 words of H (the config's ph)
+PROBE = array(1)
+hsize = 0
+
+def probeh():
+    """H's size, found by writing at PROBE + 2^k until that lands on PROBE
+    (each word written is put back): the block's config sizes H for this
+    very file, and a decoder given less stops instead of overwriting"""
+    global hsize
+    a = base(PROBE)
+    H[a] = 1515870810
+    k = 0
+    hsize = 0
+    while k < 32:
+        off = 1 << k
+        old = H[a + off]
+        H[a + off] = 2779096485
+        if H[a] == 2779096485:
+            H[a] = old
+            hsize = off
+            return
+        H[a + off] = old
+        k += 1
 
 def alloc(n):
     """n words of H, zero (never used before)"""
     global hp
     r = hp
     hp += n
-    if hp > HMAX:
+    if hsize and hp > hsize:
         error()
     return r
 
@@ -204,6 +259,24 @@ mcusx = 0
 mcusy = 0
 nscans = 0
 ri = 0
+
+def cget(coef, i):
+    """coefficient i of a component: 16 bits, two to a word, signed"""
+    w = H[coef + (i >> 1)]
+    if i & 1:
+        w = w >> 16
+    else:
+        w = w & 65535
+    if w & 32768:
+        w = w | 4294901760
+    return w
+
+def cset(coef, i, v):
+    a = coef + (i >> 1)
+    if i & 1:
+        H[a] = (H[a] & 65535) | ((v & 65535) << 16)
+    else:
+        H[a] = (H[a] & 4294901760) | (v & 65535)
 
 def rb(i):
     return H[rawbase + i]
@@ -274,7 +347,7 @@ def readsof(p):
         CBH[i] = mcusy * CV[i]
         CBWR[i] = ((width * CH[i] + hmax - 1) // hmax + 7) // 8
         CBHR[i] = ((height * CV[i] + vmax - 1) // vmax + 7) // 8
-        CCOEF[i] = alloc(CBW[i] * CBH[i] * 64)
+        CCOEF[i] = alloc(CBW[i] * CBH[i] * 32)     # two coefficients a word: cget, cset
 
 def readsos(p, last):
     global nscans

@@ -40,7 +40,7 @@ def encodeblock(coef, base, si, i):
     component number i"""
     dct = SDC[4 * si + i]
     act = SAC[4 * si + i]
-    v = H[coef + base]
+    v = cget(coef, base)
     diff = v - PRED[i]
     PRED[i] = v
     t = category(diff)
@@ -54,7 +54,7 @@ def encodeblock(coef, base, si, i):
             putbits(diff, t)
     last = 0
     for k in range(1, 64):
-        v = H[coef + base + k]
+        v = cget(coef, base + k)
         if v:
             r = k - last - 1
             last = k
@@ -132,6 +132,7 @@ def recompose():
 def main():
     global origsize, hp
     hp = base(HEAP)
+    probeh()
     tables()
     modeltables()
     origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)

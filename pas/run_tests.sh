@@ -17,7 +17,7 @@ python3 "$PAS/results.py" "$PAS"
 
 echo "== build"
 for prog in test_blake3 test_format test_corruption test_pjafs zpaql_segments; do
-  $FPC -O2 -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 # the command as it is shipped: the fast build

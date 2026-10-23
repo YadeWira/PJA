@@ -570,12 +570,30 @@ floating point are not computed in ZPAQL: squash travels in the program
 (symmetric, its upper half as deltas of 3 bits), and the reciprocals of
 the counters come from an integer formula that gives the same 256 values.
 
-37,745 bytes of program; its H is 2^26 words (256 MB), of which 4.3
-million are its tables; the plugin takes only the files whose decoding
-fits. With libzpaq's JIT it decodes about 10 times slower than the plugin
-(2.1 s against 0.23 s for a photo of 211 KB). Checked with zpaq-std 1.4.0
-on every block of the 151 photos and of the corpus (190 blocks, 0 wrong),
-and on Windows 10 in 64 and 32 bits; extracting without the plugin gives
-every file back. The suite runs the decoder on two samples in a Python
+40,547 bytes of program. Its memory, H, is sized for each block: the
+config says `comp 0 0 $3 $1+1 0`, and zpaq-std asks the plugin for $3
+(query `ZS_QUERY_ZPAQL_ARGS`) when it compresses the block; the block keeps
+the number, so any zpaq reads it. `pjazpaqlargs` follows the decoder's
+allocations one by one to give it. The decoder's own part is 90,000 words:
+the raw model's order-2 counters, a table of 4 million in Pascal, are a
+hash map sized by the raw bytes (each touches at most 8), and the
+coefficients go two to a word. A small JPEG asks for 2 MB, a photo of
+200 KB for 16 MB; the plugin takes nothing that would need more than 256
+MB. The decoder measures its H when it starts and stops with an error if
+it is short, instead of writing over itself. Such a ZPAQL is handed out
+only as `ZS_DATA_ZPAQL_ARGS`: a zpaq-std that does not ask the query sees
+none, so it never writes a block with an H of one word. With libzpaq's JIT it decodes about 10 times slower than the plugin
+(2.1 s against 0.23 s for a photo of 211 KB). With a fixed H of 2^26
+words it was checked with zpaq-std 1.4.0 on every block of the 151 photos
+and of the corpus (190 blocks, 0 wrong), and on Windows 10 in 64 and 32
+bits; extracting without the plugin gave every file back. The decoder with
+its order-2 map and packed coefficients, given a fixed H, again on every
+block of both sets: 193 blocks, 0 wrong (3 more files taken, now that the
+plugin counts the memory exactly instead of estimating it). Then with H sized per block, on zpaq-std's
+test build with the query (its commit 6c8ea90): the same 193 blocks, 0
+wrong, the memory it reports going from 25 GB to 1.7 GB for the 151
+photos; extraction without the plugin, 151 of 151 photos back, and plain
+zpaq 7.15, which knows nothing of plugins, gave back all 78 files of the
+corpus; on Windows 10, 64 and 32 bits, every block and every file. The suite runs the decoder on two samples in a Python
 interpreter of ZPAQL, and checks that the generated program is current.
 

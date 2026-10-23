@@ -13,8 +13,11 @@
     zpaq-std's exact original size as the cap. data(ZS_DATA_ZPAQL) is its
     ZPAQL decoder (pjazpaql.inc, from pas/plugin/zpaql/ through
     tools/zpaql/gen_pjadec.py), which every block carries so that any zpaq
-    reads it without this plugin; data(ZS_DATA_INFO) the card zpaq-std
-    shows in codecinfoex.
+    reads it without this plugin. Its H is sized for each block: the config
+    says $3, and query(ZS_QUERY_ZPAQL_ARGS) gives it (pjazpaqlargs); such a
+    ZPAQL is handed out only as ZS_DATA_ZPAQL_ARGS, so a zpaq-std that does
+    not ask sees none. data(ZS_DATA_INFO) is the card zpaq-std shows in
+    codecinfoex.
   - zpaqstd_detect_v1: 1 if PJA takes the file, looking only at its bytes:
     only what the ZPAQL decoder covers, stage 1: a sequential Huffman JPEG
     that PJA's layer 1 rebuilds byte for byte and that fits the decoder's
@@ -33,17 +36,14 @@ library pja_zpaqstd;
 
 uses
   {$ifdef unix}cthreads,{$endif}
-  SysUtils, pjajpeg, pjacodec, pjamodel;
-
-{ the ZPAQL decoder (tools/zpaql/gen_pjadec.py): PJA_ZPAQL, and how much of
-  its H it takes }
-{$I pjazpaql.inc}
+  SysUtils, pjajpeg, pjacodec, pjamodel, pjazpaqlargs;
 
 const
   ZS_DATA_ZPAQL = 2;
-  { what the decoder may take of its 2^ZPAQL_PH words, a margin kept; and
-    how many scans it keeps }
-  ZPAQL_MAX_WORDS = (Int64(1) shl ZPAQL_PH) - (Int64(1) shl 20);
+  { a ZPAQL whose config uses $3 .. $5: only through this, so that a
+    zpaq-std without the query below sees no ZPAQL at all }
+  ZS_DATA_ZPAQL_ARGS = 4;
+  ZS_QUERY_ZPAQL_ARGS = 2;
   ZPAQL_MAX_SCANS = 256;
   ZS_CODEC_ABI  = 1;
   ZS_ERR_DATA   = -1;
@@ -130,30 +130,24 @@ begin
   end;
 end;
 
-{ The words of H the ZPAQL decoder takes for this JPEG, as its alloc()
-  calls do: its variables and tables, the raw bytes, each block's 64
-  coefficients and two counters, the edge caches of a row, the Huffman
-  tables (at most one per 17 bytes of a DHT), the raw model's mixer, and
-  two models per band. }
-function ZpaqlWords(const j: TJpeg): Int64;
-var c: Integer; maxbw: SizeInt;
-begin
-  Result := ZPAQL_STATIC_WORDS + Length(j.raw) + 4 + 12 + 8 * 8;
-  maxbw := 0;
-  for c := 0 to High(j.comp) do begin
-    Inc(Result, Int64(j.comp[c].bw) * j.comp[c].bh * 66);
-    if j.comp[c].bw > maxbw then maxbw := j.comp[c].bw;
-  end;
-  Inc(Result, Int64(maxbw) * 16);
-  Inc(Result, Int64(Length(j.raw)) div 17 * 512);
-  Inc(Result, Int64(BandCount(j)) * 2 * ZPAQL_MODEL_WORDS);
-end;
-
 { 1 if PJA takes the file: what its ZPAQL decoder covers (stage 1), so that
   no block is left without one: a JPEG, sequential with Huffman coding, that
   layer 1 rebuilds byte for byte, with at most ZPAQL_MAX_SCANS scans and
   whose decoding fits the decoder's memory. Only the bytes; deterministic;
   no shared state. }
+{ query(ZS_QUERY_ZPAQL_ARGS): for compress()'s output, the $3 of the
+  decoder's config (log2 of its H for this very file), or negative }
+function CodecQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := ZpaqlArgs(Bytes(src, n));
+  except
+    Result := -1;
+  end;
+end;
+
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
 var d: TBytes; j: TJpeg;
 begin
@@ -163,7 +157,7 @@ begin
     d := Bytes(src, n);
     if (d[0] = $FF) and (d[1] = $D8) and VerifyRoundTrip(d, j).Ok and not j.progressive and
        not j.arithmetic and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
-       (ZpaqlWords(j) <= ZPAQL_MAX_WORDS) then Result := 1;
+       (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
   except
     Result := 0;
   end;
@@ -183,10 +177,11 @@ const
     'format=PJA codec stream v5, model byte 0 (the full model); JPEG and JPEG-LS'#10 +
     'notes=lossless: the original rebuilt byte for byte; ZPAQL decoder stage 1: sequential Huffman JPEG'#10;
 
-{ data(): the ZPAQL decoder and the card; anything else is not this codec's }
+{ data(): the ZPAQL decoder (as ZS_DATA_ZPAQL_ARGS: its H comes from the
+  query) and the card; anything else, ZS_DATA_ZPAQL included, nil }
 function CodecData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  if what = ZS_DATA_ZPAQL then begin
+  if what = ZS_DATA_ZPAQL_ARGS then begin
     if size <> nil then size^ := Length(PJA_ZPAQL) + 1;
     Exit(PAnsiChar(PJA_ZPAQL));
   end;
@@ -209,7 +204,7 @@ const
     bound: @CodecBound;
     compress_: @CodecCompress;
     decompress_: @CodecDecompress;
-    query: nil;
+    query: @CodecQuery;
     data: @CodecData
   );
 

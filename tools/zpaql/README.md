@@ -12,7 +12,7 @@ build time only; nothing of them goes into PJA itself.
 | `zpaqlvm.py` | runs a PCOMP program as libzpaq does, one instruction at a time, to test and debug it |
 | `test_zpaqlc.py` | random expressions against exact 32-bit arithmetic, and programs for control flow, calls, arrays, signed helpers, long jumps and variables spilled to H |
 | `gen_pjadec.py` | builds the plugin's decoder: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then all of `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc`; `--check` only verifies both are current |
-| `test_pjadec.py` | that decoder run on segments (`pas/tests/zpaql_segments`): each JPEG back byte for byte |
+| `test_pjadec.py` | that decoder run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG back byte for byte |
 
 ```sh
 python3 tools/zpaql/gen_pjadec.py        # after changing pas/plugin/zpaql/ or the model

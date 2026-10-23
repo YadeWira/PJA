@@ -4,7 +4,9 @@ it must give back each JPEG byte for byte.
 
     test_pjadec.py <segment dir> <jpeg> ...
 
-The segments come from pas/tests/zpaql_segments. Slow (the interpreter is
+The segments come from pas/tests/zpaql_segments, with the $3 the plugin's
+query gives for each: the decoder runs with exactly that H (it measures its
+H and stops if it is short). Slow (the interpreter is
 Python): the suite gives it two small samples; zpaq-std -sat, with
 libzpaq's JIT, checks every block of real files."""
 import math, os, re, sys, time
@@ -22,13 +24,16 @@ for j in jpegs:
     seg = open(os.path.join(segdir, os.path.splitext(os.path.basename(j))[0] + '.seg'), 'rb').read()
     t = time.time()
     try:
-        out, steps, size = zpaqlvm.run_config(cfg, seg, [math.ceil(math.log2(len(seg))), math.ceil(math.log2(len(want)))], max_ph=23)
+        ph = int(open(os.path.join(segdir, os.path.splitext(os.path.basename(j))[0] + '.args')).read())
+        if ph < 0:
+            raise RuntimeError('the query refused it')
+        out, steps, size = zpaqlvm.run_config(cfg, seg, [math.ceil(math.log2(len(seg))), math.ceil(math.log2(len(want))), ph])
         ok = out == want
     except Exception as e:
         ok = False; out = b''
         print('  %s: %s' % (os.path.basename(j), e))
     if not ok:
         fails += 1
-    print('  %-20s %s (%d bytes, %.0f s)' % (os.path.basename(j), 'the original' if ok else 'DIFFERS', len(want), time.time() - t))
+    print('  %-20s %s (%d bytes, H of 2^%s words, %.0f s)' % (os.path.basename(j), 'the original' if ok else 'DIFFERS', len(want), ph if ok else '?', time.time() - t))
 print('%d files, %d failures' % (len(jpegs), fails))
 sys.exit(1 if fails else 0)

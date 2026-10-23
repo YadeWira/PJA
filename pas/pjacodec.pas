@@ -76,6 +76,9 @@ function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True
   against it here. }
 function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt = 1 shl 28;
                     threads: Integer = 1; expected: SizeInt = 0): TCodecResult;
+{ A JPEG stream's headers only (its raw bytes, parsed), without decoding the
+  bands: what a decoder will need, before decoding. Fails for JPEG-LS. }
+function StreamHeaders(const stream: TBytes; out j: TJpeg; maxRaw: SizeInt = 1 shl 28): TCodecResult;
 
 implementation
 
@@ -438,6 +441,20 @@ begin
       Exit(CodecFail(ceNoRoundTrip));
     end;
   end;
+end;
+
+function StreamHeaders(const stream: TBytes; out j: TJpeg; maxRaw: SizeInt): TCodecResult;
+var h: THead; len: Int64;
+begin
+  j := Default(TJpeg);
+  if (Length(stream) < STREAM_HEADER) or (stream[0] <> STREAM_VERSION) or (stream[1] > 1) then
+    Exit(CodecFail(ceBadStream));
+  len := GetU32(stream, 2);
+  if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
+  Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
+  if not Result.Ok then Exit;
+  if h.isLs then Exit(CodecFail(ceBadStream));
+  j := h.j;
 end;
 
 function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
