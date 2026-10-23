@@ -662,3 +662,52 @@ variants, JPEG-LS files of every interleave and NEAR), large and small in
 any order: every file back byte for byte. The suite decodes two blocks of
 two files.
 
+## JPEGs inside a JPEG: stream version 6 (23/10/2026)
+
+Many JPEGs carry others: the EXIF thumbnail in an APP1 (some cameras write
+it twice, in two segments), the further images of an MPO after the first
+one's EOI, an Ultra HDR gain map after it too. Until now they went with
+the raw bytes, which the order-2 model codes, while their coefficients
+could be modelled as any JPEG's. Measured over the test sets: at least
+11.7% of the bytes of the 78-file corpus are such JPEGs, 0.56% of the 151
+photos', and close to half of an MPO.
+
+Version 6 is a frame around version 5 streams: a table of the parts
+(where each is in the file, its length, its stream's length, its mode),
+the parts' streams, and the host, the file without them, as a version 5
+stream. A part inside one of the host's segments is replaced by zeros
+there, so that the host's markers still add up; one after the host's EOI
+is cut out. A part identical to an earlier one (the second copy of a
+thumbnail) is a reference to it, with no stream. Each part goes through
+Compress itself, so the second image of an MPO has its own thumbnail
+taken out as well (two levels).
+
+Compress looks for FF D8 FF from the third byte on (none can be inside
+entropy-coded data, where FF is followed by 00 or a restart marker); a
+candidate becomes a part if PJA takes it as a JPEG and its stream is
+smaller than its bytes. The bands of the host and of the whole file are
+the same, so whether the parts pay is known exactly by coding only the
+file's raw bytes, not by compressing it twice: the parts go only when the
+version 6 stream is smaller than version 5 would be. For a file of 1 MB
+or more whose parts are a quarter of it (an MPO's images) that check is
+skipped, since it would code megabytes of raw bytes to confirm what the
+model's gain on a whole image makes certain. Version 5 is written
+whenever no part pays, and also if anything about the parts fails (the
+host not taken, the round trip not identical): a file never fails for
+its parts. The zpaq-std plugin asks for version 5 only, the stream its
+ZPAQL reads.
+
+| set | files | v5 | v6 | | smaller | larger | time |
+|---|---|---|---|---|---|---|---|
+| MPO of the corpus | 6 | 35,002,145 | 30,406,303 | **-13.13%** | 5 | 0 | 16.6 s -> 16.1 s |
+| corpus | 78 | 24,348,466 | 23,654,057 | **-2.85%** | 24 | 0 | 10.6 s -> 12.2 s |
+| 151 photos | 151 | 58,848,272 | 58,786,809 | -0.10% | 48 | 0 | 16.7 s -> 17.6 s |
+| 30 photos | 30 | 10,411,481 | 10,401,771 | -0.09% | 6 | 0 | 4.1 s -> 4.2 s |
+| arithmetic and generated JPEGs | 884 | 18,926,330 | 18,926,330 | 0 | 0 | 0 | 6.6 s -> 7.0 s |
+
+8 threads, every file extracted and compared: all identical. The first
+version took every part that was smaller than its bytes, and 6 of the 30
+photos came out larger: their cameras write the thumbnail twice, and the
+raw model had coded the second copy almost for free; the references to
+an earlier part and the exact check fixed both.
+

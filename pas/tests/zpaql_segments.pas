@@ -19,7 +19,7 @@ begin
       data := nil; SetLength(data, f.Size);
       if f.Size > 0 then f.ReadBuffer(data[0], f.Size);
     finally f.Free; end;
-    if not Compress(data, stream, False, 1, False).Ok then begin
+    if not Compress(data, stream, False, 1, False, False).Ok then begin
       WriteLn(StdErr, ParamStr(i), ': not compressed'); Halt(1);
     end;
     seg := nil; SetLength(seg, 4 + Length(stream));

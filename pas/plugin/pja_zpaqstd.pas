@@ -114,7 +114,8 @@ begin
     d := Bytes(src, n);
     if IsJls(d) <> ls then Exit(ZS_ERR_DATA);
     { no verification here: zpaq-std decodes every block and compares }
-    r := Compress(d, stream, False, 1, False);
+    { version 5 only: the stream its ZPAQL reads }
+    r := Compress(d, stream, False, 1, False, False);
     if not r.Ok then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));

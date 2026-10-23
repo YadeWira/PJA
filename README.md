@@ -38,8 +38,10 @@ splits each photo into bands.
 What it handles: baseline, extended and progressive JPEG with Huffman or
 arithmetic coding, 8 bits, any subsampling, restart markers, and the oddities
 real encoders leave (extra restart markers, EOB runs cut by the table, data
-after the end); JPEG-LS from 2 to 16 bits, lossless and near-lossless, every
-interleave mode. What it refuses, with the reason: 12-bit JPEG, lossless
+after the end); the JPEGs inside a JPEG (thumbnails, the further images of
+an MPO, Ultra HDR gain maps), each compressed as a JPEG of its own;
+JPEG-LS from 2 to 16 bits, lossless and near-lossless, every interleave
+mode. What it refuses, with the reason: 12-bit JPEG, lossless
 JPEG (SOF3), hierarchical JPEG, and JPEG-LS with subsampled components or a
 point transform.
 

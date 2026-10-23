@@ -117,6 +117,9 @@ type
     scans: array of TScan;
     { the file without its entropy-coded data }
     raw: TBytes;
+    { Decompose only: where in the file the image ends, just past its EOI
+      (the file's length when it has none); what follows is kept in raw }
+    eoi: SizeInt;
   end;
 
 { Parses and decodes. On error, j is half filled and useless. }
@@ -1784,7 +1787,10 @@ begin
     while (p < Length(data)) and (data[p] = $FF) do Inc(p);
     if p >= Length(data) then Exit(Fail(jeTruncated, p));
     m := data[p]; Inc(p);
-    if m = $D9 then Break;  { EOI: whatever follows, garbage included, goes into raw }
+    if m = $D9 then begin  { EOI: whatever follows, garbage included, goes into raw }
+      j.eoi := p;
+      Break;
+    end;
     if (m = 0) or (m = $D8) or (m = $01) then Exit(Fail(jeUnexpectedMarker, p - 1, m));
     { an RST outside a scan (one too many after the last restart interval,
       written by some encoders) has no length: it is kept as it is }
@@ -1827,7 +1833,7 @@ begin
              SetLength(j.scans, Length(j.scans) + 1);
              j.scans[High(j.scans)] := s;
              p := copied;
-             if p >= Length(data) then Break;  { no EOI }
+             if p >= Length(data) then begin j.eoi := Length(data); Break; end;  { no EOI }
              Continue;
            end;
     end;

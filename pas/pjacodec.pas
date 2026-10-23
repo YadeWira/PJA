@@ -20,6 +20,11 @@
   Nothing else is stored: the frame, the Huffman tables, the scans and their
   cuts come back from parsing the raw bytes again (pjajpeg.ParseHeaders).
 
+  A JPEG with other JPEGs inside it (a thumbnail in an APP segment, the
+  further images of an MPO, an Ultra HDR gain map) can go as version 6
+  instead (STREAM_PARTS, below DecompressOne): each of those as a stream
+  of its own, and the file around them as a version 5 stream.
+
   Compress verifies before handing anything out: it decompresses its own
   output and compares it with the input. A JPEG that does not come back
   byte for byte is rejected with its reason. With two threads or more, a
@@ -43,6 +48,11 @@ const
     so a ZPAQL decoder can follow it exactly; 4 streams decoded with the
     64-bit one and are no longer read }
   STREAM_VERSION = 5;
+  { a JPEG with other JPEGs inside it (an EXIF thumbnail, the further
+    images of an MPO, an Ultra HDR gain map): each of them as a stream of
+    its own, the rest as a version 5 stream (doc/CODEC.md). Compress writes
+    it only when it found such a JPEG, version 5 otherwise }
+  STREAM_PARTS = 6;
   { the header: version, model, header stream length }
   STREAM_HEADER = 6;
 
@@ -67,9 +77,11 @@ type
   compared before returning. threads: how many bands at once (1 = no thread
   is created). fast: a JPEG's coefficients with the fast model, which
   decodes about 1.5 times as fast for about 1.7% more (doc/CODEC.md);
-  JPEG-LS files ignore it. }
+  JPEG-LS files ignore it. parts: the JPEGs inside a JPEG compressed on
+  their own (STREAM_PARTS); without it the stream is always version 5, the
+  one the zpaq-std plugin's ZPAQL reads. }
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True;
-                  threads: Integer = 1; fast: Boolean = False): TCodecResult;
+                  threads: Integer = 1; fast: Boolean = False; parts: Boolean = True): TCodecResult;
 { stream -> JPEG. maxRaw caps the raw part a damaged stream can claim.
   expected: the JPEG's size when the caller knows it (the .pja does), to
   allocate it once; 0 if not. Only a hint: the result is not checked
@@ -86,7 +98,7 @@ function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boole
 
 implementation
 
-uses Classes, pjaarith, pjamodel;
+uses Classes, Math, pjaarith, pjamodel;
 
 const
   ERROR_NAMES: array[TCodecError] of string = ('Ok', 'Jpeg', 'NoRoundTrip', 'BadStream', 'FutureVersion', 'TooLarge');
@@ -406,8 +418,8 @@ begin
   end;
 end;
 
-function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
-                  fast: Boolean): TCodecResult;
+function CompressOne(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
+                     fast: Boolean): TCodecResult;
 var j: TJpeg; jl: TJls; cd: TCoder; head, back: TBytes; r: TCodecResult; jobs: array of TBandJob;
     nb, b: Integer;
 begin
@@ -475,16 +487,13 @@ begin
   jl := h.jl; symbols := h.symbols;
 end;
 
-function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
-                    expected: SizeInt): TCodecResult;
+function DecompressOne(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
+                       expected: SizeInt): TCodecResult;
 var h: THead; jobs: array of TBandJob; r: array of TRange; b: Integer; len: Int64;
 begin
   jpeg := nil;
   Result := CodecFail(ceOk);
-  if Length(stream) < 1 then Exit(CodecFail(ceBadStream));
-  if stream[0] > STREAM_VERSION then Exit(CodecFail(ceFutureVersion));
-  if stream[0] < STREAM_VERSION then Exit(CodecFail(ceBadStream));
-  if Length(stream) < STREAM_HEADER then Exit(CodecFail(ceBadStream));
+  if (Length(stream) < STREAM_HEADER) or (stream[0] <> STREAM_VERSION) then Exit(CodecFail(ceBadStream));
   if stream[1] > 1 then Exit(CodecFail(ceBadStream));
   len := GetU32(stream, 2);
   if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
@@ -507,6 +516,238 @@ begin
     if not jobs[b].ok then Exit(CodecFail(ceBadStream));
   if h.isLs then Result.jpeg := RecomposeJls(h.jl, jpeg) else Result.jpeg := Recompose(h.j, jpeg, expected);
   if not Result.jpeg.Ok then begin jpeg := nil; Result.err := ceBadStream; end;
+end;
+
+{ ---------- JPEGs inside a JPEG (STREAM_PARTS) ----------
+
+    byte 0          STREAM_PARTS
+    byte 1          0
+    4 bytes (LE)    K, the parts: 1 to MAX_PARTS
+    K x 13 bytes    each part: where it is in the file (u32), its length
+                    there (u32), its stream's length (u32), and its mode:
+                    bit 0, how the host keeps its place (0 = cut out,
+                    1 = zeros); bit 1, a copy of an earlier part (cameras
+                    write the same thumbnail twice), whose number then
+                    stands in place of the stream's length
+    the K streams   each of a JPEG, version 5 or itself with parts (none
+                    for a copy)
+    the rest        the host: the file with the parts cut out or zeroed,
+                    version 5
+
+  A part inside one of the host's segments (a thumbnail in an APP1) is
+  zeroed, so the host's markers still add up; one past the host's EOI (an
+  MPO's next image) is cut out. }
+
+const
+  MAX_PARTS = 256;
+  PART_ENTRY = 13;
+  { a part's own parts are looked for, theirs not: an MPO's second image
+    and its thumbnail }
+  MAX_PART_DEPTH = 2;
+  PART_ZEROS = 1;
+  PART_COPY = 2;
+
+type
+  TPart = record
+    off, len: Int64;
+    mode: Byte;
+    copyOf: Integer;
+    stream: TBytes;
+  end;
+
+{ The header stream version 5 writes for this JPEG: the bands of a host
+  and of the file it came from are the same, so this tells whether the
+  parts pay. }
+function HeadLength(const j: TJpeg): SizeInt;
+var cd: TCoder; jj: TJpeg;
+begin
+  jj := j;
+  cd.InitEncoder;
+  CodeRaw(cd, jj.raw, MaxInt);
+  CodeScanBits(cd, jj);
+  Result := Length(cd.enc.Finish);
+end;
+
+function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
+                      expected: SizeInt; depth: Integer): TCodecResult; forward;
+
+function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
+                    fast: Boolean; depth: Integer): TCodecResult;
+var j, sj: TJpeg; parts: array of TPart; k, len, p, from: SizeInt; n, i, c: Integer; sub, ps, host, hs, back: TBytes;
+    ok: Boolean; whole: Int64;
+begin
+  stream := nil;
+  if (depth >= MAX_PART_DEPTH) or IsJls(jpeg) or (Length(jpeg) >= High(Cardinal)) or
+     not Decompose(jpeg, j).Ok then
+    Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  { every FF D8 FF that starts a JPEG PJA takes; none can be inside
+    entropy-coded data, where FF is followed by 00 or a restart marker }
+  parts := nil; n := 0;
+  k := 2;
+  while (k + 3 <= Length(jpeg)) and (n < MAX_PARTS) do begin
+    ok := False;
+    if (jpeg[k] = $FF) and (jpeg[k + 1] = $D8) and (jpeg[k + 2] = $FF) and
+       Decompose(Copy(jpeg, k, Length(jpeg) - k), sj).Ok then begin
+      len := sj.eoi;
+      sj := Default(TJpeg);
+      { wholly inside the host's segments or wholly after its end }
+      if (k >= j.eoi) or (k + len <= j.eoi) then begin
+        { the same bytes as an earlier part: a copy of it }
+        c := -1;
+        for i := 0 to n - 1 do
+          if (c < 0) and (parts[i].len = len) and CompareMem(@jpeg[parts[i].off], @jpeg[k], len) then c := i;
+        ps := nil;
+        if c < 0 then begin
+          sub := Copy(jpeg, k, len);
+          if not CompressAt(sub, ps, False, threads, fast, depth + 1).Ok or (Length(ps) + PART_ENTRY >= len) then ps := nil;
+        end;
+        if (c >= 0) or (ps <> nil) then begin
+          SetLength(parts, n + 1);
+          parts[n].off := k; parts[n].len := len; parts[n].stream := ps; parts[n].copyOf := c;
+          parts[n].mode := 0;
+          if k < j.eoi then parts[n].mode := PART_ZEROS;
+          if c >= 0 then parts[n].mode := parts[n].mode or PART_COPY;
+          Inc(n);
+          Inc(k, len);
+          ok := True;
+        end;
+      end;
+    end;
+    if not ok then Inc(k);
+  end;
+  if n = 0 then Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  { the host }
+  host := nil; SetLength(host, Length(jpeg));
+  p := 0; from := 0;
+  for i := 0 to n - 1 do begin
+    if parts[i].off > from then Move(jpeg[from], host[p], parts[i].off - from);
+    Inc(p, parts[i].off - from);
+    if parts[i].mode and PART_ZEROS <> 0 then begin FillChar(host[p], parts[i].len, 0); Inc(p, parts[i].len); end;
+    from := parts[i].off + parts[i].len;
+  end;
+  if from < Length(jpeg) then begin Move(jpeg[from], host[p], Length(jpeg) - from); Inc(p, Length(jpeg) - from); end;
+  SetLength(host, p);
+  { a host PJA does not take (a part that was not where it seemed) leaves
+    the file as one stream }
+  if not CompressOne(host, hs, False, threads, fast).Ok then Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  len := 6 + PART_ENTRY * n + Length(hs);
+  for i := 0 to n - 1 do Inc(len, Length(parts[i].stream));
+  { version 5 of the whole file: the host's stream with the file's own
+    header stream instead of the host's. Small parts go only if they win
+    (two copies of a thumbnail cost the raw bytes' model little, and a
+    small file pays the parts' framing). In a file of 1 MB or more whose
+    parts are a quarter of it (an MPO's images) they always win, and its
+    raw bytes would take long to code only to see it }
+  whole := 0;
+  for i := 0 to n - 1 do Inc(whole, parts[i].len);
+  if (whole * 4 < Length(jpeg)) or (Length(jpeg) < 1 shl 20) then begin
+    whole := Int64(Length(hs)) - GetU32(hs, 2) + HeadLength(j);
+    if len >= whole then begin
+      j := Default(TJpeg);
+      Exit(CompressOne(jpeg, stream, verify, threads, fast));
+    end;
+  end;
+  j := Default(TJpeg);
+  SetLength(stream, len);
+  stream[0] := STREAM_PARTS; stream[1] := 0;
+  p := 2; PutU32(stream, p, n);
+  for i := 0 to n - 1 do begin
+    PutU32(stream, p, Cardinal(parts[i].off)); PutU32(stream, p, Cardinal(parts[i].len));
+    if parts[i].mode and PART_COPY <> 0 then PutU32(stream, p, parts[i].copyOf)
+    else PutU32(stream, p, Length(parts[i].stream));
+    stream[p] := parts[i].mode; Inc(p);
+  end;
+  for i := 0 to n - 1 do
+    if Length(parts[i].stream) > 0 then begin
+      Move(parts[i].stream[0], stream[p], Length(parts[i].stream)); Inc(p, Length(parts[i].stream));
+    end;
+  Move(hs[0], stream[p], Length(hs));
+  Result := CodecFail(ceOk);
+  if verify then begin
+    { a bug in the parts must not cost the file: it goes as one stream }
+    if not DecompressAt(stream, back, 1 shl 28, threads, Length(jpeg), depth).Ok or (Length(back) <> Length(jpeg)) or
+       not CompareMem(@back[0], @jpeg[0], Length(back)) then
+      Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  end;
+end;
+
+function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
+                      expected: SizeInt; depth: Integer): TCodecResult;
+var n, i: Integer; p, hp, op: SizeInt; total, cut, at: Int64; parts: array of TPart; host, part: TBytes;
+    k: SizeInt;
+begin
+  jpeg := nil;
+  if Length(stream) < 1 then Exit(CodecFail(ceBadStream));
+  if stream[0] > STREAM_PARTS then Exit(CodecFail(ceFutureVersion));
+  if stream[0] = STREAM_VERSION then Exit(DecompressOne(stream, jpeg, maxRaw, threads, expected));
+  if (stream[0] <> STREAM_PARTS) or (depth > MAX_PART_DEPTH) or (Length(stream) < 6) or (stream[1] <> 0) then
+    Exit(CodecFail(ceBadStream));
+  if (GetU32(stream, 2) < 1) or (GetU32(stream, 2) > MAX_PARTS) then Exit(CodecFail(ceBadStream));
+  n := Integer(GetU32(stream, 2));
+  if 6 + Int64(PART_ENTRY) * n > Length(stream) then Exit(CodecFail(ceBadStream));
+  parts := nil; SetLength(parts, n);
+  p := 6; at := 6 + Int64(PART_ENTRY) * n; total := 0; cut := 0;
+  for i := 0 to n - 1 do begin
+    parts[i].off := GetU32(stream, p); parts[i].len := GetU32(stream, p + 4);
+    k := GetU32(stream, p + 8); parts[i].mode := stream[p + 12];
+    Inc(p, PART_ENTRY);
+    { in order, not overlapping, each a JPEG's worth, all within the cap }
+    if (parts[i].len < 4) or (parts[i].mode > PART_ZEROS or PART_COPY) or
+       ((i > 0) and (parts[i].off < parts[i - 1].off + parts[i - 1].len)) then Exit(CodecFail(ceBadStream));
+    Inc(total, parts[i].len);
+    if total > maxRaw then Exit(CodecFail(ceTooLarge));
+    if parts[i].mode and PART_ZEROS = 0 then Inc(cut, parts[i].len);
+    parts[i].copyOf := -1;
+    if parts[i].mode and PART_COPY <> 0 then begin
+      { an earlier part, of the same length }
+      if (k >= i) or (parts[k].len <> parts[i].len) or (parts[k].mode and PART_COPY <> 0) then Exit(CodecFail(ceBadStream));
+      parts[i].copyOf := k;
+    end else begin
+      if (k < 1) or (at + k > Length(stream)) then Exit(CodecFail(ceBadStream));
+      parts[i].stream := Copy(stream, at, k);
+      Inc(at, k);
+    end;
+  end;
+  Result := DecompressOne(Copy(stream, at, Length(stream) - at), host, maxRaw, threads, Max(0, expected - cut));
+  if not Result.Ok then Exit;
+  if Length(host) + cut > maxRaw then Exit(CodecFail(ceTooLarge));
+  jpeg := nil; SetLength(jpeg, Length(host) + cut);
+  hp := 0; op := 0;
+  for i := 0 to n - 1 do begin
+    { the host up to the part }
+    if (parts[i].off < op) or (hp + (parts[i].off - op) > Length(host)) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
+    if parts[i].off > op then Move(host[hp], jpeg[op], parts[i].off - op);
+    Inc(hp, parts[i].off - op); op := parts[i].off;
+    if parts[i].copyOf >= 0 then part := Copy(jpeg, parts[parts[i].copyOf].off, parts[i].len)
+    else begin
+      Result := DecompressAt(parts[i].stream, part, parts[i].len, threads, parts[i].len, depth + 1);
+      if not Result.Ok or (Length(part) <> parts[i].len) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
+    end;
+    if parts[i].mode and PART_ZEROS <> 0 then begin
+      { its place in the host, zeros }
+      if hp + parts[i].len > Length(host) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
+      for k := hp to hp + parts[i].len - 1 do
+        if host[k] <> 0 then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
+      Inc(hp, parts[i].len);
+    end;
+    Move(part[0], jpeg[op], parts[i].len); Inc(op, parts[i].len);
+  end;
+  if op + (Length(host) - hp) <> Length(jpeg) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
+  if hp < Length(host) then Move(host[hp], jpeg[op], Length(host) - hp);
+  Result := CodecFail(ceOk);
+end;
+
+function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
+                  fast: Boolean; parts: Boolean): TCodecResult;
+begin
+  if parts then Result := CompressAt(jpeg, stream, verify, threads, fast, 0)
+  else Result := CompressOne(jpeg, stream, verify, threads, fast);
+end;
+
+function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
+                    expected: SizeInt): TCodecResult;
+begin
+  Result := DecompressAt(stream, jpeg, maxRaw, threads, expected, 0);
 end;
 
 end.
