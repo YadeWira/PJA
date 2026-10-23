@@ -33,6 +33,9 @@ type
     err: TPackError;
     fmt: TPjaResult;
     codec: TCodecResult;
+    { Unpack: the original's extension the .pja keeps, without the dot; ''
+      when it has none (a version 3 .pja, or one that was not kept) }
+    ext: string;
     function Ok: Boolean;
     { "Format(RatioExceeded)", "Codec(Jpeg(Unsupported(F7)@6))", "HashMismatch" }
     function Text: string;
@@ -42,9 +45,11 @@ type
   (pjacodec.Compress). verify: decompress the stream and compare it with
   the original before writing (the default); without it, a codec bug would
   only show when extracting, where the hash catches it. The JPEG's own round
-  trip (pjajpeg.VerifyRoundTrip) runs either way. }
+  trip (pjajpeg.VerifyRoundTrip) runs either way. ext: the original's
+  extension without the dot, kept for the extracted name when the format
+  allows it (pjaformat.ValidExtension); any other is left out. }
 function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fast: Boolean = False;
-              verify: Boolean = True): TPackResult;
+              verify: Boolean = True; const ext: string = ''): TPackResult;
 
 { .pja -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch, `original` holds what was decoded and `expected` the hash
@@ -77,17 +82,19 @@ begin
 end;
 
 function Pack(const original: TBytes; out pja: TBytes; threads: Integer; fast: Boolean;
-              verify: Boolean): TPackResult;
-var stream: TBytes;
+              verify: Boolean; const ext: string): TPackResult;
+var stream: TBytes; e: string;
 begin
+  e := ext;
+  if not ValidExtension(e) then e := '';
   pja := nil;
   Result := PackFail(ukOk);
   Result.codec := Compress(original, stream, verify, threads, fast);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
   if Length(stream) >= Length(original) then
-    Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True)
+    Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True, e)
   else
-    Result.fmt := WritePja(stream, Blake3_128(original), Length(original), pja);
+    Result.fmt := WritePja(stream, Blake3_128(original), Length(original), pja, False, e);
   if not Result.fmt.Ok then begin pja := nil; Result.err := ukFormat; end;
 end;
 
@@ -101,6 +108,7 @@ begin
   Result.fmt := Open(pja, p);
   if not Result.fmt.Ok then begin Result.err := ukFormat; Exit; end;
   expected := p.hash;
+  Result.ext := p.ext;
   if p.orig_size > maxOutput then Exit(PackFail(ukTooLarge));
   { the raw part of the stream can never be longer than the whole file }
   cap := p.orig_size;

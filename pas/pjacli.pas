@@ -2,7 +2,7 @@
   the switches and the reasons behind them.
 
     pja a [options] FILE...     compress: photo.jpg -> photo.pja
-    pja x [options] FILE...     extract:  photo.pja -> photo.jpg (or .jls)
+    pja x [options] FILE...     extract:  photo.pja -> photo.jpg (or .jls, .mpo)
     pja list FILE...            what each .pja holds
 
   Nothing is written under an output's name unless it verified: `a` checks
@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajls, pjapack, pjafs;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -303,7 +303,8 @@ var d, pja: TBytes; r: TPackResult; path: string;
 begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
-  r := Pack(d, pja, bandThreads, fastModel, not noVerify);
+  { the extension, as it is written, for x to give it back }
+  r := Pack(d, pja, bandThreads, fastModel, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt));
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) and not quiet then
@@ -322,12 +323,21 @@ begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
   if not (r.Ok or (r.err = ukHashMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
-  if IsJls(orig) then ext := '.jls' else ext := '.jpg';
+  { the original's own extension; a .pja without one (version 3) by the content }
+  if r.ext <> '' then ext := '.' + r.ext
+  else if IsJls(orig) then ext := '.jls'
+  else if IsMpo(orig) then ext := '.mpo'
+  else ext := '.jpg';
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), ext));
   { a hash that does not match goes through Save as well: it deletes it, or
     keeps it under another name with --keep-corrupt }
   if Save(path, orig, h) and not quiet then
     Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+end;
+
+function ExtNote(const ext: string): string;
+begin
+  if ext = '' then Result := '' else Result := ', as .' + ext;
 end;
 
 procedure ListOne(const f: string);
@@ -339,7 +349,7 @@ begin
   hex := '';
   for i := 0 to 15 do hex := hex + LowerCase(IntToHex(p.hash[i], 2));
   Say(f + '  original ' + IntToStr(p.orig_size) + ' B, .pja ' + IntToStr(Length(d)) + ' B' +
-      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + '  blake3-128 ' + hex);
+      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + ExtNote(p.ext) + '  blake3-128 ' + hex);
 end;
 
 var

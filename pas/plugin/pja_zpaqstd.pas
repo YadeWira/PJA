@@ -107,7 +107,7 @@ end;
   else, so that each block's stream is the one its ZPAQL decodes }
 function CompressAs(ls: Boolean; src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64;
-var stream, d: TBytes; r: TCodecResult;
+var stream, d: TBytes; r: TCodecResult; j: TJpeg;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
@@ -117,6 +117,8 @@ begin
     { version 5 only: the stream its ZPAQL reads }
     r := Compress(d, stream, False, 1, False, False);
     if not r.Ok then Exit(ZS_ERR_DATA);
+    { a 12-bit JPEG: PJA takes it, the frozen ZPAQL would not }
+    if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8)) then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
     Result := Length(stream);
@@ -198,8 +200,10 @@ begin
   try
     if StrComp(codecName, 'pja') = 0 then begin
       d := Bytes(src, n);
+      { 8-bit: the ZPAQL decoder is frozen as v0.0.1 left it, which had no
+        12-bit JPEG }
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+         (j.precision = 8) and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);

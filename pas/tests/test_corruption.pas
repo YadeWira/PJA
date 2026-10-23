@@ -67,7 +67,7 @@ begin
   if not r.Ok then begin Inc(c.rejected); Note(c.errors, r.Text); Exit; end;
   { the stored flag is part of what a .pja says: off on a stored file, the
     same bytes read as a codec stream }
-  if (p.orig_size <> original.orig_size) or (p.stored <> original.stored) or
+  if (p.orig_size <> original.orig_size) or (p.stored <> original.stored) or (p.ext <> original.ext) or
      not CompareMem(@p.hash, @original.hash, 16) then Inc(c.desc_differs)
   else if not Same(p.payload, original.payload) then Inc(c.payload_differs)
   else Inc(c.reads_same);
@@ -76,14 +76,16 @@ end;
 { Every bit, every value of the header and descriptor bytes, every
   truncation, and additions at the end. }
 procedure Sweep(const fileData: TBytes; var c: TTally);
-var i, b, v: SizeInt; x: TBytes;
+var i, b, v, fixed: SizeInt; x: TBytes;
 begin
+  { the header and the whole descriptor, its extension field included }
+  fixed := Length(fileData) - Length(original.payload);
   x := Copy(fileData, 0, Length(fileData));
   for i := 0 to High(fileData) do
     for b := 0 to 7 do begin
       x[i] := fileData[i] xor (1 shl b); Try1(c, x); x[i] := fileData[i];
     end;
-  for i := 0 to HEADER_SIZE + DESCRIPTOR_SIZE - 1 do
+  for i := 0 to fixed - 1 do
     for v := 0 to 255 do
       if v <> fileData[i] then begin x[i] := v; Try1(c, x); x[i] := fileData[i]; end;
   for i := 0 to High(fileData) do Try1(c, Copy(fileData, 0, i));
@@ -126,7 +128,10 @@ begin
   e2eFiles := 0;
   for f in files do begin
     orig := ReadAll(f);
-    if not Pack(orig, pja).Ok then begin Check(False, ExtractFileName(f) + ' packs'); Continue; end;
+    { with its extension, so that its field is swept too }
+    if not Pack(orig, pja, 1, False, True, Copy(ExtractFileExt(f), 2, MaxInt)).Ok then begin
+      Check(False, ExtractFileName(f) + ' packs'); Continue;
+    end;
     Open(pja, original);
     Sweep(pja, c);
     if Length(pja) <= E2E_MAX then begin
@@ -135,8 +140,8 @@ begin
       i := 0;
       while i < Length(pja) * 8 do begin
         x[i div 8] := pja[i div 8] xor (1 shl (i mod 8)); Try2(e, x, orig); x[i div 8] := pja[i div 8];
-        if i < (HEADER_SIZE + DESCRIPTOR_SIZE) * 8 then Inc(i)
-        else Inc(i, Max(1, (Length(pja) - HEADER_SIZE - DESCRIPTOR_SIZE) * 8 div 200));
+        if i < (Length(pja) - Length(original.payload)) * 8 then Inc(i)
+        else Inc(i, Max(1, Length(original.payload) * 8 div 200));
       end;
       i := 0;
       while i < Length(pja) do begin Try2(e, Copy(pja, 0, i), orig); Inc(i, Max(1, Length(pja) div 50)); end;

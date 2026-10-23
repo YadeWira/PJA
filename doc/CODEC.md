@@ -18,7 +18,7 @@ over a large corpus, is the oracle for the whole project.
 
 | layer | unit | what it does | status |
 |---|---|---|---|
-| 1 | `pjajpeg` | JPEG ↔ DCT coefficients + what is needed to rebuild the exact bits | done: 8-bit, Huffman and arithmetic, sequential and progressive |
+| 1 | `pjajpeg` | JPEG ↔ DCT coefficients + what is needed to rebuild the exact bits | done: 8 and 12 bits, Huffman and arithmetic, sequential and progressive |
 | 1 | `pjajls` | JPEG-LS ↔ samples, the same way | done: 2-16 bits, NEAR, every interleave mode |
 | 2 | `pjaarith` | binary arithmetic coder and adaptive bit counters | done |
 | 3 | `pjamodel` | context modelling of the coefficients, the JPEG-LS samples or symbols, and the raw bytes | first version |
@@ -710,4 +710,33 @@ version took every part that was smaller than its bytes, and 6 of the 30
 photos came out larger: their cameras write the thumbnail twice, and the
 raw model had coded the second copy almost for free; the references to
 an earlier part and the exact check fixed both.
+
+## 12-bit JPEG (23/10/2026)
+
+Extended, progressive and arithmetic JPEG may have 12 bits a sample
+(SOF1, SOF2, SOF9, SOF10). Nothing in PJA was 8-bit but the gate and the
+Huffman categories: a DC difference has up to precision + 3 bits and an
+AC coefficient up to precision + 2 (T.81 F.1.2), 15 and 14 at 12 bits.
+The coefficients were already 16-bit and range-checked, the DQT already
+read 16-bit tables, the QM coder's magnitudes already reached 2^15, and
+the model's predictions take the dequantized values capped at
+MAX_DEQUANT, so they stay in 32 bits at any precision: the same stream,
+the same model. The checked build (range and overflow checks on) gives
+the same streams.
+
+Samples from libjpeg-turbo 3.0.4 (`cjpeg -precision 12`; the system's
+libjpeg cannot write them) of every kind, sequential, optimized,
+progressive, arithmetic sequential and progressive, restarts, gray,
+quality 100, and the 2 of the 78-file corpus: all back, those 2 to 73.0%
+and 77.7% (xz -9e: 97%). The 30 photos re-encoded at 8 and at 12 bits
+with the same qualities: 70.7% and 80.7%. The 12-bit files are 2.6 times
+larger, their extra bits mostly the DCT's rounding, which nothing
+predicts; how much of the difference the model could still take (its
+buckets were tuned on 8-bit magnitudes) is left for when there are real
+12-bit files to tune on. Windows 10, 64 and 32 bits: the same streams as
+on Linux.
+
+The zpaq-std plugin keeps to 8 bits: its ZPAQL is frozen as v0.0.1 left
+it, with the 8-bit categories, so detect, compress and the query refuse
+a 12-bit JPEG.
 

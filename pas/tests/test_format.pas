@@ -28,17 +28,29 @@ function WithByte(const x: TBytes; i: SizeInt; v: Byte): TBytes;
 begin Result := Copy(x, 0, Length(x)); Result[i] := v; end;
 
 { A .pja built by hand, without going through the writer: so the reader sees
-  descriptors the writer refuses to produce. }
-function ByHand(origSize: QWord; const hash: THash16; const payload: TBytes; stored: Boolean = False): TBytes;
-var k: Integer;
+  descriptors the writer refuses to produce. ver 3 has no extension field;
+  4 has `ext` (whatever it holds) with its check, or with `check` when given. }
+function ByHand(origSize: QWord; const hash: THash16; const payload: TBytes; stored: Boolean = False;
+                ver: Byte = VERSION; const ext: string = ''; badCheck: Boolean = False): TBytes;
+var k, at: Integer; c: THash16;
 begin
-  Result := nil; SetLength(Result, HEADER_SIZE + DESCRIPTOR_SIZE + Length(payload));
+  Result := nil;
+  at := HEADER_SIZE + DESCRIPTOR_SIZE;
+  if ver >= 4 then at := at + 1 + Length(ext) + EXT_CHECK;
+  SetLength(Result, at + Length(payload));
   for k := 0 to 3 do Result[k] := MAGIC[k];
-  Result[4] := VERSION;
+  Result[4] := ver;
   if stored then Result[5] := FLAG_STORED;
   for k := 0 to 7 do Result[8 + k] := Byte((origSize shr (8 * k)) and $FF);
   Move(hash[0], Result[16], 16);
-  if Length(payload) > 0 then Move(payload[0], Result[32], Length(payload));
+  if ver >= 4 then begin
+    Result[32] := Length(ext);
+    for k := 1 to Length(ext) do Result[32 + k] := Ord(ext[k]);
+    c := ExtensionCheck(ext);
+    if badCheck then c[0] := c[0] xor 1;
+    Move(c[0], Result[33 + Length(ext)], EXT_CHECK);
+  end;
+  if Length(payload) > 0 then Move(payload[0], Result[at], Length(payload));
 end;
 
 var
@@ -64,7 +76,7 @@ begin
     if not pr.Ok then Continue;
     r := Open(b, p); h := Blake3_128(orig);
     Check(r.Ok and (p.orig_size = QWord(Length(orig))) and CompareMem(@p.hash, @h, 16)
-       and (Length(b) = WrittenLength(Length(p.payload))), '  opens: orig_size, hash, length');
+       and (Length(b) = WrittenLength(Length(p.payload), Length(p.ext))), '  opens: orig_size, hash, length');
     pr := Unpack(b, High(QWord), back, hx);
     Check(pr.Ok and Same(back, orig), '  Unpack gives the original byte for byte');
   end;
@@ -94,7 +106,7 @@ begin
   CheckR(Open(Copy(b, 0, HEADER_SIZE + DESCRIPTOR_SIZE - 1), p), 'ShortFile', 'header and 23 bytes of descriptor');
   CheckR(Open(WithByte(b, 0, Ord('X')), p), 'NotPja', 'magic: first byte');
   CheckR(Open(WithByte(b, 3, $02), p), 'NotPja', 'magic: the trailing $01');
-  CheckR(Open(WithByte(b, 4, 4), p), 'FutureVersion(4)', 'version 4');
+  CheckR(Open(WithByte(b, 4, 5), p), 'FutureVersion(5)', 'version 5');
   CheckR(Open(WithByte(b, 4, 255), p), 'FutureVersion(255)', 'version 255');
   CheckR(Open(WithByte(b, 4, 2), p), 'OldVersion(2)', 'version 2 (the encrypted wrapper of .pjg)');
   CheckR(Open(WithByte(b, 4, 1), p), 'OldVersion(1)', 'version 1 (the dropped container)');
@@ -106,6 +118,49 @@ begin
   CheckR(Open(WithByte(b, 7, $80), p), 'ReservedNotZero', 'reserved byte 7');
   CheckR(Open(Filled(200, $41), p), 'NotPja', 'garbage 0x41');
   CheckR(Open(Filled(200, 0), p), 'NotPja', 'zeros');
+
+  Writeln('--- the extension (version 4)');
+  pr := Pack(orig, b, 1, False, True, 'JPEG');
+  r := Open(b, p);
+  Check(pr.Ok and r.Ok and (p.ext = 'JPEG') and (Length(b) = WrittenLength(Length(p.payload), 4)),
+     'Pack keeps it as it is written: .JPEG');
+  pr := Unpack(b, High(QWord), back, hx);
+  Check(pr.Ok and (pr.ext = 'JPEG') and Same(back, orig), '  Unpack gives it, and the original');
+  for k := 0 to 4 + EXT_CHECK - 1 do
+    CheckR(Open(WithByte(b, HEADER_SIZE + DESCRIPTOR_SIZE + 1 + k, b[HEADER_SIZE + DESCRIPTOR_SIZE + 1 + k] xor 4), p),
+           'BadExtension', Format('  a bit of its byte %d', [k]));
+  CheckR(Open(WithByte(b, HEADER_SIZE + DESCRIPTOR_SIZE, 3), p), 'BadExtension', '  its length one short: the check gives it away');
+  CheckR(Open(WithByte(b, HEADER_SIZE + DESCRIPTOR_SIZE, MAX_EXT + 1), p), 'BadExtension', '  a length above MAX_EXT');
+  CheckR(Open(Copy(b, 0, HEADER_SIZE + DESCRIPTOR_SIZE), p), 'ShortFile', '  no extension field at all');
+  CheckR(Open(Copy(b, 0, HEADER_SIZE + DESCRIPTOR_SIZE + 1 + 4 + EXT_CHECK - 1), p), 'ShortFile', '  its check cut short');
+  pr := Pack(orig, b, 1, False, True, '../x');
+  r := Open(b, p);
+  Check(pr.Ok and r.Ok and (p.ext = ''), 'Pack leaves out an extension the format does not keep (../x)');
+  pr := Pack(orig, b, 1, False, True, 'abcdefghijklmnop');
+  r := Open(b, p);
+  Check(pr.Ok and r.Ok and (p.ext = ''), '  and one of 16 characters');
+  other := Filled(100, $AB);
+  for i := 0 to 5 do begin
+    case i of
+      0: begin f := 'abcdefghijklmno'; n := 0; end;    { 15: the longest }
+      1: begin f := 'a.b'; n := 1; end;
+      2: begin f := 'a/b'; n := 1; end;
+      3: begin f := 'a b'; n := 1; end;
+      4: begin f := 'abcdefghijklmnop'; n := 1; end;
+    else begin f := #200; n := 1; end;
+    end;
+    rw := WritePja(other, h, 1000, b, False, f);
+    r := Open(ByHand(1000, h, other, False, VERSION, f), p);
+    if n = 0 then begin
+      CheckR(rw, 'None', Format('extension %s: the writer', [f])); CheckR(r, 'None', '  and the reader');
+    end else begin
+      CheckR(rw, 'BadExtension', Format('extension %s: the writer', [f])); CheckR(r, 'BadExtension', '  and the reader');
+      Check((p.ext = '') and (Length(p.payload) = 0), '  and the reader leaves nothing read');
+    end;
+  end;
+  CheckR(Open(ByHand(1000, h, other, False, VERSION, 'jpg', True), p), 'BadExtension', 'a wrong check');
+  r := Open(ByHand(1000, h, other, False, 3), p);
+  Check(r.Ok and (p.ext = '') and Same(p.payload, other), 'version 3 (no extension) still opens');
 
   Writeln('--- descriptor: the edges, in the writer AND in the reader');
   { Each case is asked of the writer and built by hand for the reader: they
@@ -165,7 +220,7 @@ begin
     pr := Pack(orig, b);
     r := Open(b, p);
     Check(pr.Ok and r.Ok and p.stored and Same(p.payload, orig), '  Pack stores it as it is');
-    Check(Length(b) = Length(orig) + HEADER_SIZE + DESCRIPTOR_SIZE, '  32 bytes more than the original');
+    Check(Length(b) = WrittenLength(Length(orig)), '  37 bytes more than the original, with no extension');
     pr := Unpack(b, High(QWord), back, hx);
     Check(pr.Ok and Same(back, orig), '  Unpack gives it back');
     other := WithByte(b, Length(b) - 1, b[Length(b) - 1] xor 1);
@@ -185,8 +240,10 @@ begin
   Check(r.Ok and CompareMem(@p.hash, @h2, 16), 'an all-0xFF hash comes back the same');
 
   Writeln('--- WrittenLength');
-  Check(WrittenLength(0) = HEADER_SIZE + DESCRIPTOR_SIZE, 'payload 0');
-  Check(WrittenLength(1000) = HEADER_SIZE + DESCRIPTOR_SIZE + 1000, 'payload 1000');
+  Check(WrittenLength(0) = HEADER_SIZE + DESCRIPTOR_SIZE + 1 + EXT_CHECK, 'payload 0');
+  Check(WrittenLength(1000) = HEADER_SIZE + DESCRIPTOR_SIZE + 1 + EXT_CHECK + 1000, 'payload 1000');
+  Check(WrittenLength(1000, 3) = HEADER_SIZE + DESCRIPTOR_SIZE + 1 + 3 + EXT_CHECK + 1000, 'payload 1000, extension of 3');
+  Check(WrittenLength(0, MAX_EXT + 1) = -1, 'an extension too long');
   Check(WrittenLength(-1) = -1, 'negative length');
   Check(WrittenLength(High(SizeInt)) = -1, 'a length that does not fit');
 

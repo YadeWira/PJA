@@ -108,6 +108,7 @@ type
 
   TJpeg = record
     width, height: Integer;
+    precision: Integer;              { bits per sample: 8, or 12 (SOF1, SOF2, SOF9, SOF10) }
     progressive: Boolean;
     arithmetic: Boolean;
     comp: array of TComponent;
@@ -136,6 +137,11 @@ function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt = 0): TJp
 { Decompose + Recompose + compare with the original. The only thing that
   allows a JPEG to be stored as coefficients. }
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
+{ An MPO (CIPA DC-007, Multi-Picture Format): its first image's APP2 "MPF"
+  index lists an image of the Multi-Frame class (a panorama, a stereo pair,
+  several angles). Ultra HDR and depth maps hang a second image off a JPEG
+  with the same index but no such class: those stay JPEGs. }
+function IsMpo(const data: TBytes): Boolean;
 { A bit per coefficient of a block of 64 (zigzag order), set where it is
   not zero. }
 function NonzeroMask(cf: PSmallInt): QWord;
@@ -502,7 +508,7 @@ begin
   ac := @s.ac[i];
   e := DecodeSymbol(rd, s.dc[i], t);
   if e <> jeNone then Exit(e);
-  if t > 11 then Exit(jeBadCode);
+  if t > j.precision + 3 then Exit(jeBadCode);
   if not rd.Bits(t, v) then Exit(jeTruncated);
   pred := pred + Extend(v, t);
   if (pred < -32767) or (pred > 32767) then Exit(jeCoefOutOfRange);
@@ -528,7 +534,7 @@ begin
       Inc(k, 16);              { ZRL }
       Continue;
     end;
-    if t > 10 then Exit(jeBadCode);
+    if t > j.precision + 2 then Exit(jeBadCode);
     Inc(k, r);
     if k > 63 then Exit(jeBadCode);
     { Bits, without its refill when the bits are already there }
@@ -655,7 +661,7 @@ var e: TJpegError; t, v: Integer; x: Int64;
 begin
   e := DecodeSymbol(rd, s.dc[i], t);
   if e <> jeNone then Exit(e);
-  if t > 11 then Exit(jeBadCode);
+  if t > j.precision + 3 then Exit(jeBadCode);
   if not rd.Bits(t, v) then Exit(jeTruncated);
   pred := pred + Extend(v, t);
   x := Int64(pred) * (Int64(1) shl s.al);
@@ -693,7 +699,7 @@ begin
       Dec(st.eobrun);
       Break;
     end;
-    if t > 10 then Exit(jeBadCode);
+    if t > j.precision + 2 then Exit(jeBadCode);
     Inc(k, r);
     if k > s.se then Exit(jeBadCode);
     if not rd.Bits(t, v) then Exit(jeTruncated);
@@ -1667,7 +1673,8 @@ function ReadSof(const d: TBytes; p, last: SizeInt; var j: TJpeg): TJpegError;
 var nf, i, k: Integer; blocks: Int64;
 begin
   if last - p < 6 then Exit(jeBadSof);
-  if d[p] <> 8 then Exit(jeUnsupported);      { 12-bit }
+  if (d[p] <> 8) and (d[p] <> 12) then Exit(jeUnsupported);
+  j.precision := d[p];
   j.height := U16(d, p + 1); j.width := U16(d, p + 3); nf := d[p + 5];
   if j.height = 0 then Exit(jeUnsupported);   { height in a DNL }
   if (j.width = 0) or (nf < 1) or (nf > 4) or (last - p <> 6 + 3 * nf) then Exit(jeBadSof);
@@ -1887,6 +1894,61 @@ begin
 end;
 
 {$ifdef PJA_FAST}{$pop}{$endif}
+function IsMpo(const data: TBytes): Boolean;
+var p, t, ifd, e, n, k, i, off, cnt, images: SizeInt; le: Boolean; m: Byte;
+
+  function Get16(q: SizeInt): Integer;
+  begin
+    if le then Result := data[q] or (data[q + 1] shl 8) else Result := (data[q] shl 8) or data[q + 1];
+  end;
+
+  function Get32(q: SizeInt): Int64;
+  begin
+    if le then Result := Int64(Get16(q)) or (Int64(Get16(q + 2)) shl 16)
+    else Result := (Int64(Get16(q)) shl 16) or Get16(q + 2);
+  end;
+
+begin
+  Result := False;
+  if (Length(data) < 4) or (data[0] <> $FF) or (data[1] <> $D8) then Exit;
+  p := 2;
+  while p + 4 <= Length(data) do begin
+    if data[p] <> $FF then Exit;
+    m := data[p + 1];
+    if (m = $DA) or (m = $D9) then Exit;
+    n := U16(data, p + 2);
+    if (n < 2) or (p + 2 + n > Length(data)) then Exit;
+    { APP2 "MPF\0", then a TIFF header and its first IFD }
+    if (m = $E2) and (n >= 16) and (data[p + 4] = Ord('M')) and (data[p + 5] = Ord('P')) and
+       (data[p + 6] = Ord('F')) and (data[p + 7] = 0) then begin
+      t := p + 8;
+      if (data[t] = Ord('I')) and (data[t + 1] = Ord('I')) then le := True
+      else if (data[t] = Ord('M')) and (data[t + 1] = Ord('M')) then le := False
+      else Exit;
+      ifd := t + Get32(t + 4);
+      if (ifd < t) or (ifd + 2 > p + 2 + n) then Exit;
+      cnt := Get16(ifd);
+      for k := 0 to cnt - 1 do begin
+        e := ifd + 2 + 12 * k;
+        if e + 12 > p + 2 + n then Exit;
+        { MPEntry: 16 bytes an image, its attribute first; the type code
+          is the low 24 bits, Multi-Frame 0x02xxxx }
+        if Get16(e) = $B002 then begin
+          off := t + Get32(e + 8);
+          images := Get32(e + 4) div 16;
+          for i := 0 to images - 1 do begin
+            if (off < t) or (off + 16 * (i + 1) > Length(data)) then Exit;
+            if (Get32(off + 16 * i) shr 16) and $FF = $02 then Exit(True);
+          end;
+          Exit;
+        end;
+      end;
+      Exit;
+    end;
+    p := p + 2 + n;
+  end;
+end;
+
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
 var other: TBytes; k: SizeInt;
 begin

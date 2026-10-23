@@ -109,7 +109,8 @@ var j: TJpeg; ph: Integer;
 begin
   Result := -1;
   try
-    if not StreamHeaders(stream, j).Ok then Exit;
+    { the decoder takes 8-bit JPEGs only }
+    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) then Exit;
     ph := ZpaqlPh(j);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;

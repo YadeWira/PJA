@@ -2,7 +2,7 @@
 
 ```
 pja a [options] FILE...     compress:  photo.jpg -> photo.pja, scan.jls -> scan.pja
-pja x [options] FILE...     extract:   photo.pja -> photo.jpg (or .jls, by content)
+pja x [options] FILE...     extract:   photo.pja -> photo.jpg (the original's extension)
 pja list FILE...            what each .pja holds: original size, stored size, hash
 ```
 
@@ -56,10 +56,19 @@ measured against the old spelling.
   be read as `-t -h`.
 - **`a` and `x` are filters**: `a` refuses a `.pja`, `x` anything that is not
   one. There is no mode that does both; shell globs separate them.
-- **The output's type comes from its content**: a JPEG-LS file comes back as
-  `.jls`, a JPEG as `.jpg`, whatever the `.pja` is called.
-- **Never larger than the original by more than 32 bytes**: a file the codec
-  does not make smaller is stored as it is, and `a` and `list` say so.
+- **The output keeps the original's extension**, as it was written:
+  `photo.JPEG` comes back as `photo.JPEG`, `scan.jls` as `scan.jls` (the
+  `.pja` keeps it, with a check). The name is the `.pja`'s own. When there
+  is none to keep (a `.pja` of version 3, or an extension the format does
+  not take: more than 15 characters, or anything but letters, digits, `_`
+  and `-`), the content decides: a JPEG-LS file comes back as `.jls`, an
+  MPO (a stereo pair, a panorama: its MPF index lists a Multi-Frame image)
+  as `.mpo`, any other JPEG as `.jpg`. A JPEG with a gain map or a depth
+  map hung off it (Ultra HDR) has an MPF index too, without that class: it
+  is a `.jpg`.
+- **Never larger than the original by more than 52 bytes** (37 and the
+  extension): a file the codec does not make smaller is stored as it is,
+  and `a` and `list` say so.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 

@@ -1,8 +1,8 @@
 # PJA format
 
 **A `.pja` is ONE compressed file**: a JPEG or a JPEG-LS file, as the codec
-stream (`doc/CODEC.md`), together with the size and hash of the original. The
-extension is `.pja`; dispatch is by magic, not by extension.
+stream (`doc/CODEC.md`), together with the size, hash and extension of the
+original. The extension is `.pja`; dispatch is by magic, not by extension.
 
 What the `.pja` adds over the bare codec stream, and why each thing:
 
@@ -10,6 +10,7 @@ What the `.pja` adds over the bare codec stream, and why each thing:
 |---|---|
 | **BLAKE3-128 hash of the original** | A damaged stream can decode to **another valid file** without any error. The hash gives it away. |
 | **declared original size** | Allows rejecting a bomb **before decoding**. It is also the decoder's cap: the output cannot exceed it. |
+| **the original's extension** (version 4) | So that `photo.JPEG` comes back as `photo.JPEG`, not as whatever its content suggests. Only the extension: the name is the `.pja`'s own. With a check of its own, since the hash covers the content only. |
 
 The codec verifies its own stream when compressing (it decompresses it and
 compares), so what the hash protects against is damage **after** writing:
@@ -27,20 +28,25 @@ it.
 ```
 HEADER - 8 B
   magic        4 B   "PJA\x01"
-  version      1 B   3        (1 was a multi-file container, 2 the encrypted .pjg wrapper)
+  version      1 B   4        (3 is still read: no extension field; 1 was a multi-file
+                              container, 2 the encrypted .pjg wrapper)
   flags        1 B   bit 0: stored (the payload is the original itself); the rest 0
   reserved     2 B   0
 
-DESCRIPTOR - 24 B
+DESCRIPTOR - 24 B, and in version 4 the extension field (5 to 20 B)
   orig_size    u64 LE   the original's length
   hash         16 B     BLAKE3-128 of the original
+  ext_len      1 B      0 to 15                                      (version 4)
+  ext          ext_len  the original's extension, without the dot, as it was
+                        written: letters, digits, '_' and '-' only    (version 4)
+  ext_check    4 B      the first 4 bytes of BLAKE3 of ext_len and ext (version 4)
 
 PAYLOAD - the rest: the codec stream, or with the stored flag the original
 
 A file the codec does not make smaller (a JPEG-LS file of noise, for
-instance) is stored as it is: 32 bytes more than the original, never
-more. Its descriptor is stricter: `orig_size` has to be the payload's
-length exactly.
+instance) is stored as it is: 37 bytes more than the original, and the
+extension's length (at most 52 bytes in all). Its descriptor is
+stricter: `orig_size` has to be the payload's length exactly.
 ```
 
 The hash is BLAKE3 truncated to 128 bits, in Pascal (`pas/pjablake3.pas`),
@@ -58,7 +64,8 @@ safety:
 1. validate the header: magic, version, flags known, reserved bytes zero
 2. validate the descriptor: `orig_size` between 1 and 65,536 x the payload
    length (`ValidateDescriptor`), and a payload of at least 6 B (the
-   smallest codec stream)
+   smallest codec stream); in version 4, the extension's length, its
+   characters and its check (`ValidExtension`, `ExtensionCheck`)
 3. reject if `orig_size` exceeds the user's cap (`--max-output`)
 4. decode, with `orig_size` as the cap of the raw part
 5. check that the result is `orig_size` bytes long and has the declared hash
@@ -82,7 +89,7 @@ Each row is a case with its expected result, and it is in the tests.
 |---|---|
 | 0 to 7 bytes; a header with less than a whole descriptor | `ShortFile` |
 | wrong magic, garbage, zeros | `NotPja` |
-| version 4 or higher | `FutureVersion(n)` |
+| version 5 or higher | `FutureVersion(n)` |
 | versions 0, 1 and 2 | `OldVersion(n)` |
 | any flag but bit 0 | `UnknownFlag` |
 | the stored flag on a codec stream (its length is not `orig_size`) | `BadOrigSize` |
@@ -100,14 +107,28 @@ Each row is a case with its expected result, and it is in the tests.
 | stored: `orig_size` other than the payload's length | `BadOrigSize` |
 | stored: an empty payload | `PayloadOutOfRange` |
 
+### 3.2b Extension (version 4; `test_format`)
+
+| case | expected |
+|---|---|
+| `JPEG`, kept as written | opens with `JPEG`; `Unpack` gives it |
+| any bit of its characters or of its check | `BadExtension` |
+| its length one short (the check gives it away), or above 15 | `BadExtension` |
+| no extension field, or its check cut short | `ShortFile` |
+| `a.b`, `a/b`, `a b`, a byte above 127, 16 characters: the writer and the reader | `BadExtension`, both |
+| `Pack` given `../x` or 16 characters | leaves it out: the file is named by its content |
+| version 3, no field | opens, no extension |
+
 ### 3.3 Corruption (`test_corruption`)
 
-- **The format alone:** every bit of the 19 sample files packed, every value
-  of the header and descriptor bytes, every truncation and appended data:
-  1,029,301 variants. None **reads the same** as the original: every byte
-  means something. Those the format cannot reject (a bit in the payload)
-  read a different payload, and step 5 gives them away.
-- **End to end, with the codec:** 6,157 variants of the 12 smaller files
+- **The format alone:** every bit of the 27 sample files packed with their
+  extensions, every value of the header and descriptor bytes (the
+  extension field included), every truncation and appended data:
+  1,810,944 variants. None **reads the same** as the original: every byte
+  means something, the extension's too (56,808 of them `BadExtension`).
+  Those the format cannot reject (a bit in the payload) read a different
+  payload, and step 5 gives them away.
+- **End to end, with the codec:** 8,085 variants of the 14 smaller files
   (every header and descriptor bit, bits spread over the payload,
   truncations). **None ends in a different file delivered as good**, and no
   exception: a format rejection, a codec rejection, a size or hash mismatch,

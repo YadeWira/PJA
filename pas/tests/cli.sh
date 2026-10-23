@@ -43,6 +43,13 @@ check "--no-verify: the very same .pja" bash -c "
   '$PJA' a -q -f '$W/in/color_plasma.jpg' -o '$W/v1.pja' && '$PJA' a -q -f --no-verify '$W/in/color_plasma.jpg' -o '$W/v2.pja' &&
   cmp -s '$W/v1.pja' '$W/v2.pja'"
 check "--no-verify with x: rc 2" test "$(rc "$PJA" x --no-verify "$W/v1.pja" -o "$W/nv.jpg")" -eq 2
+check "the extension comes back as written (photo.JPEG, scan.Jls)" bash -c "
+  cp '$W/in/grayscale.jpg' '$W/photo.JPEG' && cp '$W/in/gray2.jls' '$W/scan.Jls' &&
+  '$PJA' a -q -f '$W/photo.JPEG' '$W/scan.Jls' -o '$W/ext/' && '$PJA' x -q '$W'/ext/*.pja -o '$W/extx/' &&
+  cmp -s '$W/photo.JPEG' '$W/extx/photo.JPEG' && cmp -s '$W/scan.Jls' '$W/extx/scan.Jls'"
+check "an extension the format does not keep: by the content" bash -c "
+  cp '$W/in/grayscale.jpg' '$W/odd.x.y z' && '$PJA' a -q -f '$W/odd.x.y z' -o '$W/odd.pja' &&
+  '$PJA' x -q '$W/odd.pja' -o '$W/oddx/' && cmp -s '$W/in/grayscale.jpg' '$W/oddx/odd.jpg'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"

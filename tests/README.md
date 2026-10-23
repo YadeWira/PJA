@@ -16,6 +16,9 @@ flip every bit of them.
 | `solid_color.jpg` | `convert -size 32x32 xc:'#3a7bd5'` → `cjpeg -quality 90` |
 | `prog_huffman.jpg`, `restart_huffman.jpg` | a 120x80 plasma → `cjpeg -progressive -optimize`, and `cjpeg -quality 60 -restart 1` |
 | `arith_*.jpg` | 96x64 and 40x24 plasmas → `cjpeg -arithmetic`: sequential, progressive, with restarts, gray progressive |
+| `twelve_bit.jpg`, `twelve_bit_arith_prog.jpg` | a 96x64 plasma (`-seed 41`, 16-bit PPM) → libjpeg-turbo 3.0.4's `cjpeg -precision 12 -quality 85 -optimize`, and `-precision 12 -arithmetic -progressive` (the system's libjpeg cannot write 12-bit JPEG) |
+| `stereo.mpo` | an MPO as a stereo camera writes it: a 256x192 plasma (`-seed 51`, `cjpeg -quality 85`) and the same shifted 6 pixels, the first with an APP2 MPF index of two Multi-Frame Disparity images (0x020002) and their sizes and offsets |
+| `gain_map.jpg` | the same left image with a 128x96 gray plasma (`-seed 52`) after it, its MPF index saying Baseline MP Primary (0x030000) and Undefined (0x000000), as an Ultra HDR JPEG hangs its gain map: it has to come back as a `.jpg` |
 | `thumbs_twice.jpg` | a 320x240 plasma (`-seed 31`, `cjpeg -quality 85`) with the same image at 96x72 (`cjpeg -quality 75`) as a thumbnail twice, in an APP1 and in an APP2, as some cameras write it |
 | `two_images.jpg` | the same with the thumbnail once, and a second image after its EOI, a 240x160 plasma (`-seed 32`, `cjpeg -quality 80`), as an MPO has it |
 
