@@ -196,5 +196,76 @@ lines.append(put32('s').rstrip('\n'))
 want_s = sum((i * 7 + 1) * 3 for i in range(300)) & M32
 check('variables spilled to H', run('\n'.join(lines) + '\n'), word_bytes([want_s]))
 
+# constants above 255 as right operands and as stored values
+src = '''
+BIG = 70000
+OFF = 300
+buf = array(400)
+def main():
+    x = 5
+    y = x + BIG
+    buf[x + OFF] = BIG
+    z = buf[x + OFF] + OFF
+    out(y)
+    out(y >> 8)
+    out(y >> 16)
+    out(z)
+    out(z >> 8)
+    out(z >> 16)
+'''
+check('big constants as operands', run(src), bytes([(70005) & 255, (70005 >> 8) & 255, 70005 >> 16, 70300 & 255, (70300 >> 8) & 255, 70300 >> 16]))
+
+# temporaries spilled to H once R is full, with arrays in use: they must
+# not overlap
+lines = ['buf = array(64)', 'def main():', '    for i in range(64):', '        buf[i] = i * 3']
+for i in range(260):
+    lines.append('    v%d = %d' % (i, i))
+lines.append('    s = 0')
+for i in range(260):
+    lines.append('    s = s + ((v%d + (v%d * 3 + (buf[%d] + 1))) ^ v%d)' % (i, i, i % 64, (i + 1) % 260))
+lines.append('    for i in range(64):')
+lines.append('        s = s + buf[i]')
+lines.append(put32('s').rstrip('\n'))
+want_s = 0
+for i in range(260):
+    want_s = (want_s + ((i + (i * 3 + ((i % 64) * 3 + 1))) ^ ((i + 1) % 260))) & M32
+want_s = (want_s + sum(i * 3 for i in range(64))) & M32
+check('temporaries in H next to arrays', run('\n'.join(lines) + '\n'), word_bytes([want_s]))
+
+# heap() goes after every array, even ones declared after it
+src = '''
+first = array(10)
+HEAPA = heap()
+later = array(10)
+def main():
+    for i in range(10):
+        later[i] = 7
+    H[base(HEAPA)] = 99
+    s = 0
+    for i in range(10):
+        s = s + later[i]
+    out(s)
+    out(H[base(HEAPA)])
+    out(1 if base(HEAPA) >= base(later) + 10 else 0)
+'''
+check('heap after every array', run(src), bytes([70, 99, 1]))
+
+# tables: words set at the start
+src = '''
+t = table([1, 300, 70000, 4294967295, 0, 255])
+u = table([9, 8])
+def main():
+    for i in range(6):
+        v = t[i]
+        out(v)
+        out(v >> 8)
+        out(v >> 16)
+        out(v >> 24)
+    out(u[0] + u[1])
+    H[base(u) + 1] = 30
+    out(u[1])
+'''
+check('tables', run(src), word_bytes([1, 300, 70000, 4294967295, 0, 255]) + bytes([17, 30]))
+
 print('%d cells, %d failures' % (cells, fails))
 sys.exit(1 if fails else 0)

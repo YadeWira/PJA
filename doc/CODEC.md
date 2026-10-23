@@ -553,3 +553,29 @@ What it costs: nothing. The 151 photos, full model, 58,848,193 -> 58,848,272
 bytes (+0.0001%); the corpus -0.0001%; the fast model on 30 photos +5
 bytes in 10.6 MB. Streams of version 4 are no longer read.
 
+## The decoder in ZPAQL, for zpaq-std (22/10/2026)
+
+zpaq-std's archives carry, with each block a plugin compressed, a decoder
+written in ZPAQL, ZPAQ's virtual machine, so that any zpaq reads them
+without the plugin. ZPAQL has 32-bit registers, no calls and at most 65535
+bytes of program: PJA's decoder is written in a small language (a subset
+of Python, `pas/plugin/zpaql/`) that `tools/zpaql/zpaqlc.py` compiles.
+
+Stage 1 covers what the plugin takes for now: the full model and
+sequential Huffman JPEG (the head stream and its raw bytes, the headers,
+every band with the full model, and the JPEG rebuilt). It is a line by line
+port: the same integers as Pascal, which version 5 of the stream made
+possible (the predictions in 32 bits). Two tables Pascal computes with
+floating point are not computed in ZPAQL: squash travels in the program
+(symmetric, its upper half as deltas of 3 bits), and the reciprocals of
+the counters come from an integer formula that gives the same 256 values.
+
+37,745 bytes of program; its H is 2^26 words (256 MB), of which 4.3
+million are its tables; the plugin takes only the files whose decoding
+fits. With libzpaq's JIT it decodes about 10 times slower than the plugin
+(2.1 s against 0.23 s for a photo of 211 KB). Checked with zpaq-std 1.4.0
+on every block of the 151 photos and of the corpus (190 blocks, 0 wrong),
+and on Windows 10 in 64 and 32 bits; extracting without the plugin gives
+every file back. The suite runs the decoder on two samples in a Python
+interpreter of ZPAQL, and checks that the generated program is current.
+

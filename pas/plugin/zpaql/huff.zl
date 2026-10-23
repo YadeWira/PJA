@@ -1,0 +1,148 @@
+"""The JPEG again (pjajpeg.Recompose for sequential Huffman scans), and main."""
+
+# ---------------------------------------------------------------- the JPEG again
+
+PRED = array(4)
+bacc = 0
+bn = 0
+outn = 0
+
+def putbyte(v):
+    global outn
+    out(v)
+    outn += 1
+
+def putbits(v, n):
+    """n <= 16 bits, the oldest first; FF is followed by 00"""
+    global bacc, bn
+    bacc = (bacc << n) | (v & ((1 << n) - 1))
+    bn += n
+    while bn >= 8:
+        bn -= 8
+        b = (bacc >> bn) & 255
+        putbyte(b)
+        if b == 255:
+            putbyte(0)
+    bacc = bacc & ((1 << bn) - 1)
+
+def align(padbit):
+    if bn & 7:
+        if padbit:
+            putbits(255, 8 - (bn & 7))
+        else:
+            putbits(0, 8 - (bn & 7))
+
+def category(v):
+    return bitlen(v)
+
+def encodeblock(coef, base, si, i):
+    """one block as a standard encoder writes it; the scan's tables for its
+    component number i"""
+    dct = SDC[4 * si + i]
+    act = SAC[4 * si + i]
+    v = H[coef + base]
+    diff = v - PRED[i]
+    PRED[i] = v
+    t = category(diff)
+    if H[dct + 256 + t] == 0:
+        error()
+    putbits(H[dct + t], H[dct + 256 + t])
+    if t:
+        if slt(diff, 0):
+            putbits(diff - 1, t)
+        else:
+            putbits(diff, t)
+    last = 0
+    for k in range(1, 64):
+        v = H[coef + base + k]
+        if v:
+            r = k - last - 1
+            last = k
+            while r > 15:
+                if H[act + 256 + 240] == 0:
+                    error()
+                putbits(H[act + 240], H[act + 256 + 240])
+                r -= 16
+            t = category(v)
+            sym = (r << 4) | t
+            if H[act + 256 + sym] == 0:
+                error()
+            putbits(H[act + sym], H[act + 256 + sym])
+            if slt(v, 0):
+                putbits(v - 1, t)
+            else:
+                putbits(v, t)
+    if last < 63:
+        if H[act + 256] == 0:
+            error()
+        putbits(H[act], H[act + 256])
+
+def encodescan(si):
+    global bacc, bn
+    bacc = 0
+    bn = 0
+    for i in range(4):
+        PRED[i] = 0
+    n = SNC[si]
+    if n == 1:
+        c = SCOMP[4 * si]
+        w = CBWR[c]
+        total = w * CBHR[c]
+    else:
+        w = mcusx
+        total = mcusx * mcusy
+    ri = SRI[si]
+    rst = 0
+    ux = 0
+    uy = 0
+    for u in range(total):
+        if ri > 0 and u > 0 and u % ri == 0:
+            align(SPAD[si])
+            putbyte(255)
+            putbyte(208 + (rst & 7))
+            rst += 1
+            for i in range(4):
+                PRED[i] = 0
+        if n == 1:
+            c = SCOMP[4 * si]
+            encodeblock(CCOEF[c], (uy * CBW[c] + ux) * 64, si, 0)
+        else:
+            for i in range(n):
+                c = SCOMP[4 * si + i]
+                for y in range(CV[c]):
+                    for x in range(CH[c]):
+                        encodeblock(CCOEF[c], ((uy * CV[c] + y) * CBW[c] + ux * CH[c] + x) * 64, si, i)
+        ux += 1
+        if ux == w:
+            ux = 0
+            uy += 1
+    align(SPAD[si])
+
+def recompose():
+    p = 0
+    for si in range(nscans):
+        while p < SCUT[si]:
+            putbyte(H[rawbase + p])
+            p += 1
+        encodescan(si)
+    while p < rawlen:
+        putbyte(H[rawbase + p])
+        p += 1
+
+def main():
+    global origsize, hp
+    hp = base(HEAP)
+    tables()
+    modeltables()
+    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+    if M[SEG] != 5 or M[SEG + 1] != 0:
+        error()
+    hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
+    dinit(SEG + 6, SEG + 6 + hlen)
+    coderaw(origsize)
+    parseheaders()
+    scanbits()
+    decodebands(SEG + 6 + hlen, inlen())
+    recompose()
+    if outn != origsize:
+        error()

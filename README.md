@@ -81,9 +81,14 @@ DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
 `pja.dll`, to go in zpaq-std's `codecs/` folder. It detects JPEG and JPEG-LS
 files by their bytes, writes the full-model stream (`pja stream v5 full`),
 and leaves verification to zpaq-std, which decodes every block before
-writing it. No ZPAQL decoder yet, so only `-sat`. Checked on 21/10/2026 on
-Linux and on Windows 10 (64 and 32 bits): 44 files, the same streams on all
-three, and every file back, including archives made on another system.
+writing it. Every block also carries PJA's decoder in ZPAQL, so that any
+zpaq reads the archive without the plugin: it is compiled from
+`pas/plugin/zpaql/` with `tools/zpaql/` (37,745 bytes of ZPAQL), and covers
+stage 1, sequential Huffman JPEG, which is all the plugin takes for now.
+Checked on 22/10/2026 with zpaq-std 1.4.0 on Linux and on Windows 10 (64
+and 32 bits): every block decoded by the ZPAQL as by the plugin (134 of
+the 151 photos, 56 files of the corpus; the rest progressive), and every
+file back without the plugin.
 
 ## Layout
 
@@ -100,7 +105,8 @@ three, and every file back, including archives made on another system.
 | `pas/pjafs.pas` | writing the output: no links followed, no half-written files, nothing unverified under its name |
 | `pas/pjacli.pas` | the `pja` command |
 | `pas/plugin/` | PJA as a zpaq-std codec plugin |
-| `tools/zpaql/` | a compiler to ZPAQL and a ZPAQL interpreter, for the plugin's decoder (Python, build time only) |
+| `pas/plugin/zpaql/` | the plugin's decoder in the language zpaqlc compiles to ZPAQL |
+| `tools/zpaql/` | a compiler to ZPAQL, a ZPAQL interpreter and the generator of the plugin's decoder (Python, build time only) |
 | `doc/` | `CODEC.md` (how the codec works, what was measured and tried), `FORMAT.md`, `POLICY.md`, `CLI.md` |
 
 ## Testing

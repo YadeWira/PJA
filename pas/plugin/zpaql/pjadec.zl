@@ -1,0 +1,358 @@
+"""PJA's stream v5 decoder for ZPAQL (stage 1: the full model, sequential Huffman JPEG)."""
+SEG = 4                  # the segment: u32 original size, then the stream
+
+SQ = array(4096)         # squash: stretch domain -2048..2047 -> 12 bits
+STR = array(4096)        # stretch: 12-bit probability -> -2048..2047 (two's complement)
+RECIP = array(256)       # 65536 / (n + 1.5), rounded
+O0 = array(256)
+O1 = array(65536)
+O2 = array(1 << O2_BITS)
+
+x1 = 0
+x2 = 0
+x = 0
+ap = 0
+aend = 0
+origsize = 0
+rawbase = 0
+rawlen = 0
+hp = 0
+
+def tables():
+    SQ[2048] = 2048
+    k = 0
+    for w in range(SQPACK_WORDS):
+        v = sqpack[w]
+        for j in range(10):
+            if k < 2047:
+                SQ[2049 + k] = SQ[2048 + k] + (v & 7)
+                k += 1
+            v = v >> 3
+    for i in range(1, 2048):
+        SQ[i] = 4096 - SQ[4096 - i]
+    SQ[0] = 1
+    pi = 0
+    for xx in range(4096):
+        while pi <= SQ[xx] and pi <= 4095:
+            STR[pi] = xx - 2048
+            pi += 1
+    while pi <= 4095:
+        STR[pi] = 2047
+        pi += 1
+    STR[0] = STR[1]
+    for n in range(256):
+        RECIP[n] = (262144 + 2 * n + 3) // (2 * (2 * n + 3))
+
+def tshr(v, n):
+    """v div 2^n, truncating toward zero"""
+    if slt(v, 0):
+        return -((-v) >> n)
+    return v >> n
+
+def squash(v):
+    if sgt(v, 2047):
+        v = 2047
+    if slt(v, -2048):
+        v = -2048
+    return SQ[v + 2048]
+
+def stretch(p16):
+    return STR[p16 >> 4]
+
+# ---------------------------------------------------------------- the coder
+
+def rdbyte():
+    global ap
+    v = 0
+    if ap < aend:
+        v = M[ap]
+    ap += 1
+    return v
+
+def dinit(first, last):
+    global x1, x2, x, ap, aend
+    x1 = 0
+    x2 = 4294967295
+    x = 0
+    ap = first
+    aend = last
+    for k in range(4):
+        x = (x << 8) | rdbyte()
+
+def decode(p):
+    global x1, x2, x
+    if p < 1:
+        p = 1
+    if p > 65535:
+        p = 65535
+    r = x2 - x1
+    xm = x1 + (r >> 16) * p + (((r & 65535) * p) >> 16)
+    if x <= xm:
+        bit = 1
+        x2 = xm
+    else:
+        bit = 0
+        x1 = xm + 1
+    while ((x1 ^ x2) & 4278190080) == 0:
+        x1 = x1 << 8
+        x2 = (x2 << 8) | 255
+        x = (x << 8) | rdbyte()
+    return bit
+
+def direct(count):
+    v = 0
+    for k in range(count):
+        v = (v << 1) | decode(32768)
+    return v
+
+# ---------------------------------------------------------------- counters
+# a word of H: (p xor 32768) | n << 16, so that 0 is a new counter
+
+def cp(w):
+    return (w & 65535) ^ 32768
+
+def upd(addr, bit, limit):
+    w = H[addr]
+    p = (w & 65535) ^ 32768
+    n = w >> 16
+    if bit:
+        d = 65535 - p
+        p = p + ((d * RECIP[n]) >> 16)
+    else:
+        d = p - 1
+        p = p - ((d * RECIP[n]) >> 16)
+    if n < limit and n < 255:
+        n += 1
+    H[addr] = (p ^ 32768) | (n << 16)
+
+# ---------------------------------------------------------------- raw bytes
+
+def hash2(c2, c1):
+    return (((c2 << 8) | c1) * 2654435761) >> (32 - O2_BITS + 8)
+
+def coderaw(maxlen):
+    """the raw bytes, into RAW (rawbase, rawlen)"""
+    global rawbase, rawlen
+    n = direct(32)
+    if n > maxlen:
+        error()
+    rawbase = alloc(n + 4)
+    rawlen = n
+    m = mxnew(4, 8)
+    c1 = 0
+    c2 = 0
+    for i in range(n):
+        node = 1
+        h = hash2(c2, c1)
+        for b in range(8):
+            mxadd(m, cp(O0[node]))
+            mxadd(m, cp(O1[c1 * 256 + node]))
+            mxadd(m, cp(O2[(h << 8) | node]))
+            mxadd(m, 32768)
+            bit = decode(mxmix(m, 7 - b))
+            mxupd(m, bit)
+            upd(base(O0) + node, bit, COUNTER_LIMIT)
+            upd(base(O1) + c1 * 256 + node, bit, COUNTER_LIMIT)
+            upd(base(O2) + ((h << 8) | node), bit, COUNTER_LIMIT)
+            node = node * 2 + bit
+        H[rawbase + i] = node - 256
+        c2 = c1
+        c1 = node - 256
+    return n
+
+
+# ---------------------------------------------------------------- memory
+
+HMAX = 67108864          # 2^26 words of H (the config's ph)
+
+def alloc(n):
+    """n words of H, zero (never used before)"""
+    global hp
+    r = hp
+    hp += n
+    if hp > HMAX:
+        error()
+    return r
+
+# ---------------------------------------------------------------- JPEG headers
+
+MAXSCANS = 256
+CID = array(4)
+CH = array(4)
+CV = array(4)
+CTQ = array(4)
+CBW = array(4)
+CBH = array(4)
+CBWR = array(4)
+CBHR = array(4)
+CCOEF = array(4)
+QT = array(256)
+HT = array(8)            # the Huffman table in force per class and id: its words (code[256] len[256])
+SNC = array(MAXSCANS)
+SCOMP = array(4 * MAXSCANS)
+SDC = array(4 * MAXSCANS)
+SAC = array(4 * MAXSCANS)
+SRI = array(MAXSCANS)
+SPAD = array(MAXSCANS)
+SCUT = array(MAXSCANS)
+width = 0
+height = 0
+ncomp = 0
+hmax = 0
+vmax = 0
+mcusx = 0
+mcusy = 0
+nscans = 0
+ri = 0
+
+def rb(i):
+    return H[rawbase + i]
+
+def u16(i):
+    return (H[rawbase + i] << 8) | H[rawbase + i + 1]
+
+def readdqt(p, last):
+    while p < last:
+        pq = rb(p) >> 4
+        tq = rb(p) & 15
+        p += 1
+        if pq > 1 or tq > 3:
+            error()
+        for k in range(64):
+            if pq == 0:
+                QT[tq * 64 + k] = rb(p)
+                p += 1
+            else:
+                QT[tq * 64 + k] = u16(p)
+                p += 2
+
+def readdht(p, last):
+    while p < last:
+        tc = rb(p) >> 4
+        th = rb(p) & 15
+        p += 1
+        if tc > 1 or th > 3:
+            error()
+        t = alloc(512)           # code[256], len[256]
+        vp = p + 16
+        cd = 0
+        for l in range(1, 17):
+            cnt = rb(p + l - 1)
+            for i in range(cnt):
+                v = rb(vp)
+                vp += 1
+                if H[t + 256 + v] == 0:
+                    H[t + v] = cd
+                    H[t + 256 + v] = l
+                cd += 1
+            cd = cd << 1
+        p = vp
+        HT[tc * 4 + th] = t
+
+def readsof(p):
+    global width, height, ncomp, hmax, vmax, mcusx, mcusy
+    if rb(p) != 8:
+        error()
+    height = u16(p + 1)
+    width = u16(p + 3)
+    ncomp = rb(p + 5)
+    hmax = 1
+    vmax = 1
+    for i in range(ncomp):
+        CID[i] = rb(p + 6 + 3 * i)
+        CH[i] = rb(p + 7 + 3 * i) >> 4
+        CV[i] = rb(p + 7 + 3 * i) & 15
+        CTQ[i] = rb(p + 8 + 3 * i)
+        if CH[i] > hmax:
+            hmax = CH[i]
+        if CV[i] > vmax:
+            vmax = CV[i]
+    mcusx = (width + 8 * hmax - 1) // (8 * hmax)
+    mcusy = (height + 8 * vmax - 1) // (8 * vmax)
+    for i in range(ncomp):
+        CBW[i] = mcusx * CH[i]
+        CBH[i] = mcusy * CV[i]
+        CBWR[i] = ((width * CH[i] + hmax - 1) // hmax + 7) // 8
+        CBHR[i] = ((height * CV[i] + vmax - 1) // vmax + 7) // 8
+        CCOEF[i] = alloc(CBW[i] * CBH[i] * 64)
+
+def readsos(p, last):
+    global nscans
+    s = nscans
+    if s >= MAXSCANS:
+        error()
+    n = rb(p)
+    SNC[s] = n
+    for i in range(n):
+        c = 0
+        for k in range(ncomp):
+            if CID[k] == rb(p + 1 + 2 * i):
+                c = k
+        SCOMP[4 * s + i] = c
+        SDC[4 * s + i] = HT[rb(p + 2 + 2 * i) >> 4]
+        SAC[4 * s + i] = HT[4 + (rb(p + 2 + 2 * i) & 15)]
+    SRI[s] = ri
+    SCUT[s] = last
+    nscans = s + 1
+
+def parseheaders():
+    global ri
+    if rawlen < 4 or rb(0) != 255 or rb(1) != 216:
+        error()
+    p = 2
+    while True:
+        if p >= rawlen:
+            error()
+        if rb(p) != 255:
+            error()
+        while p < rawlen and rb(p) == 255:
+            p += 1
+        if p >= rawlen:
+            error()
+        m = rb(p)
+        p += 1
+        if m == 217:
+            break
+        if m >= 208 and m <= 215:
+            continue
+        seglen = u16(p)
+        first = p + 2
+        last = p + seglen
+        if m == 219:
+            readdqt(first, last)
+        elif m == 196:
+            readdht(first, last)
+        elif m == 221:
+            ri = u16(first)
+        elif m == 192 or m == 193:
+            readsof(first)
+        elif m == 194 or m == 201 or m == 202 or m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
+            error()
+        elif m == 218:
+            readsos(first, last)
+            p = last
+            if p >= rawlen:
+                break
+            continue
+        p = last
+    if nscans == 0:
+        error()
+
+def scanbits():
+    for s in range(nscans):
+        SPAD[s] = direct(1)
+
+def bandcount():
+    total = 0
+    for c in range(ncomp):
+        total = total + CBW[c] * CBH[c]
+    nb = total // BAND_BLOCKS
+    if nb > MAX_BANDS:
+        nb = MAX_BANDS
+    if nb > mcusy:
+        nb = mcusy
+    if nb < 1:
+        nb = 1
+    return nb
+
+HEAP = heap()            # the rest of H: alloc() takes from here on

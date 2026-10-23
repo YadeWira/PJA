@@ -1,0 +1,603 @@
+"""PJA's full model for ZPAQL: pjacoef.inc (CodeComponent, decoding) and pjamodel's helpers, line by line."""
+
+UNZIG = array(64)
+INTERIOR = array(49)
+IB_NA = array(49)
+IB_NB = array(49)
+IB_WA = array(49)
+IB_WB = array(49)
+IB_NONE = array(49)
+W3 = array(8)
+W5 = array(8)
+E3 = array(8)
+E5 = array(8)
+KER_RIGHT = array(512)
+KER_BOTTOM = array(512)
+KER_LEFT = array(512)
+KER_TOP = array(512)
+QK = array(64)            # the component's quantizer, in zigzag order
+FB = array(64)            # the block, dequantized, natural order
+ESTS = array(16)
+PC = array(8)
+PR = array(8)
+LEFTC = array(16)         # eg[8] then px[8]
+RIGHTC = array(16)
+NZC = array(4)            # per component: nonzero counts, then DC residual buckets
+DCR = array(4)
+rowc = 0                  # the edge caches of the row above, 16 words a column
+mb = 0                    # the model in use
+lumanz = 0                # the luma's nonzero counts, or 0 for none
+
+def iabs(v):
+    if slt(v, 0):
+        return -v
+    return v
+
+def bitlen(v):
+    u = iabs(v)
+    n = 0
+    while u:
+        n += 1
+        u = u >> 1
+    return n
+
+def finelog(v):
+    u = iabs(v)
+    if u <= 1:
+        return u
+    e = bitlen(u)
+    return 2 * e - 2 + ((u >> (e - 2)) & 1)
+
+def clip(v, hi):
+    if v > hi:
+        return hi
+    return v
+
+def sgn3(v):
+    if slt(v, 0):
+        return 0
+    if v == 0:
+        return 1
+    return 2
+
+def divround(a, b):
+    """a (signed) over b (positive), rounded to nearest"""
+    if slt(a, 0):
+        return -((-a + b // 2) // b)
+    return (a + b // 2) // b
+
+def dequant(c, q):
+    v = c * q
+    if sgt(v, 32768):
+        return 32768
+    if slt(v, -32768):
+        return -32768
+    return v
+
+def modeltables():
+    for k in range(64):
+        UNZIG[zigzag[k]] = k
+    n = 0
+    for k in range(1, 64):
+        if (zigzag[k] >> 3) > 0 and (zigzag[k] & 7) > 0:
+            INTERIOR[n] = k
+            n += 1
+    for k in range(49):
+        pos = zigzag[INTERIOR[k]]
+        u = pos >> 3
+        w = pos & 7
+        if u > 1 and w > 1:
+            IB_NA[k] = UNZIG[pos - 8]
+            IB_WA[k] = 1
+            IB_NB[k] = UNZIG[pos - 1]
+            IB_WB[k] = 1
+        elif u > 1:
+            IB_NA[k] = UNZIG[pos - 8]
+            IB_WA[k] = 2
+        elif w > 1:
+            IB_NA[k] = UNZIG[pos - 1]
+            IB_WA[k] = 2
+        else:
+            IB_NONE[k] = 1
+    for k in range(8):
+        W3[k] = tshr(3 * basis[k * 8] - basis[k * 8 + 1], 3)
+        W5[k] = 5 * basis[k * 8] - basis[k * 8 + 1]
+        E3[k] = tshr(3 * basis[k * 8 + 7] - basis[k * 8 + 6], 3)
+        E5[k] = 5 * basis[k * 8 + 7] - basis[k * 8 + 6]
+    for n in range(64):
+        for k in range(8):
+            KER_RIGHT[n * 8 + k] = divround(basis[(n >> 3) * 8 + k] * E5[n & 7], 2896)
+            KER_BOTTOM[n * 8 + k] = divround(basis[(n & 7) * 8 + k] * E5[n >> 3], 2896)
+            KER_LEFT[n * 8 + k] = divround(basis[(n >> 3) * 8 + k] * W5[n & 7], 2896)
+            KER_TOP[n * 8 + k] = divround(basis[(n & 7) * 8 + k] * W5[n >> 3], 2896)
+
+# ---------------------------------------------------------------- mixers
+# a mixer in H: n, sel, pr, k, st[8], then sets x 8 weights
+
+def mxnew(inputs, sets):
+    m = alloc(12 + sets * 8)
+    H[m] = inputs
+    for i in range(sets * 8):
+        if (i & 7) < inputs:
+            H[m + 12 + i] = 65536 // inputs
+    return m
+
+def mxadd(m, p16):
+    k = H[m + 3]
+    H[m + 4 + k] = stretch(p16)
+    H[m + 3] = k + 1
+
+def mxmix(m, sel):
+    s = sel * 8
+    H[m + 1] = s
+    dot = 0
+    for i in range(H[m]):
+        dot = dot + H[m + 4 + i] * H[m + 12 + s + i]
+    pr = squash(tshr(dot, 16))
+    H[m + 2] = pr
+    return pr << 4
+
+def mxupd(m, bit):
+    err = ((bit << 12) - H[m + 2]) * 6
+    s = H[m + 1]
+    for i in range(H[m]):
+        wi = H[m + 12 + s + i] + tshr(H[m + 4 + i] * err, 14)
+        if sgt(wi, MAX_WEIGHT):
+            wi = MAX_WEIGHT
+        if slt(wi, -MAX_WEIGHT):
+            wi = -MAX_WEIGHT
+        H[m + 12 + s + i] = wi
+    H[m + 3] = 0
+
+def code1(addr):
+    bit = decode(cp(H[addr]))
+    upd(addr, bit, COUNTER_LIMIT)
+    return bit
+
+def codemix(mx, sel, a1, a2, a3, a4):
+    mxadd(mx, cp(H[a1]))
+    mxadd(mx, cp(H[a2]))
+    mxadd(mx, cp(H[a3]))
+    mxadd(mx, cp(H[a4]))
+    mxadd(mx, 40960)
+    bit = decode(mxmix(mx, sel))
+    mxupd(mx, bit)
+    upd(a1, bit, COUNTER_LIMIT)
+    upd(a2, bit, COUNTER_LIMIT)
+    upd(a3, bit, COUNTER_LIMIT)
+    upd(a4, bit, COUNTER_LIMIT)
+    return bit
+
+def codemix5(mx, sel, a1, a2, a3, a4, a5):
+    mxadd(mx, cp(H[a1]))
+    mxadd(mx, cp(H[a2]))
+    mxadd(mx, cp(H[a3]))
+    mxadd(mx, cp(H[a4]))
+    mxadd(mx, cp(H[a5]))
+    mxadd(mx, 40960)
+    bit = decode(mxmix(mx, sel))
+    mxupd(mx, bit)
+    upd(a1, bit, COUNTER_LIMIT)
+    upd(a2, bit, COUNTER_LIMIT)
+    upd(a3, bit, COUNTER_LIMIT)
+    upd(a4, bit, COUNTER_LIMIT)
+    upd(a5, bit, COUNTER_LIMIT)
+    return bit
+
+def mantissa(m1base, m1, m1stride, mbase, maxe, e):
+    a = 1 << (e - 1)
+    i = e - 1
+    while i > 0:
+        i -= 1
+        if i == e - 2:
+            b = code1(m1base + e * m1stride + m1)
+        else:
+            b = code1(mbase + e * maxe + i)
+        a = a | (b << i)
+    return a
+
+# ---------------------------------------------------------------- one component
+
+def neighbourmag(coef, base, bx, byr, k, bw):
+    s = 0
+    ws = 0
+    if byr > 0:
+        s = s + 2 * iabs(H[coef + base - bw * 64 + k])
+        ws += 2
+        if bx > 0:
+            s = s + iabs(H[coef + base - bw * 64 - 64 + k])
+            ws += 1
+        if bx + 1 < bw:
+            s = s + iabs(H[coef + base - bw * 64 + 64 + k])
+            ws += 1
+    if bx > 0:
+        s = s + 2 * iabs(H[coef + base - 64 + k])
+        ws += 2
+    if ws == 0:
+        return -1
+    return (s * 2 + ws // 2) // ws
+
+def fillcaches(cache):
+    """this block's right edge into RIGHTC, its bottom edge into cache"""
+    for i in range(16):
+        RIGHTC[i] = 0
+        H[cache + i] = 0
+    for pos in range(64):
+        f = FB[pos]
+        if f:
+            u = pos >> 3
+            v = pos & 7
+            RIGHTC[u] = RIGHTC[u] + E3[v] * f
+            H[cache + v] = H[cache + v] + E3[u] * f
+            for y in range(8):
+                RIGHTC[8 + y] = RIGHTC[8 + y] + KER_RIGHT[pos * 8 + y] * f
+                H[cache + 8 + y] = H[cache + 8 + y] + KER_BOTTOM[pos * 8 + y] * f
+
+def cswap(i, j):
+    a = ESTS[i]
+    b = ESTS[j]
+    d = b - a
+    m = 0 - (d >> 31)
+    ESTS[i] = a + (d & m)
+    ESTS[j] = b - (d & m)
+
+def mn(a, b):
+    d = b - a
+    return a + (d & (0 - (d >> 31)))
+
+def mx(a, b):
+    d = b - a
+    return b - (d & (0 - (d >> 31)))
+
+def component(c, y0, y1, sx, sy, lumaw):
+    """the band's rows y0 .. y1 of component c, decoded with model mb"""
+    coef = CCOEF[c]
+    bw = CBW[c]
+    nzc = NZC[c]
+    dcr = DCR[c]
+    tq = CTQ[c]
+    for k in range(64):
+        q = QT[tq * 64 + k]
+        if q == 0:
+            q = 1
+        QK[k] = q
+    dq0 = 2896 * QK[0]
+    mxnz = H[mb + MX_NZ]
+    mxzero = H[mb + MX_ZERO]
+    mxexpo = H[mb + MX_EXPO]
+    mxezero = H[mb + MX_EZERO]
+    mxeexpo = H[mb + MX_EEXPO]
+    mxdczero = H[mb + MX_DCZERO]
+    mxdcexpo = H[mb + MX_DCEXPO]
+    for i in range(16):
+        LEFTC[i] = 0
+    for by in range(y0, y1):
+        for bx in range(bw):
+            base = (by * bw + bx) * 64
+            hava = 0
+            if by > y0:
+                hava = 1
+            havl = 0
+            if bx > 0:
+                havl = 1
+            abase = base - bw * 64
+            lbase = base - 64
+            if hava == 0:
+                abase = base
+            if havl == 0:
+                lbase = base
+            # 1. the interior's nonzero count, a 6-bit tree
+            nza = 0
+            nzl = 0
+            if hava:
+                nza = H[nzc + (by - 1) * bw + bx]
+            if havl:
+                nzl = H[nzc + by * bw + bx - 1]
+            if hava and havl:
+                ctx = nzbucket[(nza + nzl + 1) // 2]
+            elif hava:
+                ctx = nzbucket[nza]
+            elif havl:
+                ctx = nzbucket[nzl]
+            else:
+                ctx = 0
+            za = 0
+            zb = 0
+            if hava:
+                za = nzbucket[nza]
+            if havl:
+                zb = nzbucket[nzl]
+            if lumanz:
+                lz = nzbucket[H[lumanz + (by * sy) * lumaw + bx * sx]]
+            else:
+                lz = NZ_BUCKETS
+            node = 1
+            for kk in range(6):
+                mxadd(mxnz, cp(H[mb + T_NZ1 + ctx * 64 + node]))
+                mxadd(mxnz, cp(H[mb + T_NZ2 + (za * NZ_BUCKETS + zb) * 64 + node]))
+                mxadd(mxnz, cp(H[mb + T_NZ3 + (lz * NZ_BUCKETS + ctx) * 64 + node]))
+                mxadd(mxnz, 40960)
+                bit = decode(mxmix(mxnz, kk))
+                mxupd(mxnz, bit)
+                upd(mb + T_NZ1 + ctx * 64 + node, bit, COUNTER_LIMIT)
+                upd(mb + T_NZ2 + (za * NZ_BUCKETS + zb) * 64 + node, bit, COUNTER_LIMIT)
+                upd(mb + T_NZ3 + (lz * NZ_BUCKETS + ctx) * 64 + node, bit, COUNTER_LIMIT)
+                node = node * 2 + bit
+            n = node - 64
+            if n > 49:
+                error()
+            H[nzc + by * bw + bx] = n
+            nzb = nzbucket[n]
+            # 2. the interior in zigzag, while nonzeros are left
+            rem = n
+            idx = 0
+            while rem > 0 and idx <= 48:
+                k = INTERIOR[idx]
+                nb = neighbourmag(coef, base, bx, by - y0, k, bw)
+                ib = IB_WA[idx] * iabs(H[coef + base + IB_NA[idx]]) + IB_WB[idx] * iabs(H[coef + base + IB_NB[idx]])
+                if IB_NONE[idx]:
+                    mbi = NO_NEIGHBOUR
+                else:
+                    mbi = clip(finelog(ib), NO_NEIGHBOUR - 1)
+                if nb == 4294967295:
+                    mbn = NO_NEIGHBOUR
+                    mbs = clip(finelog(2 * ib), NO_NEIGHBOUR - 1)
+                else:
+                    mbn = clip(finelog(nb), NO_NEIGHBOUR - 1)
+                    mbs = clip(finelog(nb + ib), NO_NEIGHBOUR - 1)
+                kb = kbucket[k]
+                rb = rembucket[rem]
+                if rem >= 49 - idx:
+                    bit = 1
+                else:
+                    mbn3 = clip(mbn, 3)
+                    ratio = 0
+                    if rem < 49 - idx:
+                        ratio = rem * 16 // (49 - idx)
+                    bit = codemix5(mxzero, k, mb + T_ZERO5 + (k * (NZ_BUCKETS + 1) + lz) * REM_BUCKETS + rb,
+                                   mb + T_ZERO1 + (k * REM_BUCKETS + rb) * MAG_BUCKETS + mbn,
+                                   mb + T_ZERO2 + (k * MAG_BUCKETS + mbi) * 4 + mbn3,
+                                   mb + T_ZERO3 + k * RATIO_BUCKETS + ratio,
+                                   mb + T_ZERO4 + (kb * MAG_BUCKETS + mbs) * REM_BUCKETS + rb)
+                if bit == 1:
+                    i = 1
+                    while i < MAX_EXP_AC:
+                        if codemix(mxexpo, (i - 1) * K_BUCKETS + kb,
+                                   mb + T_EXPO1 + (kb * MAG_BUCKETS + mbn) * MAX_EXP_AC + i - 1,
+                                   mb + T_EXPO2 + (kb * MAG_BUCKETS + mbi) * MAX_EXP_AC + i - 1,
+                                   mb + T_EXPO3 + (kb * REM_BUCKETS + rb) * MAX_EXP_AC + i - 1,
+                                   mb + T_EXPO4 + mbs * MAX_EXP_AC + i - 1) == 0:
+                            break
+                        i += 1
+                    x = mantissa(mb + T_MANT1, kb, K_BUCKETS, mb + T_MANT, MAX_EXP_AC, i)
+                    if hava:
+                        ctx = sgn3(H[coef + abase + k])
+                    else:
+                        ctx = 1
+                    if havl:
+                        ctx = ctx * 3 + sgn3(H[coef + lbase + k])
+                    else:
+                        ctx = ctx * 3 + 1
+                    if code1(mb + T_SIGN + kb * 9 + ctx):
+                        H[coef + base + k] = -x
+                    else:
+                        H[coef + base + k] = x
+                    rem -= 1
+                idx += 1
+            if rem > 0:
+                error()
+            # the interior, dequantized
+            for idx in range(49):
+                k = INTERIOR[idx]
+                v = H[coef + base + k]
+                if v:
+                    FB[zigzag[k]] = dequant(v, QK[k])
+            # 3. row 0 and column 0, interleaved, each predicted across its edge
+            for ep in range(EDGE_POS):
+                if (ep & 1) == 0:
+                    u = 0
+                    w = ep // 2 + 1
+                else:
+                    u = ep // 2 + 1
+                    w = 0
+                k = UNZIG[u * 8 + w]
+                pb = NO_PRED
+                predf = 0
+                if u == 0 and hava:
+                    s = 0
+                    for r in range(1, 8):
+                        s = s + W3[r] * FB[r * 8 + w]
+                    predf = divround(H[rowc + bx * 16 + w] - s, 724 * QK[k])
+                    pb = clip(finelog(divround(5 * predf, 8)), NO_PRED - 1)
+                elif w == 0 and havl:
+                    s = 0
+                    for r in range(1, 8):
+                        s = s + W3[r] * FB[u * 8 + r]
+                    predf = divround(LEFTC[u] - s, 724 * QK[k])
+                    pb = clip(finelog(divround(5 * predf, 8)), NO_PRED - 1)
+                a = 0
+                l = 0
+                if hava:
+                    a = iabs(H[coef + abase + k])
+                if havl:
+                    l = iabs(H[coef + lbase + k])
+                if hava and havl:
+                    mbn = clip(bitlen(a + l), NO_NEIGHBOUR - 1)
+                elif hava or havl:
+                    mbn = clip(bitlen(2 * (a + l)), NO_NEIGHBOUR - 1)
+                else:
+                    mbn = NO_NEIGHBOUR
+                if ep >= 2:
+                    if u == 0:
+                        prevb = clip(bitlen(H[coef + base + UNZIG[w - 1]]), 7)
+                    else:
+                        prevb = clip(bitlen(H[coef + base + UNZIG[(u - 1) * 8]]), 7)
+                else:
+                    prevb = 7
+                if u == 0:
+                    ib = clip(finelog(H[coef + base + UNZIG[8 + w]]), 11)
+                else:
+                    ib = clip(finelog(H[coef + base + UNZIG[u * 8 + 1]]), 11)
+                pb3 = clip(pb, 3)
+                bit = codemix5(mxezero, ep, mb + T_EZERO5 + (ep * 12 + ib) * 4 + pb3,
+                               mb + T_EZERO1 + ep * PRED_BUCKETS + pb,
+                               mb + T_EZERO2 + ep * NZ_BUCKETS + nzb,
+                               mb + T_EZERO3 + (ep * 8 + prevb) * PRED_BUCKETS + pb,
+                               mb + T_EZERO4 + ep * MAG_BUCKETS + mbn)
+                if bit == 1:
+                    i = 1
+                    while i < MAX_EXP_AC:
+                        if codemix5(mxeexpo, (i - 1) * EDGE_POS + ep,
+                                    mb + T_EEXPO5 + (ep * 12 + ib) * MAX_EXP_AC + i - 1,
+                                    mb + T_EEXPO1 + (ep * PRED_BUCKETS + pb) * MAX_EXP_AC + i - 1,
+                                    mb + T_EEXPO2 + (ep * MAG_BUCKETS + mbn) * MAX_EXP_AC + i - 1,
+                                    mb + T_EEXPO3 + (pb * 8 + prevb) * MAX_EXP_AC + i - 1,
+                                    mb + T_EEXPO4 + (ep * NZ_BUCKETS + nzb) * MAX_EXP_AC + i - 1) == 0:
+                            break
+                        i += 1
+                    x = mantissa(mb + T_EMANT1, pb, PRED_BUCKETS, mb + T_MANT, MAX_EXP_AC, i)
+                    if pb == NO_PRED:
+                        sg = 1
+                    else:
+                        sg = sgn3(predf)
+                    if code1(mb + T_ESIGN + ((ep & 1) * 3 + sg) * PRED_BUCKETS + pb):
+                        H[coef + base + k] = -x
+                    else:
+                        H[coef + base + k] = x
+            for ep in range(EDGE_POS):
+                if (ep & 1) == 0:
+                    pos = ep // 2 + 1
+                else:
+                    pos = (ep // 2 + 1) * 8
+                k = UNZIG[pos]
+                v = H[coef + base + k]
+                if v:
+                    FB[pos] = dequant(v, QK[k])
+            # 4. the DC, from the boundary pixels' estimates
+            for i in range(8):
+                PC[i] = 0
+                PR[i] = 0
+            for pos in range(64):
+                f = FB[pos]
+                if f:
+                    for y in range(8):
+                        PC[y] = PC[y] + KER_LEFT[pos * 8 + y] * f
+                        PR[y] = PR[y] + KER_TOP[pos * 8 + y] * f
+            nest = 0
+            if havl:
+                for i in range(8):
+                    ESTS[nest] = tshr(LEFTC[8 + i] - PC[i], 2)
+                    nest += 1
+            if hava:
+                for i in range(8):
+                    ESTS[nest] = tshr(H[rowc + bx * 16 + 8 + i] - PR[i], 2)
+                    nest += 1
+            lo = 0
+            hi = 0
+            if nest == 16:
+                for i in range(51):
+                    cswap(split16[i] >> 4, split16[i] & 15)
+                lo = mn(mn(ESTS[0], ESTS[1]), mn(ESTS[2], ESTS[3]))
+                hi = mx(mx(ESTS[12], ESTS[13]), mx(ESTS[14], ESTS[15]))
+            elif nest == 8:
+                for i in range(15):
+                    cswap(split8[i] >> 4, split8[i] & 15)
+                lo = mn(ESTS[0], ESTS[1])
+                hi = mx(ESTS[6], ESTS[7])
+            total = 0
+            for i in range(nest // 4, nest - nest // 4):
+                total = total + ESTS[i]
+            if nest > 0:
+                nest = nest - 2 * (nest // 4)
+            if nest > 0:
+                pred = divround(total, nest * dq0)
+                ctx = clip(finelog(divround(hi - lo, dq0)), ACT_BUCKETS - 2)
+            else:
+                pred = 0
+                ctx = ACT_BUCKETS - 1
+            if sgt(pred, 32767):
+                pred = 32767
+            if slt(pred, -32767):
+                pred = -32767
+            rb2 = 0
+            nbs = 0
+            if hava:
+                rb2 = rb2 + H[dcr + (by - 1) * bw + bx]
+                nbs += 1
+            if havl:
+                rb2 = rb2 + H[dcr + by * bw + bx - 1]
+                nbs += 1
+            rb2 = clip(rb2, 19)
+            res = 0
+            if codemix(mxdczero, ctx, mb + T_DCZERO + ctx, mb + T_DZ2 + rb2, mb + T_DZ3 + nzb * 8 + ctx // 3,
+                       mb + T_DZ4 + ctx * 3 + nbs):
+                i = 1
+                while i < MAX_EXP_DC:
+                    if codemix(mxdcexpo, i - 1, mb + T_DCEXPO + ctx * MAX_EXP_DC + i - 1,
+                               mb + T_DX2 + rb2 * MAX_EXP_DC + i - 1,
+                               mb + T_DX3 + (nzb * 8 + ctx // 3) * MAX_EXP_DC + i - 1,
+                               mb + T_DX4 + (ctx * 3 + nbs) * MAX_EXP_DC + i - 1) == 0:
+                        break
+                    i += 1
+                x = mantissa(mb + T_DCMANT1, ctx, ACT_BUCKETS, mb + T_DCMANT, MAX_EXP_DC, i)
+                if code1(mb + T_DCSIGN + ctx):
+                    res = -x
+                else:
+                    res = x
+            H[dcr + by * bw + bx] = clip(finelog(res), 15)
+            x = pred + res
+            if sgt(x, 32767) or slt(x, -32767):
+                error()
+            H[coef + base] = x
+            FB[0] = dequant(x, QK[0])
+            fillcaches(rowc + bx * 16)
+            for pos in range(64):
+                FB[pos] = 0
+            for i in range(16):
+                LEFTC[i] = RIGHTC[i]
+
+# ---------------------------------------------------------------- bands
+
+def decodeband(band, nb):
+    global mb, lumanz
+    m0 = mcusy * band // nb
+    m1 = mcusy * (band + 1) // nb
+    luma = newmodel()
+    chroma = newmodel()
+    for c in range(ncomp):
+        if c == 0:
+            mb = luma
+            lumanz = 0
+            component(0, m0 * CV[0], m1 * CV[0], 0, 0, 0)
+        else:
+            mb = chroma
+            sx = CH[0] // CH[c]
+            sy = CV[0] // CV[c]
+            if sx < 1 or sy < 1 or CBW[c] * sx > CBW[0] or CBH[c] * sy > CBH[0]:
+                lumanz = 0
+                component(c, m0 * CV[c], m1 * CV[c], 0, 0, 0)
+            else:
+                lumanz = NZC[0]
+                component(c, m0 * CV[c], m1 * CV[c], sx, sy, CBW[0])
+
+def decodebands(first, end):
+    """the bands from M[first] on, the stream ending at M[end]"""
+    global rowc
+    nb = bandcount()
+    maxbw = 0
+    for c in range(ncomp):
+        NZC[c] = alloc(CBW[c] * CBH[c])
+        DCR[c] = alloc(CBW[c] * CBH[c])
+        if CBW[c] > maxbw:
+            maxbw = CBW[c]
+    rowc = alloc(maxbw * 16)
+    p = first
+    for b in range(nb):
+        if b < nb - 1:
+            ln = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+            p += 4
+        else:
+            ln = end - p
+        dinit(p, p + ln)
+        decodeband(b, nb)
+        p += ln

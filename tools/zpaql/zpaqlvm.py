@@ -329,8 +329,12 @@ def _swapm_factory(vm):
     return swapm
 
 
-def run_config(text, segment, args):
+def run_config(text, segment, args, max_ph=None):
+    """max_ph caps H for tests: a program that never reaches past 2^max_ph
+    words runs the same in less memory."""
     ph, pm, code = parse_config(text, args)
+    if max_ph is not None:
+        ph = min(ph, max_ph)
     vm = VM(code, ph, pm)
     vm._swapm = _swapm_factory(vm)
     for byte in segment:

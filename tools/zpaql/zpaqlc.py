@@ -12,11 +12,14 @@ The source is a subset of Python, read with the ast module:
     anything else signed is written in the language itself (a prelude).
   - top level: NAME = <constant expression> (ALL_CAPS: a constant),
     name = <constant> (a global), name = array(N) (N words of H),
+    name = table([...]) (words of H set to those constants at the start),
+    name = heap() (the rest of H, after every array, wherever declared),
     def f(...): ... (no recursion), and def main(): (run at the end).
   - statements: assignment, augmented assignment, if/elif/else, while,
     for i in range(...), break, continue, return, pass, a call.
   - H[i] and M[i]: the machine's arrays; arr[i] is H[base(arr) + i].
     M[0 ..] holds the segment as it came; inlen() is its length.
+    base(arr) is arr's first word in H, for code that takes addresses.
     out(x) writes the byte x; error() stops with a ZPAQL error.
 
 Variables live in R, or in H when R is full: each function has its own
@@ -103,6 +106,7 @@ class Asm:
                 out.append('%s %d' % (kind, pos[lab] - (addr + 2))); addr += 2
         if addr > 65535:
             raise CompileError('program too big: %d bytes (ZPAQL allows 65535)' % addr)
+        self.positions = pos
         return out, addr
 
 
@@ -117,8 +121,12 @@ class Slot:
 
 
 class Alloc:
-    """R first (from RFIRST), then H words from HVAR on."""
+    """R first (from RFIRST), then H words 0 .. HVARS - 1. The arrays
+    start at HVARS: temporaries are given out while the functions are
+    compiled, after the arrays have their places, so the variables need a
+    region of their own."""
     RFIRST = 8          # R0: input length, R1..R7: the compiler's scratch
+    HVARS = 8192
     def __init__(self):
         self.r = self.RFIRST
         self.h = 0
@@ -126,6 +134,8 @@ class Alloc:
     def new(self):
         if self.r < 256:
             s = Slot('r', self.r); self.r += 1; return s
+        if self.h >= self.HVARS:
+            raise CompileError('more than %d variables in H' % self.HVARS)
         s = Slot('h', self.h); self.h += 1; return s
 
 
@@ -158,6 +168,8 @@ class Compiler:
         self.arrays = {}      # name -> (base slot, size)
         self.hnext = 0        # H words given to arrays (after the variables)
         self.arr_order = []
+        self.tables = {}      # name -> its initial words (table([...]))
+        self.heap = None      # the array placed after all the others (heap())
         self.funcs = {}
         self.loops = []
         self.cur = None
@@ -186,6 +198,22 @@ class Compiler:
         err(node, 'not a constant expression')
 
     def collect(self, tree):
+        # the constants first, in any order: arrays and tables may use ones
+        # defined further down (or in a file concatenated after)
+        pending = [n for n in tree.body if isinstance(n, ast.Assign) and len(n.targets) == 1
+                   and isinstance(n.targets[0], ast.Name) and n.targets[0].id.isupper()
+                   and not (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                            and n.value.func.id in ('array', 'table', 'heap'))]
+        while pending:
+            left = []
+            for n in pending:
+                try:
+                    self.consts[n.targets[0].id] = self.const_eval(n.value)
+                except CompileError:
+                    left.append(n)
+            if len(left) == len(pending):
+                err(left[0], 'not a constant expression')
+            pending = left
         for node in tree.body:
             if isinstance(node, ast.FunctionDef):
                 if node.name in self.funcs:
@@ -197,8 +225,20 @@ class Compiler:
                 if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == 'array':
                     self.arrays[name] = [None, self.const_eval(v.args[0])]
                     self.arr_order.append(name)
+                elif isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == 'heap':
+                    if self.heap:
+                        err(v, 'one heap() only')
+                    self.heap = name
+                    self.arrays[name] = [None, 0]
+                elif isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == 'table':
+                    if not isinstance(v.args[0], (ast.List, ast.Tuple)):
+                        err(v, 'table([...]) takes a list of constants')
+                    vals = [self.const_eval(e) for e in v.args[0].elts]
+                    self.arrays[name] = [None, len(vals)]
+                    self.arr_order.append(name)
+                    self.tables[name] = vals
                 elif name.isupper():
-                    self.consts[name] = self.const_eval(v)
+                    pass       # already in self.consts
                 else:
                     self.globals[name] = None
                     self.ginit[name] = self.const_eval(v)
@@ -208,6 +248,8 @@ class Compiler:
                 err(node, 'only constants, globals, arrays and functions at top level')
         if 'main' not in self.funcs:
             raise CompileError('no main()')
+        if self.heap:
+            self.arr_order.append(self.heap)    # last, wherever it was declared
         for name in self.globals:
             self.globals[name] = self.alloc.new()
         for name in self.arr_order:
@@ -351,7 +393,8 @@ class Compiler:
             k = self.is_small_const(node.right)
             if k is not None:
                 self.expr(node.left, depth); a.op('%s %d' % (op, k)); return
-            if isinstance(node.right, ast.Name) and self.lookup(node.right, node.right.id).kind == 'r' \
+            if isinstance(node.right, ast.Name) and node.right.id not in self.consts \
+                    and self.lookup(node.right, node.right.id).kind == 'r' \
                     and not self.has_call(node.left):
                 self.expr(node.left, depth)
                 a.op('b=r %d' % self.lookup(node.right, node.right.id).n)
@@ -531,6 +574,10 @@ class Compiler:
             a.op('error'); return
         if name == 'inlen':
             a.op('a=r %d' % R_INLEN); return
+        if name == 'base':
+            if len(args) != 1 or not isinstance(args[0], ast.Name) or args[0].id not in self.arrays:
+                err(node, 'base() takes an array')
+            self.load_a(self.arrays[args[0].id][0]); return
         if name == 'sar':
             t = self.temp(depth)
             self.expr(args[1], depth + 1); self.store_a(t)
@@ -599,7 +646,8 @@ class Compiler:
                     self.expr(value); a.op('*c=a')     # C holds the address
                 else:
                     # D holds the address; loading a value from H would move D
-                    if isinstance(value, ast.Name) and self.lookup(value, value.id).kind == 'h':
+                    if isinstance(value, ast.Name) and value.id not in self.consts \
+                            and self.lookup(value, value.id).kind == 'h':
                         a.op('a=d'); a.op('r=a %d' % R_T1); self.expr(value)
                         a.op('r=a %d' % R_T2); a.op('a=r %d' % R_T1); a.op('d=a'); a.op('a=r %d' % R_T2)
                     else:
@@ -631,6 +679,8 @@ class Compiler:
 
     def stmt(self, s):
         a = self.asm
+        self.nline = getattr(self, 'nline', 0) + 1
+        a.put('@%d:%d:%s' % (self.nline, s.lineno, self.cur.name if self.cur else ''))
         if isinstance(s, ast.Assign):
             if len(s.targets) != 1:
                 err(s, 'one target per assignment')
@@ -732,12 +782,16 @@ class Compiler:
         for name, v in self.ginit.items():
             if v:
                 self.const_a(v); self.store_a(self.globals[name])
-        base = self.alloc.h          # arrays after the variables spilled to H
+        base = Alloc.HVARS           # arrays after the variables' region
         for name in self.arr_order:
             slot, size = self.arrays[name]
             self.const_a(base); self.store_a(slot)
             base += size
         self.hwords = base
+        for name, vals in self.tables.items():
+            self.load_a(self.arrays[name][0]); a.op('d=a')
+            for v in vals:
+                self.const_a(v); a.op('*d=a'); a.op('d++')
         a.jmp('jmp', self.funcs['main'].entry)
         # main first, then the rest, in the order written
         order = ['main'] + [n for n in self.funcs if n != 'main']
@@ -765,5 +819,10 @@ if __name__ == '__main__':
     cfg, size, c = compile_source(open(src).read(), opts.get('--name', 'zl'),
                                   opts.get('--ph', '24'), opts.get('--pm', '$1+1'))
     open(outp, 'w').write(cfg)
+    # where each source line starts in the program: for a run-time error's address
+    marks = sorted((v, k.split(':')[1], k.split(':')[2]) for k, v in c.asm.positions.items() if k.startswith('@'))
+    with open(outp + '.map', 'w') as mf:
+        for addr, line, fn in marks:
+            mf.write('%d %s %s\n' % (addr, line, fn))
     print('%s: %d bytes of PCOMP, %d R registers, %d H words of variables and arrays'
           % (outp, size, min(c.alloc.r, 256), c.hwords))
