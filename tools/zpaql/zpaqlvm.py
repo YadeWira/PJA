@@ -332,15 +332,26 @@ def _swapm_factory(vm):
 def run_config(text, segment, args, max_ph=None):
     """max_ph caps H for tests: a program that never reaches past 2^max_ph
     words runs the same in less memory."""
+    outs, steps, size = run_segments(text, [segment], args, max_ph)
+    return outs[0], steps, size
+
+
+def run_segments(text, segments, args, max_ph=None):
+    """Several segments of one block, as libzpaq runs them: one machine,
+    its H, M and R kept from one segment to the next. The output of each."""
     ph, pm, code = parse_config(text, args)
     if max_ph is not None:
         ph = min(ph, max_ph)
     vm = VM(code, ph, pm)
     vm._swapm = _swapm_factory(vm)
-    for byte in segment:
-        vm.run(byte)
-    vm.run(M32)
-    return bytes(vm.out), vm.steps, len(code)
+    outs = []
+    for segment in segments:
+        n = len(vm.out)
+        for byte in segment:
+            vm.run(byte)
+        vm.run(M32)
+        outs.append(bytes(vm.out[n:]))
+    return outs, vm.steps, len(code)
 
 
 if __name__ == '__main__':

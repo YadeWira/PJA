@@ -21,6 +21,10 @@ The source is a subset of Python, read with the ast module:
     M[0 ..] holds the segment as it came; inlen() is its length.
     base(arr) is arr's first word in H, for code that takes addresses.
     out(x) writes the byte x; error() stops with a ZPAQL error.
+    reset(n) ends the segment so that the next one starts as the first
+    did: H[0 .. n) and every R register in use back to zero (n is past
+    the last word the program used: its heap pointer), then halt. libzpaq
+    keeps H, M and R from one segment of a block to the next.
 
 Variables live in R, or in H when R is full: each function has its own
 fixed places (no recursion, so nothing needs a stack). A call stores a
@@ -171,6 +175,7 @@ class Compiler:
         self.tables = {}      # name -> its initial words (table([...]))
         self.heap = None      # the array placed after all the others (heap())
         self.funcs = {}
+        self.lreset = None    # where reset() goes, once something calls it
         self.loops = []
         self.cur = None
         self.collect(tree)
@@ -574,6 +579,12 @@ class Compiler:
             a.op('error'); return
         if name == 'inlen':
             a.op('a=r %d' % R_INLEN); return
+        if name == 'reset':
+            if len(args) != 1:
+                err(node, 'reset() takes the end of the H in use')
+            if self.lreset is None:
+                self.lreset = a.label()
+            self.expr(args[0], depth); a.op('d=a'); a.jmp('jmp', self.lreset); return
         if name == 'base':
             if len(args) != 1 or not isinstance(args[0], ast.Name) or args[0].id not in self.arrays:
                 err(node, 'base() takes an array')
@@ -820,6 +831,19 @@ class Compiler:
             self.function(self.funcs[n])
         for n in order:
             self.exit_block(self.funcs[n])
+        if self.lreset is not None:
+            # H[0 .. D) to zero from the top, then the registers, the input
+            # counter among them; only A and D, which hold nothing between runs
+            lloop, ldone = a.label(), a.label()
+            a.put(self.lreset)
+            a.put(lloop)
+            a.op('a=d'); a.op('a== 0'); a.jmp('jt', ldone)
+            a.op('d--'); a.op('a=0'); a.op('*d=a'); a.jmp('jmp', lloop)
+            a.put(ldone)
+            a.op('a=0')
+            for r in range(min(self.alloc.r, 256)):
+                a.op('r=a %d' % r)
+            a.op('halt')
         return a.assemble()
 
 

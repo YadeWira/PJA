@@ -1312,3 +1312,5 @@ def main():
         q += 1
     if outn != origsize:
         error()
+    # the next segment of the block, if any, starts from scratch
+    reset(hp)

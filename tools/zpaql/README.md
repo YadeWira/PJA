@@ -28,6 +28,11 @@ arrays and tables nothing reads, are left out, so the two decoders share
 their sources (the head stream, the coder, the mixers) and each pays only
 for what it uses.
 
+`reset(n)` ends a segment so that the next segment of the same block
+starts as the first did: libzpaq keeps H, M and the registers between
+them, so H below `n` and every register in use go back to zero.
+`zpaqlvm.run_segments` runs several segments on one machine.
+
 How a program looks inside: variables live in R (in H once R is full), each
 function in fixed places of its own; a call stores a call-site number and
 long-jumps, and the function comes back through a chain of comparisons on

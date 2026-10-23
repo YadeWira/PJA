@@ -285,5 +285,30 @@ def main():
 '''
 check('tables', run(src), word_bytes([1, 300, 70000, 4294967295, 0, 255]) + bytes([17, 30]))
 
+# reset(): a second segment of the block starts as the first did
+src = '''
+SUMS = array(4)
+total = 0
+seen = 7
+def main():
+    global total, seen
+    for j in range(inlen()):
+        SUMS[j & 3] = SUMS[j & 3] + M[j]
+        total = total + M[j]
+    out(total & 255)
+    out(seen)
+    seen = 9
+    for k in range(4):
+        out(SUMS[k] & 255)
+    reset(base(SUMS) + 4)
+'''
+cfg, _, _ = zpaqlc.compile_source(src, 'test', '16', '16')
+segs = [bytes([1, 2, 3, 4, 5]), bytes([10, 20]), bytes([1, 2, 3, 4, 5])]
+def want_seg(b):
+    s4 = [sum(b[j] for j in range(len(b)) if j & 3 == k) & 255 for k in range(4)]
+    return bytes([sum(b) & 255, 7] + s4)
+outs, _, _ = zpaqlvm.run_segments(cfg, segs, [])
+check('reset between segments', b''.join(outs), b''.join(want_seg(b) for b in segs))
+
 print('%d cells, %d failures' % (cells, fails))
 sys.exit(1 if fails else 0)

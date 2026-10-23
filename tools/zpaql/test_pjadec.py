@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """The plugin's ZPAQL decoders (pas/plugin/pjazpaql.inc, and for JPEG-LS
 files pjalszpaql.inc) run on segments: each must give back its file byte
-for byte.
+for byte; and, per decoder, its two smallest files as segments of one
+block, as zpaq-std groups them.
 
     test_pjadec.py <segment dir> <jpeg> ...
 
 The segments come from pas/tests/zpaql_segments, with the $3 the plugin's
 query gives for each: the decoder runs with exactly that H (it measures its
 H and stops if it is short). Slow (the interpreter is
-Python): the suite gives it two small samples; zpaq-std -sat, with
+Python): the suite gives it a few small samples; zpaq-std -sat, with
 libzpaq's JIT, checks every block of real files."""
 import math, os, re, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,5 +43,30 @@ for j in jpegs:
     if not ok:
         fails += 1
     print('  %-20s %s (%d bytes, H of 2^%s words, %.0f s)' % (os.path.basename(j), 'the original' if ok else 'DIFFERS', len(want), ph if ok else '?', time.time() - t))
-print('%d files, %d failures' % (len(jpegs), fails))
+
+# several files in ONE block, a segment each, as zpaq-std puts them: the
+# decoder starts afresh after each. Per decoder, its two smallest files,
+# the larger first, H the larger of their two sizes
+blocks = 0
+for ls in (False, True):
+    group = sorted((j for j in jpegs if j.lower().endswith('.jls') == ls), key=os.path.getsize)[:2][::-1]
+    if len(group) < 2:
+        continue
+    blocks += 1
+    t = time.time()
+    names = [os.path.join(segdir, os.path.splitext(os.path.basename(j))[0]) for j in group]
+    segs = [open(n + '.seg', 'rb').read() for n in names]
+    wants = [open(j, 'rb').read() for j in group]
+    ph = max(int(open(n + '.args').read()) for n in names)
+    try:
+        outs, steps, size = zpaqlvm.run_segments(cfgs[ls], segs, [math.ceil(math.log2(max(map(len, segs)))),
+                                                                   math.ceil(math.log2(max(map(len, wants)))), ph])
+        ok = outs == wants
+    except Exception as e:
+        ok = False
+        print('  block: %s' % e)
+    if not ok:
+        fails += 1
+    print('  one block: %s %s (%.0f s)' % (' + '.join(os.path.basename(j) for j in group), 'each the original' if ok else 'DIFFERS', time.time() - t))
+print('%d files, %d blocks of two, %d failures' % (len(jpegs), blocks, fails))
 sys.exit(1 if fails else 0)

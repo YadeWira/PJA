@@ -18,7 +18,8 @@
     reads it without this plugin. Its H is sized for each block: the config
     says $3, and query(ZS_QUERY_ZPAQL_ARGS) gives it (pjazpaqlargs); such a
     ZPAQL is handed out only as ZS_DATA_ZPAQL_ARGS, so a zpaq-std that does
-    not ask sees none. data(ZS_DATA_INFO) is the card zpaq-std shows in
+    not ask sees none. The ZPAQL starts afresh after each segment, so
+    query(ZS_QUERY_SEGMENTS) says 1: several files may share a block. data(ZS_DATA_INFO) is the card zpaq-std shows in
     codecinfoex. pjals is the same for JPEG-LS, with its own ZPAQL
     (pjalszpaql.inc, PJALS_ZPAQL) and query (ZpaqlJlsArgs).
   - zpaqstd_detect_v1: 1 if the codec named takes the file, looking only at
@@ -49,6 +50,9 @@ const
     zpaq-std without the query below sees no ZPAQL at all }
   ZS_DATA_ZPAQL_ARGS = 4;
   ZS_QUERY_ZPAQL_ARGS = 2;
+  { 1: the ZPAQL decodes several segments in one block (it starts afresh
+    after each), so zpaq-std may put consecutive files of the codec there }
+  ZS_QUERY_SEGMENTS = 3;
   ZPAQL_MAX_SCANS = 256;
   ZPAQL_LS_MAX_SCANS = 64;    { jls.zl's JMAXSCANS }
   ZS_CODEC_ABI  = 1;
@@ -159,10 +163,12 @@ end;
   whose decoding fits the decoder's memory. Only the bytes; deterministic;
   no shared state. }
 { query(ZS_QUERY_ZPAQL_ARGS): for compress()'s output, the $3 of the
-  decoder's config (log2 of its H for this very file), or negative }
+  decoder's config (log2 of its H for this very file), or negative.
+  query(ZS_QUERY_SEGMENTS): 1, several files a block. }
 function CodecQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
 begin
   Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
   if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
   try
     Result := ZpaqlArgs(Bytes(src, n));
@@ -174,6 +180,7 @@ end;
 function LsQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
 begin
   Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
   if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
   try
     Result := ZpaqlJlsArgs(Bytes(src, n));

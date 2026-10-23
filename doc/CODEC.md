@@ -646,3 +646,19 @@ files in one archive (`-sat:pja:pja+2:pjals+2`), every block given to
 ZPAQL decodes about 6 times slower than the plugin (16.7 s against 2.7 s
 for a photo of 1.4 MB).
 
+Several files in one block (23/10/2026). Every block carries its decoder,
+about 60 KB, which eats the whole gain of a small photo. zpaq-std can put
+consecutive files of one codec in one block, a segment each, so that the
+decoder is paid once: zpaq 7.15, zpaqfranz and zpaq-std extract such a
+block (zpaq-std checked it with the PCOMP in the first segment only).
+libzpaq keeps H, M and the registers from one segment to the next, so both
+decoders end each segment with zpaqlc's `reset(hp)`: the part of H they
+used and every register back to zero, the input counter among them, and
+the next segment starts as the first did. 530 bytes more of each program
+(62,294 and 55,989). The plugin says so with `query(ZS_QUERY_SEGMENTS)` =
+1; zpaq-std then sizes the block for its largest file. With libzpaq,
+blocks of 3 to 20 files of every kind (photos, arithmetic, generated
+variants, JPEG-LS files of every interleave and NEAR), large and small in
+any order: every file back byte for byte. The suite decodes two blocks of
+two files.
+
