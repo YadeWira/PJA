@@ -254,6 +254,23 @@ begin
   Result := True;
 end;
 
+{ A lossless JPEG's samples as a JPEG-LS file's, for its samples model
+  (pjamodel.CodeJlsBand): the same arrays, not a copy, so what the model
+  decodes is where pjajpeg.Recompose reads it. Their range is the point
+  transform's, the same in every scan. }
+procedure LosslessView(const j: TJpeg; out jl: TJls);
+var c: Integer;
+begin
+  jl := Default(TJls);
+  jl.width := j.width; jl.height := j.height;
+  jl.bits := j.precision - j.scans[0].al;
+  SetLength(jl.comp, Length(j.comp));
+  for c := 0 to High(j.comp) do begin
+    jl.comp[c].id := j.comp[c].id;
+    jl.comp[c].samples := j.comp[c].samples;
+  end;
+end;
+
 function Assemble(const head: TBytes; var jobs: array of TBandJob; threads: Integer; out stream: TBytes): Boolean;
 begin
   RunBands(jobs, threads);
@@ -295,7 +312,10 @@ begin
     Result.jpeg := ParseHeaders(raw, h.j);
     if not Result.jpeg.Ok then begin Result.err := ceBadStream; Exit; end;
     CodeScanBits(cd, h.j);
-    h.nb := BandCount(h.j);
+    if h.j.lossless then begin
+      LosslessView(h.j, h.jl);
+      h.nb := JlsBandCount(h.jl);
+    end else h.nb := BandCount(h.j);
   end;
 end;
 
@@ -437,15 +457,26 @@ begin
     CodeRaw(cd, j.raw, MaxInt);
     CodeScanBits(cd, j);
     head := cd.enc.Finish;
-    if verify and (threads >= 2) then begin
-      if not CompressLive(jpeg, j, head, threads, fast, stream) then Exit(CodecFail(ceNoRoundTrip));
-      Exit;
-    end;
-    nb := BandCount(j);
-    SetLength(jobs, nb);
-    for b := 0 to nb - 1 do begin
-      jobs[b] := Default(TBandJob);
-      jobs[b].j := @j; jobs[b].band := b; jobs[b].encoding := True; jobs[b].fast := fast;
+    if j.lossless then begin
+      { the samples of a lossless JPEG: JPEG-LS's samples model }
+      LosslessView(j, jl);
+      nb := JlsBandCount(jl);
+      SetLength(jobs, nb);
+      for b := 0 to nb - 1 do begin
+        jobs[b] := Default(TBandJob);
+        jobs[b].jl := @jl; jobs[b].band := b; jobs[b].encoding := True;
+      end;
+    end else begin
+      if verify and (threads >= 2) then begin
+        if not CompressLive(jpeg, j, head, threads, fast, stream) then Exit(CodecFail(ceNoRoundTrip));
+        Exit;
+      end;
+      nb := BandCount(j);
+      SetLength(jobs, nb);
+      for b := 0 to nb - 1 do begin
+        jobs[b] := Default(TBandJob);
+        jobs[b].j := @j; jobs[b].band := b; jobs[b].encoding := True; jobs[b].fast := fast;
+      end;
     end;
     if not Assemble(head, jobs, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
   end;
@@ -500,13 +531,13 @@ begin
   Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
   if not Result.Ok then Exit;
   { the fast model is for a JPEG's coefficients only }
-  if h.isLs and (stream[1] <> 0) then Exit(CodecFail(ceBadStream));
+  if (h.isLs or h.j.lossless) and (stream[1] <> 0) then Exit(CodecFail(ceBadStream));
   r := nil; SetLength(r, h.nb);
   if not BandRanges(stream, STREAM_HEADER + len, h.nb, r) then Exit(CodecFail(ceBadStream));
   jobs := nil; SetLength(jobs, h.nb);
   for b := 0 to h.nb - 1 do begin
     jobs[b] := Default(TBandJob);
-    if h.isLs then jobs[b].jl := @h.jl else jobs[b].j := @h.j;
+    if h.isLs or h.j.lossless then jobs[b].jl := @h.jl else jobs[b].j := @h.j;
     jobs[b].symbols := h.symbols; jobs[b].fast := stream[1] = 1;
     jobs[b].band := b; jobs[b].encoding := False; jobs[b].input := stream;
     jobs[b].first := r[b].first; jobs[b].last := r[b].last;

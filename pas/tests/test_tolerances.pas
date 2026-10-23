@@ -31,22 +31,32 @@ begin
   Result := Compress(d, st).Ok and Decompress(st, back).Ok and Same(back, d);
 end;
 
+{ The same coefficients, or for a lossless JPEG the same samples (its
+  coefficient arrays are empty) }
 function SameCoefficients(const a, b: TJpeg): Boolean;
 var c: Integer;
 begin
   Result := Length(a.comp) = Length(b.comp);
   if not Result then Exit;
-  for c := 0 to High(a.comp) do
+  for c := 0 to High(a.comp) do begin
     if (Length(a.comp[c].coef) <> Length(b.comp[c].coef)) or
+       (Length(a.comp[c].samples) <> Length(b.comp[c].samples)) then Exit(False);
+    if (Length(a.comp[c].coef) > 0) and
        not CompareMem(@a.comp[c].coef[0], @b.comp[c].coef[0], Length(a.comp[c].coef) * SizeOf(SmallInt)) then
       Exit(False);
+    if (Length(a.comp[c].samples) > 0) and
+       not CompareMem(@a.comp[c].samples[0], @b.comp[c].samples[0], Length(a.comp[c].samples) * SizeOf(Word)) then
+      Exit(False);
+  end;
 end;
 
 { How many RSTs the scan itself has: one between each two restart intervals. }
 function RstsInScan(const j: TJpeg; const s: TScan): Integer;
 var units: SizeInt;
 begin
-  if s.ncomp = 1 then units := j.comp[s.comp[0]].bwReal * j.comp[s.comp[0]].bhReal
+  { lossless JPEG: an MCU a sample position }
+  if j.lossless then units := SizeInt(j.width) * j.height
+  else if s.ncomp = 1 then units := j.comp[s.comp[0]].bwReal * j.comp[s.comp[0]].bhReal
   else units := SizeInt(j.mcusx) * j.mcusy;
   if s.ri = 0 then Result := 0 else Result := Integer((units - 1) div s.ri);
 end;

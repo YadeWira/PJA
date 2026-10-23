@@ -117,8 +117,8 @@ begin
     { version 5 only: the stream its ZPAQL reads }
     r := Compress(d, stream, False, 1, False, False);
     if not r.Ok then Exit(ZS_ERR_DATA);
-    { a 12-bit JPEG: PJA takes it, the frozen ZPAQL would not }
-    if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8)) then Exit(ZS_ERR_DATA);
+    { a 12-bit or a lossless JPEG: PJA takes it, the frozen ZPAQL would not }
+    if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless) then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
     Result := Length(stream);
@@ -200,10 +200,10 @@ begin
   try
     if StrComp(codecName, 'pja') = 0 then begin
       d := Bytes(src, n);
-      { 8-bit: the ZPAQL decoder is frozen as v0.0.1 left it, which had no
-        12-bit JPEG }
+      { 8-bit DCT: the ZPAQL decoder is frozen as v0.0.1 left it, which had
+        neither 12-bit nor lossless JPEG }
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         (j.precision = 8) and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+         (j.precision = 8) and not j.lossless and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);

@@ -34,6 +34,8 @@ const
   MAX_BLOCKS = 1 shl 22;
   { From the standard (B.2.3): the sum of H*V in an interleaved scan. }
   MAX_MCU_BLOCKS = 10;
+  { Lossless JPEG: cap on samples over all components, as for JPEG-LS }
+  MAX_LOSSLESS_SAMPLES = 1 shl 27;
 
   { ZIGZAG[k] = natural position (row*8+col) of the k-th coefficient in a scan. }
   ZIGZAG: array[0..63] of Byte = (
@@ -87,6 +89,9 @@ type
     bwReal, bhReal: SizeInt;
     { bw*bh*64, each block in zigzag order }
     coef: array of SmallInt;
+    { lossless JPEG: the samples instead, width*height, row by row (the
+      point transform's, as the scan codes them) }
+    samples: array of Word;
   end;
 
   TScan = record
@@ -108,7 +113,10 @@ type
 
   TJpeg = record
     width, height: Integer;
-    precision: Integer;              { bits per sample: 8, or 12 (SOF1, SOF2, SOF9, SOF10) }
+    precision: Integer;              { bits per sample: 8 or 12; lossless 2 to 16 }
+    { lossless JPEG (SOF3, Annex H): samples, not coefficients; each scan's
+      ss is its predictor and al its point transform, the same in all }
+    lossless: Boolean;
     progressive: Boolean;
     arithmetic: Boolean;
     comp: array of TComponent;
@@ -1673,7 +1681,10 @@ function ReadSof(const d: TBytes; p, last: SizeInt; var j: TJpeg): TJpegError;
 var nf, i, k: Integer; blocks: Int64;
 begin
   if last - p < 6 then Exit(jeBadSof);
-  if (d[p] <> 8) and (d[p] <> 12) then Exit(jeUnsupported);
+  if j.lossless then begin
+    if (d[p] < 2) or (d[p] > 16) then Exit(jeBadSof);
+  end else
+    if (d[p] <> 8) and (d[p] <> 12) then Exit(jeUnsupported);
   j.precision := d[p];
   j.height := U16(d, p + 1); j.width := U16(d, p + 3); nf := d[p + 5];
   if j.height = 0 then Exit(jeUnsupported);   { height in a DNL }
@@ -1688,6 +1699,17 @@ begin
       if h > j.hmax then j.hmax := h;
       if v > j.vmax then j.vmax := v;
     end;
+  if j.lossless then begin
+    { the samples of each component, none subsampled }
+    if (j.hmax <> 1) or (j.vmax <> 1) then Exit(jeUnsupported);
+    if Int64(j.width) * j.height * nf > MAX_LOSSLESS_SAMPLES then Exit(jeTooLarge);
+    for i := 0 to nf - 1 do
+      with j.comp[i] do begin
+        SetLength(samples, SizeInt(j.width) * j.height);
+        if Length(samples) > 0 then FillChar(samples[0], Length(samples) * SizeOf(Word), 0);
+      end;
+    Exit(jeNone);
+  end;
   j.mcusx := (j.width + 8 * j.hmax - 1) div (8 * j.hmax);
   j.mcusy := (j.height + 8 * j.vmax - 1) div (8 * j.vmax);
   blocks := 0;
@@ -1731,6 +1753,18 @@ begin
   if (s.ncomp > 1) and (sum > MAX_MCU_BLOCKS) then Exit(jeBadSos);
   q := p + 1 + 2 * s.ncomp;
   s.ss := d[q]; s.se := d[q + 1]; s.ah := d[q + 2] shr 4; s.al := d[q + 2] and 15;
+  if j.lossless then begin
+    { H.1.2: a predictor 1 to 7, Se and Ah zero, a point transform below the
+      precision; restarts at the start of a line, as libjpeg has them }
+    if (s.ss < 1) or (s.ss > 7) or (s.se <> 0) or (s.ah <> 0) or (s.al >= j.precision) then Exit(jeBadSos);
+    if (ri > 0) and (ri mod j.width <> 0) then Exit(jeUnsupported);
+    for i := 0 to s.ncomp - 1 do begin
+      if not hs.present[0, tds[i]] then Exit(jeMissingTable);
+      s.dc[i] := hs.t[0, tds[i]];
+    end;
+    s.ri := ri;
+    Exit(jeNone);
+  end;
   if not j.progressive then begin
     if (s.ss <> 0) or (s.se <> 63) or (s.ah <> 0) or (s.al <> 0) then Exit(jeBadSos);
   end else begin
@@ -1769,6 +1803,133 @@ begin
       if s.ac[0].len[k shl 4] > 0 then begin s.maxEob := (2 shl k) - 1; Break; end;
   s.ri := ri;
   Result := jeNone;
+end;
+
+{ ---------- lossless JPEG (Annex H) ---------- }
+
+{ H.1.2.1, as libjpeg computes it: Ra the sample to the left, Rb the one
+  above, Rc above and to the left; the shifts arithmetic }
+function LosslessPredict(psv, ra, rb, rc: Integer): Integer; inline;
+begin
+  case psv of
+    1: Result := ra;
+    2: Result := rb;
+    3: Result := rc;
+    4: Result := ra + rb - rc;
+    5: Result := ra + SarLongint(rb - rc, 1);
+    6: Result := rb + SarLongint(ra - rc, 1);
+  else Result := (ra + rb) shr 1;
+  end;
+end;
+
+{ The prediction of the sample at (x, y) of a component; y0 the first line
+  of its restart interval (the scan's first line without restarts) }
+function LosslessPrediction(const j: TJpeg; const s: TScan; const sm: array of Word; x, y, y0: SizeInt): Integer;
+var w: SizeInt;
+begin
+  w := j.width;
+  if y = y0 then begin
+    if x = 0 then Result := 1 shl (j.precision - s.al - 1)
+    else Result := sm[y * w + x - 1];
+  end else if x = 0 then Result := sm[(y - 1) * w]
+  else Result := LosslessPredict(s.ss, sm[y * w + x - 1], sm[(y - 1) * w + x], sm[(y - 1) * w + x - 1]);
+end;
+
+function DecodeScanLossless(const data: TBytes; first: SizeInt; var j: TJpeg; var s: TScan;
+                            out last: SizeInt): TJpegResult;
+var rd: TBitReader; x, y, y0, rows, w: SizeInt; i, c, t, v, pb, rst, diff, top: Integer; e: TJpegError;
+
+  function Padding: Boolean;
+  begin
+    if not rd.Align(pb) then Exit(False);
+    if pb >= 0 then begin
+      if s.padbit < 0 then s.padbit := pb
+      else if s.padbit <> pb then Exit(False);
+    end;
+    Result := True;
+  end;
+
+begin
+  last := first;
+  rd := Default(TBitReader);
+  rd.d := data; rd.p := first;
+  s.padbit := -1;
+  w := j.width;
+  rows := 0;
+  if s.ri > 0 then rows := s.ri div w;
+  { the samples a P - Pt bit range holds: anything above, no encoder writes }
+  top := (1 shl (j.precision - s.al)) - 1;
+  rst := 0; y0 := 0;
+  for y := 0 to j.height - 1 do begin
+    if (rows > 0) and (y > 0) and (y mod rows = 0) then begin
+      if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
+      if (rd.p + 1 >= Length(data)) or (data[rd.p] <> $FF) or (data[rd.p + 1] <> $D0 + (rst and 7)) then
+        Exit(Fail(jeBadRst, rd.p));
+      Inc(rd.p, 2); Inc(rst);
+      y0 := y;
+    end;
+    for x := 0 to w - 1 do
+      for i := 0 to s.ncomp - 1 do begin
+        e := DecodeSymbol(rd, s.dc[i], t);
+        if e <> jeNone then Exit(Fail(e, rd.p));
+        { a difference of 16 bits: 32768 itself, with no bits after it }
+        if t > 16 then Exit(Fail(jeBadCode, rd.p));
+        if t = 16 then diff := 32768
+        else begin
+          if not rd.Bits(t, v) then Exit(Fail(jeTruncated, rd.p));
+          diff := Extend(v, t);
+        end;
+        { no `with` here: TComponent has fields h and v }
+        c := s.comp[i];
+        v := (diff + LosslessPrediction(j, s, j.comp[c].samples, x, y, y0)) and $FFFF;
+        if v > top then Exit(Fail(jeCoefOutOfRange, rd.p));
+        j.comp[c].samples[y * w + x] := v;
+      end;
+  end;
+  if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
+  if s.padbit < 0 then s.padbit := 1;
+  if rd.p < Length(data) then
+    if (data[rd.p] <> $FF) or (rd.p + 1 >= Length(data)) or (data[rd.p + 1] = 0) then
+      Exit(Fail(jeDataAfterScan, rd.p));
+  last := rd.p;
+  Result := Success;
+end;
+
+function EncodeScanLossless(var wr: TBitWriter; const j: TJpeg; const s: TScan): Boolean;
+var x, y, y0, rows, w: SizeInt; i, c, d, mag, bits, nbits, rst: Integer;
+begin
+  w := j.width;
+  rows := 0;
+  if s.ri > 0 then rows := s.ri div w;
+  rst := 0; y0 := 0;
+  for y := 0 to j.height - 1 do begin
+    if (rows > 0) and (y > 0) and (y mod rows = 0) then begin
+      wr.Align(s.padbit);
+      wr.PutByte($FF); wr.PutByte($D0 + (rst and 7));
+      Inc(rst);
+      y0 := y;
+    end;
+    for x := 0 to w - 1 do
+      for i := 0 to s.ncomp - 1 do begin
+        c := s.comp[i];
+        d := (j.comp[c].samples[y * w + x] - LosslessPrediction(j, s, j.comp[c].samples, x, y, y0)) and $FFFF;
+        { jclhuff.c: the magnitude modulo 2^16, 32768 alone in category 16 }
+        if d and $8000 <> 0 then begin
+          mag := (-d) and $7FFF;
+          if mag = 0 then begin mag := $8000; bits := 0; end
+          else bits := not mag;
+        end else begin
+          mag := d and $7FFF;
+          bits := mag;
+        end;
+        nbits := 0;
+        while mag <> 0 do begin Inc(nbits); mag := mag shr 1; end;
+        if not EmitSymbol(wr, s.dc[i], nbits) then Exit(False);
+        if (nbits > 0) and (nbits < 16) then wr.Bits(bits and ((1 shl nbits) - 1), nbits);
+      end;
+  end;
+  wr.Align(s.padbit);
+  Result := True;
 end;
 
 { ---------- top ---------- }
@@ -1814,8 +1975,9 @@ begin
              if seglen <> 4 then Exit(Fail(jeBadDri, first));
              ri := U16(data, first);
            end;
-      $C0, $C1, $C2, $C9, $CA: begin
+      $C0, $C1, $C2, $C9, $CA, $C3: begin
              if haveFrame then Exit(Fail(jeRepeatedSof, p - 1));
+             j.lossless := m = $C3;
              e := ReadSof(data, first, last, j);
              if e <> jeNone then Exit(Fail(e, first, m));
              j.progressive := (m = $C2) or (m = $CA);
@@ -1823,17 +1985,22 @@ begin
              haveFrame := True;
            end;
       $CC: if not ReadDac(data, first, last, ac) then Exit(Fail(jeBadDac, first));
-      { JPEG-LS is $F7 }
-      $C3, $C5..$C7, $CB, $CD..$CF, $DC, $DE, $DF, $F7:
+      { JPEG-LS is $F7; $CB lossless with arithmetic coding }
+      $C5..$C7, $CB, $CD..$CF, $DC, $DE, $DF, $F7:
            Exit(Fail(jeUnsupported, p - 1, m));
       $DA: begin
              if not haveFrame then Exit(Fail(jeUnexpectedMarker, p - 1, m));
              e := ReadSos(data, first, last, j, hs, ac, ri, s);
              if e <> jeNone then Exit(Fail(e, first));
+             { lossless: one point transform for the whole image (the model
+               takes its samples in one range) }
+             if j.lossless and (Length(j.scans) > 0) and (s.al <> j.scans[0].al) then
+               Exit(Fail(jeUnsupported, first, m));
              CopyUpTo(last);
              s.cut := rawOut.n;
              if decode then begin
-               if j.arithmetic then Result := DecodeScanArith(data, last, j, s, copied)
+               if j.lossless then Result := DecodeScanLossless(data, last, j, s, copied)
+               else if j.arithmetic then Result := DecodeScanArith(data, last, j, s, copied)
                else Result := DecodeScan(data, last, j, s, copied);
                if not Result.Ok then Exit;
              end;
@@ -1873,7 +2040,7 @@ begin
   buffer grows past that as the output does }
   if expected > 0 then begin
     room := Length(j.raw);
-    for i := 0 to High(j.comp) do room := room + 2 * Length(j.comp[i].coef);
+    for i := 0 to High(j.comp) do room := room + 2 * Length(j.comp[i].coef) + 4 * Length(j.comp[i].samples);
     SetLength(wr.d, Min(expected, room) + 64);
   end else SetLength(wr.d, Length(j.raw) * 4 + 4096);
   from := 0;
@@ -1881,7 +2048,9 @@ begin
     wr.CopyFrom(j.raw, from, j.scans[i].cut);
     from := j.scans[i].cut;
     wr.acc := 0; wr.nacc := 0;
-    if j.arithmetic then begin
+    if j.lossless then begin
+      if not EncodeScanLossless(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
+    end else if j.arithmetic then begin
       if not EncodeScanArith(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
     end else
       if not EncodeScan(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));

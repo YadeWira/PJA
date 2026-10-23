@@ -18,7 +18,7 @@ over a large corpus, is the oracle for the whole project.
 
 | layer | unit | what it does | status |
 |---|---|---|---|
-| 1 | `pjajpeg` | JPEG ↔ DCT coefficients + what is needed to rebuild the exact bits | done: 8 and 12 bits, Huffman and arithmetic, sequential and progressive |
+| 1 | `pjajpeg` | JPEG ↔ DCT coefficients + what is needed to rebuild the exact bits | done: 8 and 12 bits, Huffman and arithmetic, sequential and progressive; lossless JPEG ↔ samples |
 | 1 | `pjajls` | JPEG-LS ↔ samples, the same way | done: 2-16 bits, NEAR, every interleave mode |
 | 2 | `pjaarith` | binary arithmetic coder and adaptive bit counters | done |
 | 3 | `pjamodel` | context modelling of the coefficients, the JPEG-LS samples or symbols, and the raw bytes | first version |
@@ -739,4 +739,40 @@ on Linux.
 The zpaq-std plugin keeps to 8 bits: its ZPAQL is frozen as v0.0.1 left
 it, with the 8-bit categories, so detect, compress and the query refuse
 a 12-bit JPEG.
+
+## Lossless JPEG (23/10/2026)
+
+Lossless JPEG (SOF3, T.81 Annex H) codes samples, not coefficients: each
+one predicted from its neighbours by one of seven predictors, and the
+difference, modulo 2^16, Huffman-coded by its bit length as a DC
+difference is (up to 16, where 16 is 32768 alone with no bits after it).
+It lives on in medical imaging (DICOM) and in some raw formats; libjpeg
+-turbo 3 writes it again. pjajpeg decodes a scan to the samples and writes
+it back bit for bit, as libjpeg-turbo does (jdlossls.c, jclhuff.c): the
+first line of a scan or of a restart interval predicted from 2^(P-Pt-1)
+and then from the left, every other line's first sample from above, the
+shifts of predictors 5 and 6 arithmetic. The padding bits and the
+restarts are a DCT scan's.
+
+The samples go to JPEG-LS's samples model (pjamodel.CodeJlsBand, its
+bands and threads): pjacodec gives it a TJls whose sample arrays are the
+TJpeg's own, so what it decodes is where Recompose reads. The stream is
+version 5's: the raw bytes say it is a lossless JPEG, as they say a file
+is JPEG-LS. What the model needs: no component subsampled, and one point
+transform for the whole image (one range of samples); a restart interval
+of whole lines, which libjpeg demands too. A sample beyond the point
+transform's range, which no encoder writes, is refused. SOF11 (lossless
+with arithmetic coding) is refused.
+
+36 samples from libjpeg-turbo 3.0.4 (every predictor at 8, 12 and 16
+bits, gray and colour, point transforms, restarts, RGB): all back, the
+checked build and the fast one with the same streams. The 30 photos,
+decoded and written as lossless JPEG: 86.0 MB with predictor 1 to 53.5 MB
+(62.2%), 81.9 MB with predictor 6 to the same 53.5 MB (65.3%): the model
+sees the samples, whichever predictor coded them. As JPEG-LS (CharLS) the
+same images are 61.6 MB, and PJA makes them 50.6 MB, its symbols model
+taking a little more where the JPEG-LS file is the input.
+
+The zpaq-std plugin refuses lossless JPEG: its ZPAQL is frozen as v0.0.1
+left it.
 
