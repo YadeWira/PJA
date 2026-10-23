@@ -438,21 +438,51 @@ begin
   end;
 end;
 
+{ With verify: the stream decompressed and compared with the input; a
+  difference is a bug, and nothing is handed out }
+function VerifyStream(const jpeg: TBytes; var stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
+var r: TCodecResult; back: TBytes;
+begin
+  Result := CodecFail(ceOk);
+  if not verify then Exit;
+  r := Decompress(stream, back, 1 shl 28, threads);
+  if not r.Ok or (Length(back) <> Length(jpeg)) or
+     ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then begin
+    stream := nil;
+    Result := CodecFail(ceNoRoundTrip);
+  end;
+end;
+
+{ A JPEG (j: what VerifyRoundTrip made of it) -> its version 5 stream }
+function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
+                      fast: Boolean): TCodecResult; forward;
+
 function CompressOne(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                      fast: Boolean): TCodecResult;
-var j: TJpeg; jl: TJls; cd: TCoder; head, back: TBytes; r: TCodecResult; jobs: array of TBandJob;
-    nb, b: Integer;
+var j: TJpeg; jl: TJls;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
-  jobs := nil;
   if IsJls(jpeg) then begin
     Result.jpeg := VerifyJls(jpeg, jl);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
     if not AssembleJls(jl, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
+    Result := VerifyStream(jpeg, stream, verify, threads);
   end else begin
     Result.jpeg := VerifyRoundTrip(jpeg, j);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
+    Result := CompressJpeg(jpeg, j, stream, verify, threads, fast);
+  end;
+end;
+
+function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
+                      fast: Boolean): TCodecResult;
+var jl: TJls; cd: TCoder; head: TBytes; jobs: array of TBandJob; nb, b: Integer;
+begin
+  stream := nil;
+  Result := CodecFail(ceOk);
+  jobs := nil;
+  begin
     cd.InitEncoder;
     CodeRaw(cd, j.raw, MaxInt);
     CodeScanBits(cd, j);
@@ -480,14 +510,7 @@ begin
     end;
     if not Assemble(head, jobs, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
   end;
-  if verify then begin
-    r := Decompress(stream, back, 1 shl 28, threads);
-    if not r.Ok or (Length(back) <> Length(jpeg)) or
-       ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then begin
-      stream := nil;
-      Exit(CodecFail(ceNoRoundTrip));
-    end;
-  end;
+  Result := VerifyStream(jpeg, stream, verify, threads);
 end;
 
 function StreamHeaders(const stream: TBytes; out j: TJpeg; maxRaw: SizeInt): TCodecResult;
@@ -608,9 +631,13 @@ var j, sj: TJpeg; parts: array of TPart; k, len, p, from: SizeInt; n, i, c: Inte
     ok: Boolean; whole: Int64;
 begin
   stream := nil;
-  if (depth >= MAX_PART_DEPTH) or IsJls(jpeg) or (Length(jpeg) >= High(Cardinal)) or
-     not Decompose(jpeg, j).Ok then
+  if (depth >= MAX_PART_DEPTH) or IsJls(jpeg) or (Length(jpeg) >= High(Cardinal)) then
     Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  { the file as PJA takes it today, decoded once: it gives the parts' places
+    and, with none, the stream itself }
+  Result := CodecFail(ceOk);
+  Result.jpeg := VerifyRoundTrip(jpeg, j);
+  if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
   { every FF D8 FF that starts a JPEG PJA takes; none can be inside
     entropy-coded data, where FF is followed by 00 or a restart marker }
   parts := nil; n := 0;
@@ -646,7 +673,7 @@ begin
     end;
     if not ok then Inc(k);
   end;
-  if n = 0 then Exit(CompressOne(jpeg, stream, verify, threads, fast));
+  if n = 0 then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
   { the host }
   host := nil; SetLength(host, Length(jpeg));
   p := 0; from := 0;
@@ -673,10 +700,7 @@ begin
   for i := 0 to n - 1 do Inc(whole, parts[i].len);
   if (whole * 4 < Length(jpeg)) or (Length(jpeg) < 1 shl 20) then begin
     whole := Int64(Length(hs)) - GetU32(hs, 2) + HeadLength(j);
-    if len >= whole then begin
-      j := Default(TJpeg);
-      Exit(CompressOne(jpeg, stream, verify, threads, fast));
-    end;
+    if len >= whole then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
   end;
   j := Default(TJpeg);
   SetLength(stream, len);

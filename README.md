@@ -13,27 +13,36 @@ output's name unless it verified: compressing decompresses the result and
 compares it with the input before writing, and extracting checks the size
 and the BLAKE3 hash stored in the `.pja`.
 
-Measured on 19/10/2026 (`doc/CODEC.md`):
+Against packJPG 5.0g, measured on 23/10/2026, the files both take (each
+verifying its output):
 
-| | files | PJA saves | packJPG 5.0f saves |
+| | files | packJPG takes | PJA takes | packJPG | PJA | |
+|---|---|---|---|---|---|---|
+| photos (Huffman JPEG) | 151 | 151 | 151 | 76.62% | **74.96%** | -2.16% |
+| corpus of JPEGs of every kind | 78 | 65 | 75 | 76.83% | **71.76%** | -6.59% |
+| MPO (stereo pairs) | 6 | 6 | 6 | 86.54% | **74.13%** | -14.34% |
+| arithmetic-coded JPEG | 244 | 244 | 244 | 78.52% | **76.50%** | -2.58% |
+| generated JPEGs | 640 | 640 | 640 | 77.48% | **75.61%** | -2.42% |
+| 12-bit JPEG | 10 | 0 | 10 | — | | |
+| lossless JPEG | 36 | 0 | 36 | — | | |
+| JPEG-LS photos (19/10) | 16 | — | 16 | — | 84.4% | |
+
+And how fast, on the 151 photos with one thread and without verifying
+(packJPG's default), back to back on a machine with other work running:
+
+| | packJPG 5.0g | PJA `--fast` | PJA (full model) |
 |---|---|---|---|
-| photos (Huffman JPEG) | 151 | **24.97%** | 23.38% |
-| arithmetic-coded JPEG | 244 | **23.66%** | 21.48% |
-| JPEG-LS photos | 16 | **15.6%** | — (it rebuilds 2 of 9 real JPEG-LS test files; PJA 8) |
+| compressed | 60,084,653 | **59,776,460** (-0.51%) | **58,788,017** (-2.16%) |
+| compress | **38.3 s** | 42.5 s | 71.4 s |
+| decompress | 39.6 s | **36.4 s** (-8%) | 64.6 s |
 
-And how fast, on the 151 photos with one thread, measured on 22/10/2026
-against packJPG's default (which does not verify either, so PJA with
-`--no-verify`):
-
-| | packJPG 5.0f | PJA `--fast` | PJA (full model) |
-|---|---|---|---|
-| compressed | 60,084,653 | **59,827,219** (-0.43%) | **58,848,193** (-2.06%) |
-| compress | 38.7 s | **34.6 s** (-9%) | 58.5 s |
-| decompress | 34.1 s | **31.7 s** (-10%) | 57.7 s |
-
-`--fast` is smaller and faster than packJPG both ways; the full model is 2%
-smaller still, at 1.7 times the time. With several threads the full model
-splits each photo into bands.
+`--fast` is smaller than packJPG and decompresses faster; it compresses
+about 10% slower since the predictions went to 32 bits (stream version 5,
+for the ZPAQL decoder) and since it looks for JPEGs inside each JPEG. The
+full model is 2% smaller still, at 1.8 times the time. PJA uses the
+processors packJPG does not: with 8 threads, `--fast` compresses the 151
+photos verifying in 10.0 s and decompresses them in 4.7 s, the full model
+in 17.9 s and 8.2 s.
 
 What it handles: baseline, extended and progressive JPEG with Huffman or
 arithmetic coding, 8 and 12 bits, any subsampling, restart markers, and the
