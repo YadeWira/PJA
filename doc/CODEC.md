@@ -609,3 +609,15 @@ plain zpaq 7.15 gave back all 151 photos and all 78 files of the corpus.
 Windows 10, 64 and 32 bits, with progressive files among them: every block
 ZPAQL OK, every file back without the plugin.
 
+Stage 3: arithmetic-coded JPEG. The decoder reads SOF9 and SOF10 and the
+DAC conditioning in force at each scan, and rebuilds the scans with
+pjajpeg's QM encoder (libjpeg's jcarith.c, bit for bit, its flush
+included), its statistics reset at each restart. The QM coder fits in 32
+bits (its C register stays below 2^28). 61,764 bytes of ZPAQL, close to the
+65,535 a program may take: JPEG-LS, with a model of its own, will be a
+second codec in the same plugin, with a ZPAQL decoder of its own. On
+zpaq-std's test build: of 244 arithmetic JPEGs (sequential, progressive,
+restarts, 4:2:0, 4:2:2, 4:4:4, gray, CMYK) and 640 generated ones of every
+kind, every block given to the plugin was decoded by the ZPAQL as by the
+plugin, 0 wrong; plain zpaq 7.15 gave back all 244 and all 652 files.
+

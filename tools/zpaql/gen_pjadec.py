@@ -73,6 +73,9 @@ def make_consts():
         a = src.index(start) + len(start)
         return [int(x) for x in re.findall(r'-?\d+', src[a:src.index(');', a)])]
 
+    qa = jpeg.index('QE_TABLE: array[0..113] of LongInt = (')
+    qe = [int(x, 16) for x in re.findall(r'\$([0-9a-fA-F]+)', jpeg[qa:jpeg.index(');', qa)])]
+    assert len(qe) == 114
     basis = int_list(model, 'BASIS: array[0..7, 0..7] of Integer = (')
     kbucket = int_list(model, 'K_BUCKET_OF: array[0..63] of Byte = (')
     zigzag = int_list(jpeg, 'ZIGZAG: array[0..63] of Byte = (')
@@ -115,6 +118,7 @@ def make_consts():
     out.append(tab('nzbucket', [nzb(n) for n in range(64)]) + tab('rembucket', [remb(n) for n in range(64)]))
     out.append(tab('split16', [a * 16 + b for a, b in pairs('Split16')]))
     out.append(tab('split8', [a * 16 + b for a, b in pairs('Split8')]))
+    out.append(tab('qetable', qe))
     out.append('SQPACK_WORDS = %d\n' % len(sqpack))
     out.append(tab('sqpack', sqpack))
     out.append('\ndef newmodel():\n    m = alloc(MODEL_WORDS)\n')

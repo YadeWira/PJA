@@ -255,6 +255,17 @@ SSE = array(MAXSCANS)
 SAH = array(MAXSCANS)    # successive approximation high, low
 SAL = array(MAXSCANS)
 SMAXEOB = array(MAXSCANS)    # the longest EOB run the scan's AC table can code
+# arithmetic coding: each scan component's statistics tables (Td, Ta) and
+# the conditioning in force when the scan starts (DAC: DC bounds L and U,
+# AC threshold Kx), and the conditioning itself, per table index
+STD = array(4 * MAXSCANS)
+STA = array(4 * MAXSCANS)
+SDCL = array(4 * MAXSCANS)
+SDCU = array(4 * MAXSCANS)
+SACK = array(4 * MAXSCANS)
+ACL = array(4)
+ACU = array(4)
+ACK = array(4)
 width = 0
 height = 0
 ncomp = 0
@@ -265,6 +276,7 @@ mcusy = 0
 nscans = 0
 ri = 0
 progressive = 0
+arithmetic = 0
 
 def cget(coef, i):
     """coefficient i of a component: 16 bits, two to a word, signed"""
@@ -370,6 +382,13 @@ def readsos(p, last):
         SCOMP[4 * s + i] = c
         SDC[4 * s + i] = HT[rb(p + 2 + 2 * i) >> 4]
         SAC[4 * s + i] = HT[4 + (rb(p + 2 + 2 * i) & 15)]
+        td = rb(p + 2 + 2 * i) >> 4
+        ta = rb(p + 2 + 2 * i) & 15
+        STD[4 * s + i] = td
+        STA[4 * s + i] = ta
+        SDCL[4 * s + i] = ACL[td]
+        SDCU[4 * s + i] = ACU[td]
+        SACK[4 * s + i] = ACK[ta]
     q = p + 1 + 2 * n
     SSS[s] = rb(q)
     SSE[s] = rb(q + 1)
@@ -377,7 +396,7 @@ def readsos(p, last):
     SAL[s] = rb(q + 2) & 15
     # pjajpeg.ReadSos: an encoder runs EOBs only as far as its table allows
     SMAXEOB[s] = 1
-    if progressive and SSE[s] > 0:
+    if progressive and arithmetic == 0 and SSE[s] > 0:
         t = SAC[4 * s]
         k = 15
         while k > 0:
@@ -389,8 +408,26 @@ def readsos(p, last):
     SCUT[s] = last
     nscans = s + 1
 
+def readdac(p, last):
+    while p < last:
+        tc = rb(p) >> 4
+        tb = rb(p) & 15
+        cs = rb(p + 1)
+        p += 2
+        if tc > 1 or tb > 3:
+            error()
+        if tc == 0:
+            ACL[tb] = cs & 15
+            ACU[tb] = cs >> 4
+        else:
+            ACK[tb] = cs
+
 def parseheaders():
-    global ri, progressive
+    global ri, progressive, arithmetic
+    for i in range(4):
+        ACL[i] = 0          # T.81 F.1.4.4.1.4: the defaults
+        ACU[i] = 1
+        ACK[i] = 5
     if rawlen < 4 or rb(0) != 255 or rb(1) != 216:
         error()
     p = 2
@@ -423,7 +460,16 @@ def parseheaders():
         elif m == 194:
             readsof(first)
             progressive = 1
-        elif m == 201 or m == 202 or m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
+        elif m == 201:
+            readsof(first)
+            arithmetic = 1
+        elif m == 202:
+            readsof(first)
+            arithmetic = 1
+            progressive = 1
+        elif m == 204:
+            readdac(first, last)
+        elif m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
             error()
         elif m == 218:
             readsos(first, last)

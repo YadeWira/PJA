@@ -1,4 +1,4 @@
-"""The JPEG again (pjajpeg.Recompose for Huffman scans, sequential and progressive), and main."""
+"""The JPEG again (pjajpeg.Recompose: Huffman and arithmetic scans, sequential and progressive), and main."""
 
 # ---------------------------------------------------------------- the JPEG again
 
@@ -211,6 +211,333 @@ def unitblock(coef, base, si, i):
     else:
         acrefine(coef, base, si)
 
+# ---------------------------------------------------------------- arithmetic coding
+# pjajpeg's QM encoder (libjpeg's jcarith.c, bit for bit): its statistics
+# are one byte per bin, the state in the low 7 bits, the MPS in bit 7
+
+QDC = array(256)         # [4][64] bins of the DC tables
+QAC = array(1024)        # [4][256] bins of the AC tables
+QFIXED = array(1)        # the bin of probability 1/2
+DCCTX = array(4)
+LASTDC = array(4)
+NONE = 4294967295        # "no byte buffered yet" (buffer = -1)
+qc = 0
+qa = 0
+qct = 0
+qbuf = 0
+qsc = 0
+qzc = 0
+
+def qinit():
+    global qc, qa, qct, qbuf, qsc, qzc
+    qc = 0
+    qa = 65536
+    qct = 11
+    qbuf = NONE
+    qsc = 0
+    qzc = 0
+
+def qzeros():
+    global qzc
+    while qzc > 0:
+        putbyte(0)
+        qzc -= 1
+
+def qcarry():
+    """the buffered byte with a carry into it, the bytes held so far after it"""
+    global qzc, qsc
+    if qbuf != NONE:
+        qzeros()
+        putbyte(qbuf + 1)
+        if qbuf + 1 == 255:
+            putbyte(0)
+    qzc = qzc + qsc
+    qsc = 0
+
+def qnocarry():
+    global qzc, qsc
+    if qbuf == 0:
+        qzc += 1
+    elif qbuf != NONE:
+        qzeros()
+        putbyte(qbuf)
+    if qsc > 0:
+        qzeros()
+        while qsc > 0:
+            putbyte(255)
+            putbyte(0)
+            qsc -= 1
+
+def qencode(st, val):
+    """val with the bin at H[st]"""
+    global qc, qa, qct, qbuf, qsc
+    sv = H[st]
+    q = qetable[sv & 127]
+    nl = q & 255
+    nm = (q >> 8) & 255
+    q = q >> 16
+    qa = qa - q
+    if val != (sv >> 7):
+        if qa >= q:
+            qc = qc + qa
+            qa = q
+        H[st] = (sv & 128) ^ nl
+    else:
+        if qa >= 32768:
+            return
+        if qa < q:
+            qc = qc + qa
+            qa = q
+        H[st] = (sv & 128) ^ nm
+    while True:
+        qa = qa << 1
+        qc = qc << 1
+        qct -= 1
+        if qct == 0:
+            temp = qc >> 19
+            if temp > 255:
+                qcarry()
+                qbuf = temp & 255
+            elif temp == 255:
+                qsc += 1
+            else:
+                qnocarry()
+                qbuf = temp & 255
+            qc = qc & 524287
+            qct += 8
+        if qa >= 32768:
+            break
+
+def qfinish():
+    """jcarith.c finish_pass"""
+    global qc
+    temp = (qa - 1 + qc) & 4294901760
+    if temp < qc:
+        qc = temp + 32768
+    else:
+        qc = temp
+    qc = qc << qct
+    if qc & 4160749568:
+        qcarry()
+    else:
+        qnocarry()
+    if qc & 134215680:
+        qzeros()
+        putbyte((qc >> 19) & 255)
+        if ((qc >> 19) & 255) == 255:
+            putbyte(0)
+        if qc & 522240:
+            putbyte((qc >> 11) & 255)
+            if ((qc >> 11) & 255) == 255:
+                putbyte(0)
+
+def qreset(si):
+    """pjajpeg.ResetStats"""
+    for i in range(SNC[si]):
+        if progressive == 0 or (SSS[si] == 0 and SAH[si] == 0):
+            t = STD[4 * si + i]
+            for k in range(64):
+                QDC[t * 64 + k] = 0
+            LASTDC[i] = 0
+            DCCTX[i] = 0
+        if progressive == 0 or SSE[si] > 0:
+            t = STA[4 * si + i]
+            for k in range(256):
+                QAC[t * 256 + k] = 0
+    QFIXED[0] = 113
+
+def arithdc(si, i, v):
+    """pjajpeg.ArithEncodeDcDiff"""
+    dc = base(QDC) + STD[4 * si + i] * 64
+    x = DCCTX[i]
+    if v == 0:
+        qencode(dc + x, 0)
+        DCCTX[i] = 0
+        return
+    qencode(dc + x, 1)
+    if sgt(v, 0):
+        qencode(dc + x + 1, 0)
+        x = x + 2
+        DCCTX[i] = 4
+    else:
+        v = -v
+        qencode(dc + x + 1, 1)
+        x = x + 3
+        DCCTX[i] = 8
+    m = 0
+    v = v - 1
+    if v != 0:
+        qencode(dc + x, 1)
+        m = 1
+        v2 = v
+        x = 20
+        v2 = v2 >> 1
+        while v2 != 0:
+            qencode(dc + x, 1)
+            m = m << 1
+            x += 1
+            v2 = v2 >> 1
+    qencode(dc + x, 0)
+    if m < ((1 << SDCL[4 * si + i]) >> 1):
+        DCCTX[i] = 0
+    elif m > ((1 << SDCU[4 * si + i]) >> 1):
+        DCCTX[i] = DCCTX[i] + 8
+    x = x + 14
+    m = m >> 1
+    while m != 0:
+        if m & v:
+            qencode(dc + x, 1)
+        else:
+            qencode(dc + x, 0)
+        m = m >> 1
+
+def arithacmag(ac, k, kx, x, v):
+    """pjajpeg.ArithEncodeAcMag"""
+    m = 0
+    v = v - 1
+    if v != 0:
+        qencode(ac + x, 1)
+        m = 1
+        v2 = v >> 1
+        if v2 != 0:
+            qencode(ac + x, 1)
+            m = m << 1
+            if k <= kx:
+                x = 189
+            else:
+                x = 217
+            v2 = v2 >> 1
+            while v2 != 0:
+                qencode(ac + x, 1)
+                m = m << 1
+                x += 1
+                v2 = v2 >> 1
+    qencode(ac + x, 0)
+    x = x + 14
+    m = m >> 1
+    while m != 0:
+        if m & v:
+            qencode(ac + x, 1)
+        else:
+            qencode(ac + x, 0)
+        m = m >> 1
+
+def sabs(v, al):
+    """pjajpeg.ShiftedAbs, the sign aside"""
+    return iabs(v) >> al
+
+def arithblock(coef, base, si, i):
+    """pjajpeg.ArithEncodeBlock"""
+    fixed = base(QFIXED)
+    if progressive == 0 or (SSS[si] == 0 and SAH[si] == 0):
+        v = sar(cget(coef, base), SAL[si])
+        arithdc(si, i, v - LASTDC[i])
+        LASTDC[i] = v
+        if progressive:
+            return
+    elif SSS[si] == 0:
+        qencode(fixed, sar(cget(coef, base), SAL[si]) & 1)
+        return
+    if progressive:
+        ss = SSS[si]
+        se = SSE[si]
+        al = SAL[si]
+    else:
+        ss = 1
+        se = 63
+        al = 0
+    ac = base(QAC) + STA[4 * si + i] * 256
+    ke = se
+    while ke > 0 and sabs(cget(coef, base + ke), al) == 0:
+        ke -= 1
+    if progressive == 0 or SAH[si] == 0:
+        k = ss
+        while k <= ke:
+            x = 3 * (k - 1)
+            qencode(ac + x, 0)
+            while True:
+                cv = cget(coef, base + k)
+                v = sabs(cv, al)
+                if v != 0:
+                    qencode(ac + x + 1, 1)
+                    if slt(cv, 0):
+                        qencode(fixed, 1)
+                    else:
+                        qencode(fixed, 0)
+                    break
+                qencode(ac + x + 1, 0)
+                x = x + 3
+                k += 1
+            arithacmag(ac, k, SACK[4 * si + i], x + 2, v)
+            k += 1
+    else:
+        kex = ke
+        while kex > 0 and sabs(cget(coef, base + kex), SAH[si]) == 0:
+            kex -= 1
+        k = ss
+        while k <= ke:
+            x = 3 * (k - 1)
+            if k > kex:
+                qencode(ac + x, 0)
+            while True:
+                cv = cget(coef, base + k)
+                v = sabs(cv, al)
+                if v != 0:
+                    if (v >> 1) != 0:
+                        qencode(ac + x + 2, v & 1)
+                    else:
+                        qencode(ac + x + 1, 1)
+                        if slt(cv, 0):
+                            qencode(fixed, 1)
+                        else:
+                            qencode(fixed, 0)
+                    break
+                qencode(ac + x + 1, 0)
+                x = x + 3
+                k += 1
+            k += 1
+    if k <= se:
+        qencode(ac + 3 * (k - 1), 1)     # EOB
+
+def encodescanarith(si):
+    """pjajpeg.EncodeScanArith: no padding, each restart interval flushed"""
+    n = SNC[si]
+    if n == 1:
+        c = SCOMP[4 * si]
+        w = CBWR[c]
+        total = w * CBHR[c]
+    else:
+        w = mcusx
+        total = mcusx * mcusy
+    ri = SRI[si]
+    rst = 0
+    ux = 0
+    uy = 0
+    qinit()
+    qreset(si)
+    for u in range(total):
+        if ri > 0 and u > 0 and u % ri == 0:
+            qfinish()
+            putbyte(255)
+            putbyte(208 + (rst & 7))
+            rst += 1
+            qinit()
+            qreset(si)
+        if n == 1:
+            c = SCOMP[4 * si]
+            arithblock(CCOEF[c], (uy * CBW[c] + ux) * 64, si, 0)
+        else:
+            for i in range(n):
+                c = SCOMP[4 * si + i]
+                for y in range(CV[c]):
+                    for x in range(CH[c]):
+                        arithblock(CCOEF[c], ((uy * CV[c] + y) * CBW[c] + ux * CH[c] + x) * 64, si, i)
+        ux += 1
+        if ux == w:
+            ux = 0
+            uy += 1
+    qfinish()
+
 def encodescan(si):
     global bacc, bn, eobrun, be
     bacc = 0
@@ -262,7 +589,10 @@ def recompose():
         while p < SCUT[si]:
             putbyte(H[rawbase + p])
             p += 1
-        encodescan(si)
+        if arithmetic:
+            encodescanarith(si)
+        else:
+            encodescan(si)
     while p < rawlen:
         putbyte(H[rawbase + p])
         p += 1
