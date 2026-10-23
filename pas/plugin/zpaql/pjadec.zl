@@ -250,6 +250,11 @@ SAC = array(4 * MAXSCANS)
 SRI = array(MAXSCANS)
 SPAD = array(MAXSCANS)
 SCUT = array(MAXSCANS)
+SSS = array(MAXSCANS)    # progressive: spectral selection start, end
+SSE = array(MAXSCANS)
+SAH = array(MAXSCANS)    # successive approximation high, low
+SAL = array(MAXSCANS)
+SMAXEOB = array(MAXSCANS)    # the longest EOB run the scan's AC table can code
 width = 0
 height = 0
 ncomp = 0
@@ -259,6 +264,7 @@ mcusx = 0
 mcusy = 0
 nscans = 0
 ri = 0
+progressive = 0
 
 def cget(coef, i):
     """coefficient i of a component: 16 bits, two to a word, signed"""
@@ -364,12 +370,27 @@ def readsos(p, last):
         SCOMP[4 * s + i] = c
         SDC[4 * s + i] = HT[rb(p + 2 + 2 * i) >> 4]
         SAC[4 * s + i] = HT[4 + (rb(p + 2 + 2 * i) & 15)]
+    q = p + 1 + 2 * n
+    SSS[s] = rb(q)
+    SSE[s] = rb(q + 1)
+    SAH[s] = rb(q + 2) >> 4
+    SAL[s] = rb(q + 2) & 15
+    # pjajpeg.ReadSos: an encoder runs EOBs only as far as its table allows
+    SMAXEOB[s] = 1
+    if progressive and SSE[s] > 0:
+        t = SAC[4 * s]
+        k = 15
+        while k > 0:
+            k -= 1
+            if H[t + 256 + (k << 4)] > 0:
+                SMAXEOB[s] = (2 << k) - 1
+                break
     SRI[s] = ri
     SCUT[s] = last
     nscans = s + 1
 
 def parseheaders():
-    global ri
+    global ri, progressive
     if rawlen < 4 or rb(0) != 255 or rb(1) != 216:
         error()
     p = 2
@@ -399,7 +420,10 @@ def parseheaders():
             ri = u16(first)
         elif m == 192 or m == 193:
             readsof(first)
-        elif m == 194 or m == 201 or m == 202 or m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
+        elif m == 194:
+            readsof(first)
+            progressive = 1
+        elif m == 201 or m == 202 or m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
             error()
         elif m == 218:
             readsos(first, last)

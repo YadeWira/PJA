@@ -597,3 +597,15 @@ zpaq 7.15, which knows nothing of plugins, gave back all 78 files of the
 corpus; on Windows 10, 64 and 32 bits, every block and every file. The suite runs the decoder on two samples in a Python
 interpreter of ZPAQL, and checks that the generated program is current.
 
+Stage 2, the same day: progressive Huffman JPEG. The model was already the
+same (PJA codes the final coefficients whatever the scans); what the
+decoder adds is the progressive rebuild of pjajpeg, ported the same way:
+DC first scans, DC refinement bits, AC first scans with their EOB runs,
+AC refinement with its correction bits held until the next run, each
+scan's longest EOB run from its table, the runs flushed at every restart.
+46,307 bytes of ZPAQL. On zpaq-std's test build: all 151 photos taken (17
+of them progressive) and 64 files of the corpus, every block ZPAQL OK;
+plain zpaq 7.15 gave back all 151 photos and all 78 files of the corpus.
+Windows 10, 64 and 32 bits, with progressive files among them: every block
+ZPAQL OK, every file back without the plugin.
+

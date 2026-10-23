@@ -19,9 +19,9 @@
     not ask sees none. data(ZS_DATA_INFO) is the card zpaq-std shows in
     codecinfoex.
   - zpaqstd_detect_v1: 1 if PJA takes the file, looking only at its bytes:
-    only what the ZPAQL decoder covers, stage 1: a sequential Huffman JPEG
-    that PJA's layer 1 rebuilds byte for byte and that fits the decoder's
-    memory. Progressive and arithmetic JPEG and JPEG-LS come with later
+    only what the ZPAQL decoder covers, stage 2: a Huffman JPEG, sequential
+    or progressive, that PJA's layer 1 rebuilds byte for byte and that fits
+    the decoder's memory. Arithmetic JPEG and JPEG-LS come with later
     stages. No global state, so several threads can ask at once.
 
   Levels: 2 = the full model, the stream frozen as pja5-full (stream version
@@ -130,8 +130,9 @@ begin
   end;
 end;
 
-{ 1 if PJA takes the file: what its ZPAQL decoder covers (stage 1), so that
-  no block is left without one: a JPEG, sequential with Huffman coding, that
+{ 1 if PJA takes the file: what its ZPAQL decoder covers (stage 2), so that
+  no block is left without one: a JPEG with Huffman coding, sequential or
+  progressive, that
   layer 1 rebuilds byte for byte, with at most ZPAQL_MAX_SCANS scans and
   whose decoding fits the decoder's memory. Only the bytes; deterministic;
   no shared state. }
@@ -155,7 +156,7 @@ begin
   if (codecName = nil) or (StrComp(codecName, 'pja') <> 0) or (n < 4) or (n > MAX_BLOCK) then Exit;
   try
     d := Bytes(src, n);
-    if (d[0] = $FF) and (d[1] = $D8) and VerifyRoundTrip(d, j).Ok and not j.progressive and
+    if (d[0] = $FF) and (d[1] = $D8) and VerifyRoundTrip(d, j).Ok and
        not j.arithmetic and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
        (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
   except
@@ -175,7 +176,7 @@ const
     'license=MIT'#10 +
     'commit=' + {$I %PJA_COMMIT%} + #10 +
     'format=PJA codec stream v5, model byte 0 (the full model); JPEG and JPEG-LS'#10 +
-    'notes=lossless: the original rebuilt byte for byte; ZPAQL decoder stage 1: sequential Huffman JPEG'#10;
+    'notes=lossless: the original rebuilt byte for byte; ZPAQL decoder stage 2: Huffman JPEG, sequential and progressive'#10;
 
 { data(): the ZPAQL decoder (as ZS_DATA_ZPAQL_ARGS: its H comes from the
   query) and the card; anything else, ZS_DATA_ZPAQL included, nil }

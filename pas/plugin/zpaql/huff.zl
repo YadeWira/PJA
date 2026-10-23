@@ -1,4 +1,4 @@
-"""The JPEG again (pjajpeg.Recompose for sequential Huffman scans), and main."""
+"""The JPEG again (pjajpeg.Recompose for Huffman scans, sequential and progressive), and main."""
 
 # ---------------------------------------------------------------- the JPEG again
 
@@ -77,10 +77,146 @@ def encodeblock(coef, base, si, i):
             error()
         putbits(H[act], H[act + 256])
 
+# ---------------------------------------------------------------- progressive
+
+BEBUF = array(1000)      # correction bits waiting for the next EOB run (BE)
+MAX_BE = 937             # jcphuff.c: MAX_CORR_BITS - DCTSIZE2 + 1
+ABSV = array(64)
+BRBUF = array(64)
+eobrun = 0
+be = 0
+
+def emit(t, sym):
+    if H[t + 256 + sym] == 0:
+        error()
+    putbits(H[t + sym], H[t + 256 + sym])
+
+def flushbe():
+    global be
+    for k in range(be):
+        putbits(BEBUF[k], 1)
+    be = 0
+
+def flusheobrun(si):
+    global eobrun
+    if eobrun == 0:
+        return
+    nb = category(eobrun) - 1
+    if nb > 14:
+        error()
+    emit(SAC[4 * si], nb << 4)
+    if nb > 0:
+        putbits(eobrun, nb)
+    eobrun = 0
+    flushbe()
+
+def dcfirst(coef, base, si, i):
+    v = sar(cget(coef, base), SAL[si])
+    diff = v - PRED[i]
+    PRED[i] = v
+    t = category(diff)
+    emit(SDC[4 * si + i], t)
+    if t:
+        if slt(diff, 0):
+            putbits(diff - 1, t)
+        else:
+            putbits(diff, t)
+
+def acfirst(coef, base, si):
+    global eobrun
+    act = SAC[4 * si]
+    al = SAL[si]
+    r = 0
+    for k in range(SSS[si], SSE[si] + 1):
+        v = cget(coef, base + k)
+        neg = slt(v, 0)
+        v = iabs(v) >> al
+        if v == 0:
+            r += 1
+            continue
+        flusheobrun(si)
+        while r > 15:
+            emit(act, 240)
+            r -= 16
+        t = category(v)
+        emit(act, (r << 4) | t)
+        if neg:
+            putbits(-v - 1, t)
+        else:
+            putbits(v, t)
+        r = 0
+    if r > 0:
+        eobrun += 1
+        if eobrun == SMAXEOB[si]:
+            flusheobrun(si)
+
+def acrefine(coef, base, si):
+    global eobrun, be
+    act = SAC[4 * si]
+    al = SAL[si]
+    ss = SSS[si]
+    se = SSE[si]
+    eob = 0
+    for k in range(ss, se + 1):
+        ABSV[k] = iabs(cget(coef, base + k)) >> al
+        if ABSV[k] == 1:
+            eob = k
+    r = 0
+    br = 0
+    for k in range(ss, se + 1):
+        v = ABSV[k]
+        if v == 0:
+            r += 1
+            continue
+        while r > 15 and k <= eob:
+            flusheobrun(si)
+            emit(act, 240)
+            r -= 16
+            for ib in range(br):
+                putbits(BRBUF[ib], 1)
+            br = 0
+        if v > 1:
+            BRBUF[br] = v & 1
+            br += 1
+            continue
+        flusheobrun(si)
+        emit(act, (r << 4) | 1)
+        if sgt(cget(coef, base + k), 0):
+            putbits(1, 1)
+        else:
+            putbits(0, 1)
+        for ib in range(br):
+            putbits(BRBUF[ib], 1)
+        br = 0
+        r = 0
+    if r > 0 or br > 0:
+        eobrun += 1
+        for ib in range(br):
+            BEBUF[be] = BRBUF[ib]
+            be += 1
+        if eobrun == SMAXEOB[si] or be > MAX_BE:
+            flusheobrun(si)
+
+def unitblock(coef, base, si, i):
+    """pjajpeg.EncodeUnitBlock"""
+    if progressive == 0:
+        encodeblock(coef, base, si, i)
+    elif SSS[si] == 0:
+        if SAH[si] == 0:
+            dcfirst(coef, base, si, i)
+        else:
+            putbits(sar(cget(coef, base), SAL[si]) & 1, 1)
+    elif SAH[si] == 0:
+        acfirst(coef, base, si)
+    else:
+        acrefine(coef, base, si)
+
 def encodescan(si):
-    global bacc, bn
+    global bacc, bn, eobrun, be
     bacc = 0
     bn = 0
+    eobrun = 0
+    be = 0
     for i in range(4):
         PRED[i] = 0
     n = SNC[si]
@@ -97,6 +233,7 @@ def encodescan(si):
     uy = 0
     for u in range(total):
         if ri > 0 and u > 0 and u % ri == 0:
+            flusheobrun(si)
             align(SPAD[si])
             putbyte(255)
             putbyte(208 + (rst & 7))
@@ -105,17 +242,18 @@ def encodescan(si):
                 PRED[i] = 0
         if n == 1:
             c = SCOMP[4 * si]
-            encodeblock(CCOEF[c], (uy * CBW[c] + ux) * 64, si, 0)
+            unitblock(CCOEF[c], (uy * CBW[c] + ux) * 64, si, 0)
         else:
             for i in range(n):
                 c = SCOMP[4 * si + i]
                 for y in range(CV[c]):
                     for x in range(CH[c]):
-                        encodeblock(CCOEF[c], ((uy * CV[c] + y) * CBW[c] + ux * CH[c] + x) * 64, si, i)
+                        unitblock(CCOEF[c], ((uy * CV[c] + y) * CBW[c] + ux * CH[c] + x) * 64, si, i)
         ux += 1
         if ux == w:
             ux = 0
             uy += 1
+    flusheobrun(si)
     align(SPAD[si])
 
 def recompose():
