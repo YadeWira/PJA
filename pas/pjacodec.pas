@@ -79,6 +79,10 @@ function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt = 1 
 { A JPEG stream's headers only (its raw bytes, parsed), without decoding the
   bands: what a decoder will need, before decoding. Fails for JPEG-LS. }
 function StreamHeaders(const stream: TBytes; out j: TJpeg; maxRaw: SizeInt = 1 shl 28): TCodecResult;
+{ The same for a JPEG-LS stream: its headers, the near-lossless scans' run
+  lengths when it has them, and which model it uses. Fails for JPEG. }
+function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boolean;
+                          maxRaw: SizeInt = 1 shl 28): TCodecResult;
 
 implementation
 
@@ -455,6 +459,20 @@ begin
   if not Result.Ok then Exit;
   if h.isLs then Exit(CodecFail(ceBadStream));
   j := h.j;
+end;
+
+function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boolean; maxRaw: SizeInt): TCodecResult;
+var h: THead; len: Int64;
+begin
+  jl := Default(TJls); symbols := False;
+  if (Length(stream) < STREAM_HEADER) or (stream[0] <> STREAM_VERSION) or (stream[1] > 1) then
+    Exit(CodecFail(ceBadStream));
+  len := GetU32(stream, 2);
+  if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
+  Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
+  if not Result.Ok then Exit;
+  if not h.isLs then Exit(CodecFail(ceBadStream));
+  jl := h.jl; symbols := h.symbols;
 end;
 
 function Decompress(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;

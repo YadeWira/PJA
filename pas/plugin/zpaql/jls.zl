@@ -1,0 +1,1314 @@
+"""PJA's JPEG-LS decoder for ZPAQL (the pjals codec): the head stream and
+its raw bytes (pjadec.zl), the headers (pjajls.Parse), the samples from
+either model (pjamodel.CodeJlsBand with CodeJlsRuns, or the symbols model
+through pjajls's state machine), and the file again (pjajls.RecomposeJls).
+Line by line, as model.zl is for JPEG."""
+
+# ---------------------------------------------------------------- the frame and the scans
+
+JMAXSCANS = 64
+JCID = array(4)
+JSAMP = array(4)          # each component's samples, one a word, row by row
+LSNC = array(JMAXSCANS)
+LSCOMP = array(4 * JMAXSCANS)
+LSNEAR = array(JMAXSCANS)
+LSILV = array(JMAXSCANS)
+LSMAXV = array(JMAXSCANS)
+LST1 = array(JMAXSCANS)
+LST2 = array(JMAXSCANS)
+LST3 = array(JMAXSCANS)
+LSRESET = array(JMAXSCANS)
+LSRI = array(JMAXSCANS)
+LSCUT = array(JMAXSCANS)
+LSRUNS = array(JMAXSCANS)  # NEAR > 0: where its run lengths are, and how many
+LSNRUNS = array(JMAXSCANS)
+RUN_J = table([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+MAX_K = 16
+jw = 0
+jh = 0
+jbits = 0
+jnc = 0
+jnscans = 0
+
+def smin(a, b):
+    if slt(a, b):
+        return a
+    return b
+
+def smax(a, b):
+    if sgt(a, b):
+        return a
+    return b
+
+def log2ceil(n):
+    r = 0
+    while n > (1 << r):
+        r += 1
+    return r
+
+def sdiv(a, b):
+    """a div b, truncating toward zero, b > 0"""
+    if slt(a, 0):
+        return -((-a) // b)
+    return a // b
+
+# DefaultThresholds' three results
+dt1 = 0
+dt2 = 0
+dt3 = 0
+
+def clampt(i, lo, maxval):
+    if sgt(i, maxval) or slt(i, lo):
+        return lo
+    return i
+
+def defaultthresholds(maxval, near):
+    global dt1, dt2, dt3
+    if maxval >= 128:
+        f = (smin(maxval, 4095) + 128) // 256
+        dt1 = clampt(f * (3 - 2) + 2 + 3 * near, near + 1, maxval)
+        dt2 = clampt(f * (7 - 3) + 3 + 5 * near, dt1, maxval)
+        dt3 = clampt(f * (21 - 4) + 4 + 7 * near, dt2, maxval)
+    else:
+        f = 256 // (maxval + 1)
+        dt1 = clampt(smax(2, 3 // f + 3 * near), near + 1, maxval)
+        dt2 = clampt(smax(3, 7 // f + 5 * near), dt1, maxval)
+        dt3 = clampt(smax(4, 21 // f + 7 * near), dt2, maxval)
+
+def parsejls():
+    """pjajls.Parse on the raw bytes (decode = False)"""
+    global jw, jh, jbits, jnc, jnscans
+    if rawlen < 4 or rb(0) != 255 or rb(1) != 216:
+        error()
+    p = 2
+    ri = 0
+    pmaxv = 0
+    pt1 = 0
+    pt2 = 0
+    pt3 = 0
+    preset = 0
+    while True:
+        if p >= rawlen:
+            error()
+        if rb(p) != 255:
+            error()
+        while p < rawlen and rb(p) == 255:
+            p += 1
+        if p >= rawlen:
+            error()
+        m = rb(p)
+        p += 1
+        if m == 217:
+            break
+        if m >= 208 and m <= 215:
+            continue
+        seglen = u16(p)
+        first = p + 2
+        last = p + seglen
+        if m == 247:
+            jbits = rb(first)
+            jh = u16(first + 1)
+            jw = u16(first + 3)
+            jnc = rb(first + 5)
+            for i in range(jnc):
+                JCID[i] = rb(first + 6 + 3 * i)
+                JSAMP[i] = alloc(jw * jh)
+        elif m == 248:
+            t = rb(first)
+            if t == 1:
+                pmaxv = u16(first + 1)
+                pt1 = u16(first + 3)
+                pt2 = u16(first + 5)
+                pt3 = u16(first + 7)
+                preset = u16(first + 9)
+            elif t != 2 and t != 3:
+                error()
+        elif m == 221:
+            ri = 0
+            for i in range(first, last):
+                ri = (ri << 8) | rb(i)
+        elif m == 218:
+            s = jnscans
+            if s >= JMAXSCANS:
+                error()
+            ns = rb(first)
+            LSNC[s] = ns
+            for i in range(ns):
+                c = 0
+                for k in range(jnc):
+                    if JCID[k] == rb(first + 1 + 2 * i):
+                        c = k
+                LSCOMP[4 * s + i] = c
+            k = first + 1 + 2 * ns
+            LSNEAR[s] = rb(k)
+            LSILV[s] = rb(k + 1)
+            if pmaxv:
+                LSMAXV[s] = pmaxv
+            else:
+                LSMAXV[s] = (1 << jbits) - 1
+            defaultthresholds(LSMAXV[s], LSNEAR[s])
+            LST1[s] = dt1
+            LST2[s] = dt2
+            LST3[s] = dt3
+            if pt1:
+                LST1[s] = pt1
+            if pt2:
+                LST2[s] = pt2
+            if pt3:
+                LST3[s] = pt3
+            if preset:
+                LSRESET[s] = preset
+            else:
+                LSRESET[s] = 64
+            LSRI[s] = ri
+            LSCUT[s] = last
+            jnscans = s + 1
+        elif (m >= 192 and m <= 195) or (m >= 197 and m <= 203) or (m >= 205 and m <= 207):
+            error()
+        p = last
+    if jnscans == 0:
+        error()
+
+# ---------------------------------------------------------------- the near-lossless runs
+
+def coderuns():
+    """pjamodel.CodeJlsRuns, decoding"""
+    ex = alloc(32)
+    mn = alloc(32 * 32)
+    for s in range(jnscans):
+        if LSNEAR[s] == 0:
+            continue
+        n = direct(32)
+        if n > 67108864:
+            error()
+        LSRUNS[s] = alloc(n + 1)
+        LSNRUNS[s] = n
+        for i in range(n):
+            k = 0
+            while k < 31:
+                if code1(ex + k) == 0:
+                    break
+                k += 1
+            v = 1
+            b = k
+            while b > 0:
+                b -= 1
+                v = (v << 1) | code1(mn + k * 32 + b)
+            if v - 1 > jw:
+                error()
+            H[LSRUNS[s] + i] = v - 1
+
+# ---------------------------------------------------------------- the samples model
+
+JLS_CTX = 365
+JLS_ACT = 24
+JLS_NB = 24
+JLS_FIRST = 25
+JLS_MAX_EXP = 18
+JLS_BAND_SAMPLES = 1048576
+
+def jlsbandcount():
+    total = jw * jh * jnc
+    nb = total // JLS_BAND_SAMPLES
+    if nb > MAX_BANDS:
+        nb = MAX_BANDS
+    if nb > jh:
+        nb = jh
+    if nb < 1:
+        nb = 1
+    return nb
+
+def jquant(d, t1, t2, t3):
+    if sle(d, -t3):
+        return -4
+    if sle(d, -t2):
+        return -3
+    if sle(d, -t1):
+        return -2
+    if slt(d, 0):
+        return -1
+    if d == 0:
+        return 0
+    if slt(d, t1):
+        return 1
+    if slt(d, t2):
+        return 2
+    if slt(d, t3):
+        return 3
+    return 4
+
+def med(a, b, c):
+    if sge(c, smax(a, b)):
+        return smin(a, b)
+    if sle(c, smin(a, b)):
+        return smax(a, b)
+    return a + b - c
+
+RES = array(4)
+RESUP = array(4)
+
+def samplesband(band, nb):
+    """pjamodel.CodeJlsBand, decoding"""
+    y0 = jh * band // nb
+    y1 = jh * (band + 1) // nb
+    w = jw
+    maxv = (1 << jbits) - 1
+    rng = maxv + 1
+    half = (maxv + 1) // 2
+    defaultthresholds(maxv, 0)
+    t1 = dt1
+    t2 = dt2
+    t3 = dt3
+    # the model: bias (a, b, c, n) per class and context, counters, mixers
+    bias = alloc(2 * JLS_CTX * 4)
+    for k in range(2 * JLS_CTX):
+        H[bias + 4 * k] = 4
+        H[bias + 4 * k + 3] = 1
+    z1 = alloc(2 * JLS_ACT)
+    z2 = alloc(2 * JLS_CTX)
+    z3 = alloc(2 * JLS_NB * 4)
+    z4 = alloc(JLS_FIRST * JLS_ACT)
+    x1 = alloc(2 * JLS_ACT * JLS_MAX_EXP)
+    x2 = alloc(2 * JLS_CTX * JLS_MAX_EXP)
+    x3 = alloc(2 * JLS_NB * JLS_MAX_EXP)
+    x4 = alloc(JLS_FIRST * JLS_MAX_EXP)
+    m1 = alloc((JLS_MAX_EXP + 1) * JLS_ACT)
+    mm = alloc((JLS_MAX_EXP + 1) * JLS_MAX_EXP)
+    sg = alloc(2 * JLS_ACT * 9)
+    mxz = mxnew(5, 2 * JLS_ACT)
+    mxx = mxnew(5, 2 * JLS_MAX_EXP)
+    # [component] this row's residuals and the row above's
+    for ci in range(jnc):
+        RES[ci] = alloc(w)
+        RESUP[ci] = alloc(w)
+    for y in range(y0, y1):
+        hup = 0
+        if y > y0:
+            hup = 1
+        for ci in range(jnc):
+            t = RES[ci]
+            RES[ci] = RESUP[ci]
+            RESUP[ci] = t
+            cls = 0
+            if ci > 0:
+                cls = 1
+            smp = JSAMP[ci]
+            base = y * w
+            r = RES[ci]
+            ru = RESUP[ci]
+            r0 = RES[0]
+            for i in range(w):
+                if hup:
+                    b = H[smp + base - w + i]
+                elif i > 0:
+                    b = H[smp + base + i - 1]
+                else:
+                    b = half
+                if i > 0:
+                    a = H[smp + base + i - 1]
+                else:
+                    a = b
+                if hup and i > 0:
+                    c = H[smp + base - w + i - 1]
+                else:
+                    c = b
+                if hup and i + 1 < w:
+                    d = H[smp + base - w + i + 1]
+                else:
+                    d = b
+                ctx = (jquant(d - b, t1, t2, t3) * 9 + jquant(b - c, t1, t2, t3)) * 9 + jquant(c - a, t1, t2, t3)
+                if slt(ctx, 0):
+                    sgn = -1
+                    ctx = -ctx
+                else:
+                    sgn = 1
+                bs = bias + 4 * (cls * JLS_CTX + ctx)
+                px = med(a, b, c) + sgn * H[bs + 2]
+                if slt(px, 0):
+                    px = 0
+                elif sgt(px, maxv):
+                    px = maxv
+                act = clip(finelog(sdiv(H[bs], H[bs + 3])), JLS_ACT - 1)
+                nbb = 0
+                if i > 0:
+                    nbb = nbb + iabs(H[r + i - 1])
+                if hup:
+                    nbb = nbb + iabs(H[ru + i])
+                nbb = clip(finelog(nbb), JLS_NB - 1)
+                if ci > 0:
+                    first = clip(finelog(H[r0 + i]), JLS_FIRST - 2)
+                else:
+                    first = JLS_FIRST - 1
+                bi = cls * JLS_ACT + act
+                e = 0
+                if codemix(mxz, bi, z1 + bi, z2 + cls * JLS_CTX + ctx, z3 + (cls * JLS_NB + nbb) * 4 + clip(act, 3),
+                           z4 + first * JLS_ACT + act):
+                    k = 1
+                    while k < JLS_MAX_EXP:
+                        if codemix(mxx, cls * JLS_MAX_EXP + k - 1, x1 + bi * JLS_MAX_EXP + k - 1,
+                                   x2 + (cls * JLS_CTX + ctx) * JLS_MAX_EXP + k - 1,
+                                   x3 + (cls * JLS_NB + nbb) * JLS_MAX_EXP + k - 1,
+                                   x4 + first * JLS_MAX_EXP + k - 1) == 0:
+                            break
+                        k += 1
+                    v = mantissa(m1, act, JLS_ACT, mm, JLS_MAX_EXP, k)
+                    bit = 0
+                    if i > 0:
+                        if slt(H[r + i - 1], 0):
+                            bit = 1
+                        elif sgt(H[r + i - 1], 0):
+                            bit = 2
+                    if hup:
+                        if slt(H[ru + i], 0):
+                            bit = bit + 3
+                        elif sgt(H[ru + i], 0):
+                            bit = bit + 6
+                    if code1(sg + bi * 9 + bit):
+                        e = -v
+                    else:
+                        e = v
+                x = px + e * sgn
+                if slt(x, 0):
+                    x = x + rng
+                elif sgt(x, maxv):
+                    x = x - rng
+                if slt(x, 0) or sgt(x, maxv):
+                    error()
+                H[smp + base + i] = x
+                H[r + i] = e
+                # LOCO's bias update (A.12, A.13), NEAR 0
+                ba = H[bs] + iabs(e)
+                bb = H[bs + 1] + e
+                bc = H[bs + 2]
+                bn = H[bs + 3]
+                if bn == 64:
+                    ba = ba >> 1
+                    if sge(bb, 0):
+                        bb = bb // 2
+                    else:
+                        bb = -((-bb + 1) // 2)
+                    bn = bn >> 1
+                bn += 1
+                if sle(bb + bn, 0):
+                    bb = bb + bn
+                    if sle(bb, -bn):
+                        bb = -bn + 1
+                    if sgt(bc, -128):
+                        bc = bc - 1
+                elif sgt(bb, 0):
+                    bb = bb - bn
+                    if sgt(bb, 0):
+                        bb = 0
+                    if slt(bc, 127):
+                        bc += 1
+                H[bs] = ba
+                H[bs + 1] = bb
+                H[bs + 2] = bc
+                H[bs + 3] = bn
+
+# ---------------------------------------------------------------- the JPEG-LS state machine
+# pjajls's TJlsCoder and its scan: mode 0 writes the bits of a scan from the
+# samples (encoding), mode 1 decodes the samples from the symbols model
+
+CTXA = array(365)
+CTXB = array(365)
+CTXC = array(365)
+CTXN = array(365)
+RUNA = array(2)
+RUNN = array(2)
+RUNNN = array(2)
+PREV = array(4)           # [component] the line above, at index sample + 1 (width + 2)
+CUR = array(4)
+RUNIDX = array(4)
+jmode = 0
+cnear = 0
+cmaxv = 0
+crange = 0
+cqbpp = 0
+cbpp = 0
+climit = 0
+creset = 0
+ct1 = 0
+ct2 = 0
+ct3 = 0
+crunindex = 0
+symc = 0
+symi = 0
+runbase = 0               # the scan's run lengths: where, how many read or written
+runpos = 0
+runmax = 0
+
+def jsetup(s):
+    global cnear, cmaxv, crange, cqbpp, cbpp, climit, creset, ct1, ct2, ct3
+    cnear = LSNEAR[s]
+    cmaxv = LSMAXV[s]
+    crange = (cmaxv + 2 * cnear) // (2 * cnear + 1) + 1
+    cqbpp = log2ceil(crange)
+    cbpp = log2ceil(cmaxv)
+    climit = 2 * (cbpp + smax(8, cbpp))
+    creset = LSRESET[s]
+    ct1 = LST1[s]
+    ct2 = LST2[s]
+    ct3 = LST3[s]
+    jresetstate()
+
+def jresetstate():
+    global crunindex
+    a0 = smax(2, (crange + 32) // 64)
+    for i in range(365):
+        CTXA[i] = a0
+        CTXB[i] = 0
+        CTXC[i] = 0
+        CTXN[i] = 1
+    for i in range(2):
+        RUNA[i] = a0
+        RUNN[i] = 1
+        RUNNN[i] = 0
+    crunindex = 0
+
+def quant(d):
+    if sle(d, -ct3):
+        return -4
+    if sle(d, -ct2):
+        return -3
+    if sle(d, -ct1):
+        return -2
+    if slt(d, -cnear):
+        return -1
+    if sle(d, cnear):
+        return 0
+    if slt(d, ct1):
+        return 1
+    if slt(d, ct2):
+        return 2
+    if slt(d, ct3):
+        return 3
+    return 4
+
+def correct(p):
+    if slt(p, 0):
+        return 0
+    if sgt(p, cmaxv):
+        return cmaxv
+    return p
+
+def reconstruct(px, err):
+    q = 2 * cnear + 1
+    v = px + err * q
+    if slt(v, -cnear):
+        v = v + crange * q
+    elif sgt(v, cmaxv + cnear):
+        v = v - crange * q
+    return correct(v)
+
+def errorvalue(e):
+    q = 2 * cnear + 1
+    if sgt(e, 0):
+        e = (e + cnear) // q
+    else:
+        e = -((cnear - e) // q)
+    if slt(e, 0):
+        e = e + crange
+    if sge(e, (crange + 1) // 2):
+        e = e - crange
+    return e
+
+def updateregular(q, err):
+    a = CTXA[q] + iabs(err)
+    b = CTXB[q] + err * (2 * cnear + 1)
+    c = CTXC[q]
+    n = CTXN[q]
+    if a >= 16777216 or iabs(b) >= 16777216:
+        error()
+    if n == creset:
+        a = a >> 1
+        if sge(b, 0):
+            b = b // 2
+        else:
+            b = -((-b + 1) // 2)
+        n = n >> 1
+    n += 1
+    if sle(b + n, 0):
+        b = b + n
+        if sle(b, -n):
+            b = -n + 1
+        if sgt(c, -128):
+            c = c - 1
+    elif sgt(b, 0):
+        b = b - n
+        if sgt(b, 0):
+            b = 0
+        if slt(c, 127):
+            c += 1
+    CTXA[q] = a
+    CTXB[q] = b
+    CTXC[q] = c
+    CTXN[q] = n
+
+def runk(r):
+    temp = RUNA[r] + (RUNN[r] >> 1) * r
+    nt = RUNN[r]
+    k = 0
+    while nt < temp:
+        nt = nt << 1
+        k += 1
+    return k
+
+def updaterun(r, err, m):
+    if slt(err, 0):
+        RUNNN[r] = RUNNN[r] + 1
+    RUNA[r] = RUNA[r] + ((m + 1 - r) >> 1)
+    if RUNN[r] == creset:
+        RUNA[r] = RUNA[r] >> 1
+        RUNN[r] = RUNN[r] >> 1
+        RUNNN[r] = RUNNN[r] >> 1
+    RUNN[r] = RUNN[r] + 1
+
+def putsample(i, x):
+    if jmode == 1:
+        symsample(symc, i, x)
+
+def signof(n):
+    if slt(n, 0):
+        return -1
+    return 1
+
+# ---------------------------------------------------------------- bits of a scan
+
+outn = 0
+
+def putbyte(v):
+    global outn
+    out(v)
+    outn += 1
+
+# CharLS's: after an FF byte, 7 bits and a 0 on top; at the end, the last
+# byte padded with zeros, and a 0 byte after a final FF
+
+wacc = 0
+wn = 0
+wff = 0
+
+def wdrain():
+    global wn, wff, wacc
+    while True:
+        w = 8
+        if wff:
+            w = 7
+        if wn < w:
+            return
+        wn -= w
+        b = (wacc >> wn) & ((1 << w) - 1)
+        putbyte(b)
+        wff = 0
+        if b == 255:
+            wff = 1
+
+def wbits16(v, n):
+    global wacc, wn
+    if n == 0:
+        return
+    wacc = (wacc << n) | (v & ((1 << n) - 1))
+    wn += n
+    wdrain()
+    wacc = wacc & ((1 << wn) - 1)
+
+def wbits(v, n):
+    """n <= 32 bits, the oldest first"""
+    if n > 16:
+        wbits16(v >> 16, n - 16)
+        wbits16(v & 65535, 16)
+    else:
+        wbits16(v, n)
+
+def wendscan():
+    wdrain()
+    if wn > 0:
+        w = 8
+        if wff:
+            w = 7
+        wbits(0, w - wn)
+        wdrain()
+    if wff:
+        wbits(0, 7)
+        wdrain()
+
+def encodemapped(k, m, limit):
+    high = m >> k
+    if high < limit - cqbpp - 1:
+        if high + 1 > 31:
+            wbits(0, high // 2)
+            high = high - high // 2
+        wbits(1, high + 1)
+        wbits(m & ((1 << k) - 1), k)
+        return
+    if limit - cqbpp > 31:
+        wbits(0, 31)
+        wbits(1, limit - cqbpp - 31)
+    else:
+        wbits(1, limit - cqbpp)
+    wbits((m - 1) & ((1 << cqbpp) - 1), cqbpp)
+
+def golombk(q):
+    k = 0
+    while (CTXN[q] << k) < CTXA[q] and k < MAX_K:
+        k += 1
+    return k
+
+def regular(qs, x, predicted):
+    """pjajls.Regular: mode 0 encodes x, mode 1 decodes; the reconstructed sample"""
+    if slt(qs, 0):
+        sign = 1
+        q = -qs
+    else:
+        sign = 0
+        q = qs
+    k = golombk(q)
+    if k >= MAX_K:
+        error()
+    if sign:
+        px = correct(predicted - CTXC[q])
+    else:
+        px = correct(predicted + CTXC[q])
+    inv = 0
+    if k == 0 and cnear == 0 and slt(2 * CTXB[q] + CTXN[q] - 1, 0):
+        inv = 1
+    if jmode == 0:
+        if sign:
+            err = errorvalue(px - x)
+        else:
+            err = errorvalue(x - px)
+        m = err
+        if inv:
+            m = err ^ 4294967295
+        if sge(m, 0):
+            m = 2 * m
+        else:
+            m = -2 * m - 1
+        encodemapped(k, m, climit)
+    else:
+        if sign:
+            m = symmapped(symc, symi, k, q, px, -1, inv)
+        else:
+            m = symmapped(symc, symi, k, q, px, 1, inv)
+        if m & 1:
+            err = -((m + 1) >> 1)
+        else:
+            err = m >> 1
+        if iabs(err) > 65535:
+            error()
+        if inv:
+            err = err ^ 4294967295
+    updateregular(q, err)
+    if sign:
+        err = -err
+    return reconstruct(px, err)
+
+def interruption(r, err, px, sgn):
+    """pjajls.InterruptionError with run context r"""
+    k = runk(r)
+    if jmode == 0:
+        mp = 0
+        if k == 0 and sgt(err, 0) and 2 * RUNNN[r] < RUNN[r]:
+            mp = 1
+        if slt(err, 0) and 2 * RUNNN[r] >= RUNN[r]:
+            mp = 1
+        if slt(err, 0) and k != 0:
+            mp = 1
+        m = 2 * iabs(err) - r - mp
+        if slt(m, 0):
+            error()
+        encodemapped(k, m, climit - RUN_J[crunindex] - 1)
+    else:
+        m = symmapped(symc, symi, k, 365 + r, px, sgn, 0)
+        t = m + r
+        mp = t & 1
+        absv = (t + mp) // 2
+        cond = 0
+        if k != 0 or 2 * RUNNN[r] >= RUNN[r]:
+            cond = 1
+        if cond == mp:
+            err = -absv
+        else:
+            err = absv
+    updaterun(r, err, m)
+    return err
+
+def encoderun(c, i, run, left):
+    global crunindex
+    cnt = run
+    while cnt >= (1 << RUN_J[crunindex]):
+        wbits(1, 1)
+        cnt = cnt - (1 << RUN_J[crunindex])
+        crunindex = smin(31, crunindex + 1)
+    if run == left:
+        if cnt != 0:
+            wbits(1, 1)
+    else:
+        wbits(cnt, RUN_J[crunindex] + 1)
+
+def decoderun(c, i, left):
+    """the symbols' run length"""
+    global crunindex
+    run = 0
+    while True:
+        bit = symrunbit(c, i + run, crunindex)
+        if bit != 1:
+            break
+        cnt = smin(1 << RUN_J[crunindex], left - run)
+        run = run + cnt
+        if cnt == (1 << RUN_J[crunindex]):
+            crunindex = smin(31, crunindex + 1)
+        if run == left:
+            break
+    if run != left:
+        if RUN_J[crunindex] > 0:
+            run = run + symrunrest(RUN_J[crunindex], c, crunindex)
+    if run > left:
+        error()
+    return run
+
+def nextrun():
+    """NEAR > 0, encoding: the run the decoding recorded"""
+    global runpos
+    if runpos >= runmax:
+        error()
+    v = H[runbase + runpos]
+    runpos += 1
+    return v
+
+def recordrun(v):
+    global runpos
+    H[alloc(1)] = v
+    runpos += 1
+
+def codeline(c, smp, rowbase):
+    """pjajls.CodeLine: one line of one component"""
+    global symc, symi, crunindex
+    w = jw
+    p = PREV[c]
+    cu = CUR[c]
+    H[p + w + 1] = H[p + w]
+    H[cu] = H[p + 1]
+    i = 0
+    while i < w:
+        ra = H[cu + i]
+        rbb = H[p + i + 1]
+        rc = H[p + i]
+        rd = H[p + i + 2]
+        qs = (quant(rd - rbb) * 9 + quant(rbb - rc)) * 9 + quant(rc - ra)
+        symc = c
+        symi = i
+        if qs != 0:
+            x = 0
+            if jmode == 0:
+                x = H[smp + rowbase + i]
+            x = regular(qs, x, med(ra, rbb, rc))
+            H[cu + i + 1] = x
+            putsample(i, x)
+            i += 1
+            continue
+        left = w - i
+        run = 0
+        if jmode == 0:
+            if cnear > 0:
+                run = nextrun()
+                if run > left:
+                    error()
+            else:
+                while run < left and H[smp + rowbase + i + run] == ra:
+                    run += 1
+            encoderun(c, i, run, left)
+        else:
+            run = decoderun(c, i, left)
+            if cnear > 0:
+                recordrun(run)
+        for x in range(run):
+            H[cu + i + 1 + x] = ra
+            putsample(i + x, ra)
+        if jmode == 1:
+            symrunend(c, i, run)
+        i = i + run
+        symi = i
+        if i == w:
+            break
+        rbi = H[p + i + 1]
+        x = 0
+        if jmode == 0:
+            x = H[smp + rowbase + i]
+        if iabs(ra - rbi) <= cnear:
+            err = 0
+            if jmode == 0:
+                err = errorvalue(x - ra)
+            err = interruption(1, err, ra, 1)
+            x = reconstruct(ra, err)
+        else:
+            sgn = signof(rbi - ra)
+            err = 0
+            if jmode == 0:
+                err = errorvalue((x - rbi) * sgn)
+            err = interruption(0, err, rbi, sgn)
+            x = reconstruct(rbi, err * sgn)
+        H[cu + i + 1] = x
+        putsample(i, x)
+        crunindex = smax(0, crunindex - 1)
+        i += 1
+    if jmode == 1:
+        for i in range(w):
+            H[smp + rowbase + i] = H[cu + i + 1]
+
+RA4 = array(4)
+RB4 = array(4)
+RC4 = array(4)
+RD4 = array(4)
+QS4 = array(4)
+
+def codelinesample(s, n, rowbase):
+    """pjajls.CodeLineSample: n components side by side"""
+    global symc, symi, crunindex
+    w = jw
+    for c in range(n):
+        H[PREV[c] + w + 1] = H[PREV[c] + w]
+        H[CUR[c]] = H[PREV[c] + 1]
+    i = 0
+    while i < w:
+        allzero = 1
+        for c in range(n):
+            RA4[c] = H[CUR[c] + i]
+            RB4[c] = H[PREV[c] + i + 1]
+            RC4[c] = H[PREV[c] + i]
+            RD4[c] = H[PREV[c] + i + 2]
+            QS4[c] = (quant(RD4[c] - RB4[c]) * 9 + quant(RB4[c] - RC4[c])) * 9 + quant(RC4[c] - RA4[c])
+            if QS4[c] != 0:
+                allzero = 0
+        if allzero == 0:
+            for c in range(n):
+                symc = c
+                symi = i
+                x = 0
+                smp = JSAMP[LSCOMP[4 * s + c]]
+                if jmode == 0:
+                    x = H[smp + rowbase + i]
+                x = regular(QS4[c], x, med(RA4[c], RB4[c], RC4[c]))
+                H[CUR[c] + i + 1] = x
+                putsample(i, x)
+            i += 1
+            continue
+        left = w - i
+        run = 0
+        if jmode == 0:
+            if cnear > 0:
+                run = nextrun()
+                if run > left:
+                    error()
+            else:
+                while run < left:
+                    same = 1
+                    for c in range(n):
+                        if H[JSAMP[LSCOMP[4 * s + c]] + rowbase + i + run] != RA4[c]:
+                            same = 0
+                    if same == 0:
+                        break
+                    run += 1
+            encoderun(0, i, run, left)
+        else:
+            run = decoderun(0, i, left)
+            if cnear > 0:
+                recordrun(run)
+        for x in range(run):
+            for c in range(n):
+                H[CUR[c] + i + 1 + x] = RA4[c]
+                symc = c
+                putsample(i + x, RA4[c])
+        if jmode == 1:
+            for c in range(n):
+                symrunend(c, i, run)
+        i = i + run
+        if i == w:
+            break
+        for c in range(n):
+            symc = c
+            symi = i
+            RB4[c] = H[PREV[c] + i + 1]
+            sgn = signof(RB4[c] - RA4[c])
+            err = 0
+            if jmode == 0:
+                err = errorvalue(sgn * (H[JSAMP[LSCOMP[4 * s + c]] + rowbase + i] - RB4[c]))
+            err = interruption(0, err, RB4[c], sgn)
+            H[CUR[c] + i + 1] = reconstruct(RB4[c], err * sgn)
+            putsample(i, H[CUR[c] + i + 1])
+        crunindex = smax(0, crunindex - 1)
+        i += 1
+    if jmode == 1:
+        for c in range(n):
+            smp = JSAMP[LSCOMP[4 * s + c]]
+            for i in range(w):
+                H[smp + rowbase + i] = H[CUR[c] + i + 1]
+
+def clearlines(n):
+    for c in range(n):
+        for i in range(jw + 2):
+            H[PREV[c] + i] = 0
+            H[CUR[c] + i] = 0
+        RUNIDX[c] = 0
+
+def codelines(s, y0, y1):
+    global crunindex
+    n = LSNC[s]
+    for y in range(y0, y1):
+        for c in range(n):
+            t = PREV[c]
+            PREV[c] = CUR[c]
+            CUR[c] = t
+        rowbase = y * jw
+        if LSILV[s] == 2:
+            codelinesample(s, n, rowbase)
+        else:
+            for c in range(n):
+                crunindex = RUNIDX[c]
+                codeline(c, JSAMP[LSCOMP[4 * s + c]], rowbase)
+                RUNIDX[c] = crunindex
+
+def scanlines(s):
+    """a scan's lines with their restarts; mode 0 also writes the bits"""
+    global wacc, wn, wff
+    jsetup(s)
+    clearlines(LSNC[s])
+    y0 = 0
+    rst = 0
+    wacc = 0
+    wn = 0
+    wff = 0
+    while y0 < jh:
+        y1 = jh
+        if LSRI[s] > 0:
+            y1 = smin(jh, y0 + LSRI[s])
+        if y0 > 0:
+            if jmode == 0:
+                wendscan()
+                putbyte(255)
+                putbyte(208 + (rst & 7))
+                rst += 1
+                wff = 0
+            jresetstate()
+            clearlines(LSNC[s])
+        codelines(s, y0, y1)
+        y0 = y1
+    if jmode == 0:
+        wendscan()
+
+def linebuffers():
+    for c in range(4):
+        PREV[c] = alloc(jw + 2)
+        CUR[c] = alloc(jw + 2)
+
+# ---------------------------------------------------------------- the symbols model
+
+SYM_K = 17
+SYM_CTX = 367
+SYM_NB = 24
+SYM_X = 20
+SYM_E = 19
+SYM_ACT = 24
+SYM_TEX = 2048
+VALS = array(4)
+ERRS = array(4)
+LINES = array(12)         # [component][line], 0 the current one, at column + 2
+PENDTEX = array(4)
+PENDP = array(4)
+PENDP2 = array(4)
+smw = 0
+smnear = 0
+smmaxv = 0
+smscale = 0
+sf1 = 0
+sf2 = 0
+sf3 = 0
+sf4 = 0
+sf5 = 0
+sf6 = 0
+sf7 = 0
+sm1 = 0
+smm = 0
+slsb = 0
+srb = 0
+srr = 0
+smx = 0
+sbsum = 0
+sbn = 0
+
+def symnew():
+    global sf1, sf2, sf3, sf4, sf5, sf6, sf7, sm1, smm, slsb, srb, srr, smx, sbsum, sbn
+    sf1 = alloc(3 * SYM_K * SYM_E)
+    sf2 = alloc(SYM_CTX * SYM_E)
+    sf3 = alloc(3 * SYM_NB * SYM_E)
+    sf4 = alloc(SYM_X * SYM_K * SYM_E)
+    sf5 = alloc(16 * SYM_K * SYM_E)
+    sf6 = alloc(SYM_ACT * SYM_K * SYM_E)
+    sf7 = alloc(SYM_TEX * SYM_E)
+    sm1 = alloc((SYM_E + 1) * 16 * SYM_K)
+    smm = alloc((SYM_E + 1) * 16 * SYM_E)
+    slsb = alloc(3 * 15 * (SYM_E + 1) * 3)
+    srb = alloc(2 * 32 * 8)
+    srr = alloc(32 * 80)
+    smx = mxnew(8, 3 * SYM_K * SYM_E)
+    sbsum = alloc(SYM_TEX)
+    sbn = alloc(SYM_TEX)
+    for k in range(SYM_TEX):
+        H[sbn + k] = 1
+
+def symbeginscan(s):
+    global smw, smnear, smmaxv, smscale
+    smw = jw
+    smnear = LSNEAR[s]
+    smmaxv = LSMAXV[s]
+    smscale = smax(1, (smmaxv + 1) // 256)
+    for c in range(4):
+        if c < LSNC[s]:
+            VALS[c] = alloc(jw + 2)
+            ERRS[c] = alloc(jw + 2)
+            for l in range(3):
+                LINES[c * 3 + l] = alloc(jw + 4)
+        PENDTEX[c] = 4294967295
+
+def symsample(c, i, x):
+    if i == 0:
+        t = LINES[c * 3 + 2]
+        LINES[c * 3 + 2] = LINES[c * 3 + 1]
+        LINES[c * 3 + 1] = LINES[c * 3]
+        LINES[c * 3] = t
+    H[LINES[c * 3] + i + 2] = x
+    k = PENDTEX[c]
+    if k != 4294967295:
+        H[sbsum + k] = H[sbsum + k] + (x - PENDP2[c])
+        H[sbn + k] = H[sbn + k] + 1
+        if H[sbn + k] >= 256:
+            H[sbsum + k] = sdiv(H[sbsum + k], 2)
+            H[sbn + k] = H[sbn + k] // 2
+        H[ERRS[c] + i + 1] = iabs(x - PENDP[c])
+        PENDTEX[c] = 4294967295
+    else:
+        H[ERRS[c] + i + 1] = 0
+
+def signedlog(v, hi):
+    f = finelog(v)
+    if f > hi:
+        f = hi
+    if slt(v, 0):
+        return -f
+    return f
+
+def symmapped(c, i, k, ctx, px, sgn, inv):
+    """TJlsSymModel.Mapped, decoding: the mapped value"""
+    kind = 0
+    if ctx >= 365:
+        kind = 1 + ctx - 365
+    kk = smin(k, SYM_K - 1)
+    row = VALS[c]
+    nb = clip(finelog(H[row + i] + H[row + i + 1] + H[row + i + 2] // 2), SYM_NB - 1)
+    if c > 0:
+        x = clip(finelog(H[VALS[0] + i + 1]), SYM_X - 2)
+    else:
+        x = SYM_X - 1
+    q = 2 * smnear + 1
+    l0 = LINES[c * 3]
+    l1 = LINES[c * 3 + 1]
+    l2 = LINES[c * 3 + 2]
+    wa = H[l0 + i + 1]
+    wwa = H[l0 + i]
+    nn = H[l1 + i + 2]
+    nw = H[l1 + i + 1]
+    ne = H[l1 + i + 3]
+    nnb = H[l2 + i + 2]
+    nne = H[l2 + i + 3]
+    dh = iabs(wa - wwa) + iabs(nn - nw) + iabs(nn - ne)
+    dv = iabs(wa - nw) + iabs(nn - nnb) + iabs(ne - nne)
+    if sgt(dv - dh, 80 * smscale):
+        p2 = wa
+    elif sgt(dh - dv, 80 * smscale):
+        p2 = nn
+    else:
+        p2 = sdiv(wa + nn, 2) + sdiv(ne - nw, 4)
+        if sgt(dv - dh, 32 * smscale):
+            p2 = sdiv(p2 + wa, 2)
+        elif sgt(dv - dh, 8 * smscale):
+            p2 = sdiv(3 * p2 + wa, 4)
+        elif sgt(dh - dv, 32 * smscale):
+            p2 = sdiv(p2 + nn, 2)
+        elif sgt(dh - dv, 8 * smscale):
+            p2 = sdiv(3 * p2 + nn, 4)
+    delta = sdiv(dh + dv + 2 * H[ERRS[c] + i], q)
+    tex = 0
+    if slt(nn, p2):
+        tex = tex | 1
+    if slt(wa, p2):
+        tex = tex | 2
+    if slt(nw, p2):
+        tex = tex | 4
+    if slt(ne, p2):
+        tex = tex | 8
+    if slt(wwa, p2):
+        tex = tex | 16
+    if slt(nnb, p2):
+        tex = tex | 32
+    if slt(2 * nn - nnb, p2):
+        tex = tex | 64
+    if slt(2 * wa - wwa, p2):
+        tex = tex | 128
+    tex = ((smin(c, 1) * 256 + tex) * 4) + clip(finelog(delta) // 3, 3)
+    p3 = p2 + divround(H[sbsum + tex], H[sbn + tex])
+    if slt(p3, 0):
+        p3 = 0
+    elif sgt(p3, smmaxv):
+        p3 = smmaxv
+    if kind == 0:
+        PENDTEX[c] = tex
+        PENDP[c] = p3
+        PENDP2[c] = p2
+    ex = divround((p3 - px) * sgn, q)
+    if inv:
+        ex = -ex - 1
+    if kind == 0:
+        if sge(ex, 0):
+            me = 2 * ex
+        else:
+            me = -2 * ex - 1
+    else:
+        me = 2 * iabs(ex)
+    mb = clip(finelog(me), 15)
+    eb = kind * 15 + signedlog(ex, 7) + 7
+    act = clip(finelog(delta), SYM_ACT - 1)
+    t = 0
+    while t < SYM_E - 1:
+        sel = (kind * SYM_K + kk) * SYM_E + t
+        a1 = sf1 + sel
+        a2 = sf2 + ctx * SYM_E + t
+        a3 = sf3 + (kind * SYM_NB + nb) * SYM_E + t
+        a4 = sf4 + (x * SYM_K + kk) * SYM_E + t
+        a5 = sf5 + (mb * SYM_K + kk) * SYM_E + t
+        a6 = sf6 + (act * SYM_K + kk) * SYM_E + t
+        a7 = sf7 + tex * SYM_E + t
+        mxadd(smx, cp(H[a1]))
+        mxadd(smx, cp(H[a2]))
+        mxadd(smx, cp(H[a3]))
+        mxadd(smx, cp(H[a4]))
+        mxadd(smx, cp(H[a5]))
+        mxadd(smx, cp(H[a6]))
+        mxadd(smx, cp(H[a7]))
+        mxadd(smx, 40960)
+        bit = decode(mxmix(smx, sel))
+        mxupd(smx, bit)
+        upd(a1, bit, COUNTER_LIMIT)
+        upd(a2, bit, COUNTER_LIMIT)
+        upd(a3, bit, COUNTER_LIMIT)
+        upd(a4, bit, COUNTER_LIMIT)
+        upd(a5, bit, COUNTER_LIMIT)
+        upd(a6, bit, COUNTER_LIMIT)
+        upd(a7, bit, COUNTER_LIMIT)
+        if bit == 0:
+            break
+        t += 1
+    e = t
+    v = 0
+    if e > 0:
+        v = 1 << (e - 1)
+        b = e - 1
+        while b > 0:
+            b -= 1
+            if b == 0:
+                bit = code1(slsb + (eb * (SYM_E + 1) + e) * 3 + smin(e - 1, 2))
+            elif b == e - 2:
+                bit = code1(sm1 + (e * 16 + mb) * SYM_K + kk)
+            else:
+                bit = code1(smm + (e * 16 + mb) * SYM_E + b)
+            v = v | (bit << b)
+    H[row + i + 1] = v
+    return v
+
+def symrunbit(c, i, runindex):
+    above = 0
+    if i < smw:
+        above = clip(finelog(H[VALS[c] + i + 1]), 7)
+    return code1(srb + (smin(c, 1) * 32 + runindex) * 8 + above)
+
+def symrunrest(bits, c, runindex):
+    r = 0
+    node = 1
+    b = bits
+    while b > 0:
+        b -= 1
+        if node < 64:
+            idx = node
+        else:
+            idx = 64 + b
+        bit = code1(srr + runindex * 80 + idx)
+        r = (r << 1) | bit
+        if node < 64:
+            node = 2 * node + bit
+        else:
+            node = 64
+    return r
+
+def symrunend(c, i, ln):
+    for k in range(i, i + ln):
+        H[VALS[c] + k + 1] = 0
+
+# ---------------------------------------------------------------- the file
+
+def main():
+    global origsize, hp, jmode, runbase, runpos, runmax
+    hp = base(HEAP)
+    probeh()
+    tables()
+    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+    if M[SEG] != 5 or M[SEG + 1] != 0:
+        error()
+    hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
+    dinit(SEG + 6, SEG + 6 + hlen)
+    coderaw(origsize)
+    parsejls()
+    symbols = direct(1)
+    linebuffers()
+    p = SEG + 6 + hlen
+    end = inlen()
+    if symbols:
+        dinit(p, end)
+        symnew()
+        jmode = 1
+        for s in range(jnscans):
+            symbeginscan(s)
+            runbase = hp
+            runpos = 0
+            scanlines(s)
+            LSRUNS[s] = runbase
+            LSNRUNS[s] = runpos
+    else:
+        coderuns()
+        nb = jlsbandcount()
+        for b in range(nb):
+            if b < nb - 1:
+                ln = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+                p += 4
+            else:
+                ln = end - p
+            dinit(p, p + ln)
+            samplesband(b, nb)
+            p += ln
+    # the file again: raw bytes and scans (pjajls.RecomposeJls)
+    jmode = 0
+    q = 0
+    for s in range(jnscans):
+        while q < LSCUT[s]:
+            putbyte(H[rawbase + q])
+            q += 1
+        runbase = LSRUNS[s]
+        runpos = 0
+        runmax = LSNRUNS[s]
+        scanlines(s)
+        if LSNEAR[s] > 0 and runpos != runmax:
+            error()
+    while q < rawlen:
+        putbyte(H[rawbase + q])
+        q += 1
+    if outn != origsize:
+        error()

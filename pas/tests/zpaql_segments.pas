@@ -1,14 +1,15 @@
 { The segments zpaq-std hands to the plugin's ZPAQL decoder, for the test of
   that decoder (tools/zpaql/test_pjadec.py): for each JPEG, <out dir>/<name>.seg,
   the original size (u32 LE) and the stream of the full model, and
-  <name>.args, the $3 the plugin's query gives for it (pjazpaqlargs).
+  <name>.args, the $3 the plugin's query gives for it (pjazpaqlargs). For a
+  JPEG-LS file, the same for the pjals codec's decoder.
 
     zpaql_segments <out dir> <jpeg> ... }
 program zpaql_segments;
 
 {$mode objfpc}{$H+}
 
-uses {$ifdef unix}cthreads,{$endif} SysUtils, Classes, pjacodec, pjazpaqlargs;
+uses {$ifdef unix}cthreads,{$endif} SysUtils, Classes, pjajls, pjacodec, pjazpaqlargs;
 
 var data, stream, seg: TBytes; f: TFileStream; i: Integer; name: string; t: Text;
 begin
@@ -29,6 +30,8 @@ begin
     f := TFileStream.Create(IncludeTrailingPathDelimiter(ParamStr(1)) + name, fmCreate);
     try f.WriteBuffer(seg[0], Length(seg)); finally f.Free; end;
     Assign(t, IncludeTrailingPathDelimiter(ParamStr(1)) + ChangeFileExt(name, '.args'));
-    Rewrite(t); WriteLn(t, ZpaqlArgs(stream)); Close(t);
+    Rewrite(t);
+    if IsJls(data) then WriteLn(t, ZpaqlJlsArgs(stream)) else WriteLn(t, ZpaqlArgs(stream));
+    Close(t);
   end;
 end.

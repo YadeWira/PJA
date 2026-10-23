@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The plugin's ZPAQL decoder (pas/plugin/pjazpaql.inc) run on segments:
-it must give back each JPEG byte for byte.
+"""The plugin's ZPAQL decoders (pas/plugin/pjazpaql.inc, and for JPEG-LS
+files pjalszpaql.inc) run on segments: each must give back its file byte
+for byte.
 
     test_pjadec.py <segment dir> <jpeg> ...
 
@@ -15,8 +16,14 @@ sys.path.insert(0, HERE)
 import zpaqlvm
 
 REPO = os.path.dirname(os.path.dirname(HERE))
-inc = open(os.path.join(REPO, 'pas', 'plugin', 'pjazpaql.inc')).read()
-cfg = '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", inc, re.M)) + '\n'
+
+
+def config(name):
+    inc = open(os.path.join(REPO, 'pas', 'plugin', name)).read()
+    return '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", inc, re.M)) + '\n'
+
+
+cfgs = {False: config('pjazpaql.inc'), True: config('pjalszpaql.inc')}
 segdir, jpegs = sys.argv[1], sys.argv[2:]
 fails = 0
 for j in jpegs:
@@ -27,7 +34,7 @@ for j in jpegs:
         ph = int(open(os.path.join(segdir, os.path.splitext(os.path.basename(j))[0] + '.args')).read())
         if ph < 0:
             raise RuntimeError('the query refused it')
-        out, steps, size = zpaqlvm.run_config(cfg, seg, [math.ceil(math.log2(len(seg))), math.ceil(math.log2(len(want))), ph])
+        out, steps, size = zpaqlvm.run_config(cfgs[j.lower().endswith('.jls')], seg, [math.ceil(math.log2(len(seg))), math.ceil(math.log2(len(want))), ph])
         ok = out == want
     except Exception as e:
         ok = False; out = b''

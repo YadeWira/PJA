@@ -621,3 +621,28 @@ restarts, 4:2:0, 4:2:2, 4:4:4, gray, CMYK) and 640 generated ones of every
 kind, every block given to the plugin was decoded by the ZPAQL as by the
 plugin, 0 wrong; plain zpaq 7.15 gave back all 244 and all 652 files.
 
+Stage 4 (23/10/2026): JPEG-LS, as a second codec in the same plugin,
+`pjals`, with a decoder of its own (`jls.zl`, 55,459 bytes of ZPAQL),
+since `pja`'s had no room left. It shares the head stream, the coder and
+the mixers with `pja`'s; the compiler now leaves out of each program what
+its `main()` does not reach. Ported line by line: the JPEG-LS headers
+(presets, restart intervals of 2 to 4 bytes), both models (the samples
+with their bands and the near-lossless run lengths, and the symbols with
+CALIC's GAP and its texture contexts), and pjajls's state machine twice
+over: driving the symbols model to decode, and writing a scan's bits from
+the samples, CharLS's bit stuffing and padding included. Its memory comes
+from a query of its own: the samples, the line buffers and either model,
+and for the symbols model on a near-lossless scan room for one run length
+a line and component, since the stream does not say how many. The
+plugin's detection asks that the file fit with either model, as compress()
+keeps whichever is smaller. With libzpaq (the engine of zpaq 7.15), every
+file of four sets came back byte for byte: the 8 suite samples, 65
+CharLS files of every bit depth, interleave and NEAR from 1x1 to 333x7,
+16 photos and 8 real test images, and, from 33 lossless ones, variants
+with restarts every 1 and every 5 lines, each with both models forced
+(282 decodes, 0 wrong). On zpaq-std's test build, with JPEGs and JPEG-LS
+files in one archive (`-sat:pja:pja+2:pjals+2`), every block given to
+`pjals` was ZPAQL OK, and plain zpaq 7.15 gave back all 104 files. The
+ZPAQL decodes about 6 times slower than the plugin (16.7 s against 2.7 s
+for a photo of 1.4 MB).
+

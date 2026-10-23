@@ -24,3 +24,10 @@ at 16, 12 and 2 bits, colour at 16 bits (ImageMagick wrote the
 intermediate files at 16 bits, so `gray8*.jls` are 16-bit too), lossless
 and NEAR 1 to 3, the three interleave modes, and one with custom
 thresholds.
+
+`plasma17x13_*.jls`: a 17x13 colour plasma (ImageMagick, `-seed 7`, 8
+bits) encoded with CharLS 2.4: NEAR 1 with sample interleave, and lossless
+with line interleave given a restart interval of 4 lines (CharLS 2.4
+writes none: PJA's own JPEG-LS encoder, pjajls.RecomposeJls, rebuilt it
+with a DRI segment, and checked it decodes back). Small enough for the
+ZPAQL decoder's test in the Python interpreter.

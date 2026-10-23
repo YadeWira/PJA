@@ -78,21 +78,23 @@ at all. The 32-bit build's speed is not measured yet.
 as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
 (codecs for specific formats), on its plugin ABI 1: `pas/plugin/build.sh
 DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
-`pja.dll`, to go in zpaq-std's `codecs/` folder. It detects JPEG and JPEG-LS
-files by their bytes, writes the full-model stream (`pja stream v5 full`),
-and leaves verification to zpaq-std, which decodes every block before
-writing it. Every block also carries PJA's decoder in ZPAQL, so that any
-zpaq reads the archive without the plugin: it is compiled from
-`pas/plugin/zpaql/` with `tools/zpaql/` (61,764 bytes of ZPAQL), and covers
-every JPEG PJA handles, Huffman or arithmetic, sequential or progressive,
-which is all the plugin takes for now (JPEG-LS comes next).
+`pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds two
+codecs: `pja` for JPEG and `pjals` for JPEG-LS. Each detects its files by
+their bytes, writes the full-model stream (`pja stream v5 full`), and
+leaves verification to zpaq-std, which decodes every block before writing
+it. Every block also carries the codec's decoder in ZPAQL, so that any
+zpaq reads the archive without the plugin. Both decoders are compiled from
+`pas/plugin/zpaql/` with `tools/zpaql/`: `pja`'s (61,764 bytes of ZPAQL)
+covers every JPEG PJA handles, Huffman or arithmetic, sequential or
+progressive; `pjals`'s (55,459 bytes) covers every JPEG-LS file PJA
+handles, with either of its two models.
 Its memory is sized for each block: the plugin tells zpaq-std how much
 the decoder will need for that file (2 MB for a small one, 16 MB for a
 photo of 200 KB, at most 256 MB).
-Checked on 22/10/2026 with zpaq-std 1.4.0 on Linux and on Windows 10 (64
-and 32 bits): every block decoded by the ZPAQL as by the plugin (134 of
-the 151 photos, 56 files of the corpus; the rest progressive), and every
-file back without the plugin.
+Checked with zpaq-std's test build on Linux and on Windows 10 (64 and 32
+bits): every block decoded by the ZPAQL as by the plugin, and every file
+back without the plugin, plain zpaq 7.15 included (doc/CODEC.md has the
+sets).
 
 ## Layout
 

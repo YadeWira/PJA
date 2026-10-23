@@ -37,6 +37,8 @@ echo "== the zpaq-std plugin's ZPAQL decoder"
 python3 "$PJA/tools/zpaql/gen_pjadec.py" --check
 rm -rf "$OUT/zpaql"; mkdir -p "$OUT/zpaql"
 ZS=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/solid_color.jpg" "$PJA/tests/jpg/prog_huffman.jpg"
-    "$PJA/tests/jpg/arith_restart.jpg")
+    "$PJA/tests/jpg/arith_restart.jpg"
+    "$PJA/tests/jls/gray2.jls" "$PJA/tests/jls/plasma17x13_sample_near1.jls"
+    "$PJA/tests/jls/plasma17x13_line_rst4.jls")
 "$OUT/zpaql_segments" "$OUT/zpaql" "${ZS[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" "$OUT/zpaql" "${ZS[@]}" | tail -1

@@ -9,9 +9,10 @@ unit pjazpaqlargs;
 
 interface
 
-uses SysUtils, pjajpeg, pjacodec, pjamodel;
+uses SysUtils, pjajpeg, pjajls, pjacodec, pjamodel;
 
 {$I pjazpaql.inc}
+{$I pjalszpaql.inc}
 
 const
   { the largest H a block may ask for: 2^26 words, 256 MB }
@@ -24,6 +25,11 @@ function ZpaqlWords(const j: TJpeg): Int64;
 function ZpaqlPh(const j: TJpeg): Integer;
 { For a PJA stream (compress()'s output): $3 in bits 0-7, or -1. }
 function ZpaqlArgs(const stream: TBytes): Int64;
+{ The same three for the JPEG-LS decoder (pjals), symbols: the stream uses
+  the symbols model. }
+function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;
+function ZpaqlJlsPh(const jl: TJls; symbols: Boolean): Integer;
+function ZpaqlJlsArgs(const stream: TBytes): Int64;
 
 implementation
 
@@ -59,17 +65,23 @@ begin
   end;
 end;
 
-function ZpaqlWords(const j: TJpeg): Int64;
-var c, bits: Integer; maxbw: SizeInt; n: Int64;
+{ coderaw: the raw bytes, its order-2 map or table, its mixer }
+function RawWords(n: Int64): Int64;
+var bits: Integer;
 begin
-  n := Length(j.raw);
-  Result := ZPAQL_STATIC_WORDS + n + 4;
+  Result := n + 4;
   { o2init: a map of 2^(bits+1) words, or the table of 2^O2_BITS }
   bits := 1;
   while (Int64(1) shl bits) < 16 * n do Inc(bits);
   if bits + 1 >= O2_TABLE_BITS then Inc(Result, Int64(1) shl O2_TABLE_BITS)
   else Inc(Result, Int64(2) shl bits);
-  Inc(Result, 12 + 8 * 8);                         { the raw model's mixer }
+  Inc(Result, 12 + 8 * 8);
+end;
+
+function ZpaqlWords(const j: TJpeg): Int64;
+var c: Integer; maxbw: SizeInt;
+begin
+  Result := ZPAQL_STATIC_WORDS + RawWords(Length(j.raw));
   Inc(Result, DhtTables(j.raw) * 512);
   maxbw := 0;
   for c := 0 to High(j.comp) do begin
@@ -81,12 +93,15 @@ begin
   Inc(Result, Int64(BandCount(j)) * 2 * ZPAQL_MODEL_WORDS);
 end;
 
-function ZpaqlPh(const j: TJpeg): Integer;
-var w: Int64;
+function Log2Words(w: Int64): Integer;
 begin
-  w := ZpaqlWords(j);
   Result := 0;
   while (Int64(1) shl Result) < w do Inc(Result);
+end;
+
+function ZpaqlPh(const j: TJpeg): Integer;
+begin
+  Result := Log2Words(ZpaqlWords(j));
 end;
 
 function ZpaqlArgs(const stream: TBytes): Int64;
@@ -96,6 +111,51 @@ begin
   try
     if not StreamHeaders(stream, j).Ok then Exit;
     ph := ZpaqlPh(j);
+    if ph > ZPAQL_MAX_PH then Exit;
+    Result := ph;
+  except
+    Result := -1;
+  end;
+end;
+
+function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;
+var c, s, n: Integer; w, samples: Int64;
+begin
+  w := jl.width;
+  samples := w * jl.height;
+  n := Length(jl.comp);
+  Result := ZPAQL_LS_STATIC_WORDS + RawWords(Length(jl.raw));
+  Inc(Result, samples * n);                        { the samples }
+  Inc(Result, 8 * (w + 2));                        { the scan's two lines }
+  if symbols then begin
+    Inc(Result, ZPAQL_LS_SYM_WORDS);
+    for s := 0 to High(jl.scans) do begin
+      c := jl.scans[s].ncomp;
+      Inc(Result, Int64(c) * (2 * (w + 2) + 3 * (w + 4)));
+      { near-lossless: the runs it records, at most one a line and component }
+      if jl.scans[s].near > 0 then
+        if jl.scans[s].ilv = 2 then Inc(Result, samples) else Inc(Result, samples * c);
+    end;
+  end else begin
+    Inc(Result, 32 + 32 * 32);
+    for s := 0 to High(jl.scans) do
+      if jl.scans[s].near > 0 then Inc(Result, Length(jl.scans[s].runs) + 1);
+    Inc(Result, Int64(JlsBandCount(jl)) * (ZPAQL_LS_BAND_WORDS + 2 * w * n));
+  end;
+end;
+
+function ZpaqlJlsPh(const jl: TJls; symbols: Boolean): Integer;
+begin
+  Result := Log2Words(ZpaqlJlsWords(jl, symbols));
+end;
+
+function ZpaqlJlsArgs(const stream: TBytes): Int64;
+var jl: TJls; symbols: Boolean; ph: Integer;
+begin
+  Result := -1;
+  try
+    if not StreamJlsHeaders(stream, jl, symbols).Ok then Exit;
+    ph := ZpaqlJlsPh(jl, symbols);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
   except

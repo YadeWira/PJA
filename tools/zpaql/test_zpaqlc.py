@@ -250,6 +250,24 @@ def main():
 '''
 check('heap after every array', run(src), bytes([70, 99, 1]))
 
+# only what main reaches is compiled: an unused function and table cost nothing
+base_src = '''
+def used(x):
+    return x + 1
+def main():
+    out(used(4))
+'''
+extra = base_src + '''
+big = table([%s])
+def unused(x):
+    for i in range(1000):
+        x = x * 3 + big[i]
+    return x
+''' % ', '.join(str(i) for i in range(1000))
+c1 = zpaqlc.compile_source(base_src, 'test', '16', '16')
+c2 = zpaqlc.compile_source(extra, 'test', '16', '16')
+check('unreachable code and tables left out', bytes([c1[1] == c2[1]]) + run(extra), bytes([1, 5]))
+
 # tables: words set at the start
 src = '''
 t = table([1, 300, 70000, 4294967295, 0, 255])

@@ -769,8 +769,25 @@ class Compiler:
             a.jmp('jt', site)
         a.op('error')     # an unknown call site
 
+    def reachable(self):
+        """The functions main() can call, and every name their bodies use:
+        nothing else is compiled, placed in H or initialized, so one source
+        can hold what several programs share."""
+        reach, todo, names = {'main'}, ['main'], set()
+        while todo:
+            f = self.funcs[todo.pop()]
+            for n in ast.walk(f.node):
+                if isinstance(n, ast.Name):
+                    names.add(n.id)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.funcs \
+                        and n.func.id not in reach:
+                    reach.add(n.func.id); todo.append(n.func.id)
+        return reach, names
+
     def program(self):
         a = self.asm
+        reach, used = self.reachable()
+        self.funcs = {n: f for n, f in self.funcs.items() if n in reach}
         for f in self.funcs.values():
             self.frame(f)
         # every byte: into M; the end (A > 255): set up and run main
@@ -784,11 +801,15 @@ class Compiler:
                 self.const_a(v); self.store_a(self.globals[name])
         base = Alloc.HVARS           # arrays after the variables' region
         for name in self.arr_order:
+            if name not in used and name != self.heap:
+                continue
             slot, size = self.arrays[name]
             self.const_a(base); self.store_a(slot)
             base += size
         self.hwords = base
         for name, vals in self.tables.items():
+            if name not in used:
+                continue
             self.load_a(self.arrays[name][0]); a.op('d=a')
             for v in vals:
                 self.const_a(v); a.op('*d=a'); a.op('d++')
