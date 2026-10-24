@@ -108,6 +108,10 @@ type
       (2 shl r) - 1 for its largest EOBr symbol; 32767 with a full table }
     maxEob: Integer;
     padbit: Integer;
+    { a DRI in force, but the scan has no restart markers: an encoder that
+      wrote the DRI and then coded as if there were none (ri is 0 then).
+      ParseHeaders cannot tell it from the raw bytes: the caller says it }
+    ignoreRi: Boolean;
     cut: SizeInt;                    { where in TJpeg.raw its data goes }
   end;
 
@@ -153,6 +157,8 @@ function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
   several angles). Ultra HDR and depth maps hang a second image off a JPEG
   with the same index but no such class: those stay JPEGs. }
 function IsMpo(const data: TBytes): Boolean;
+{ Some scan with a DRI in force and no restarts (TScan.ignoreRi) }
+function HasIgnoredRestarts(const j: TJpeg): Boolean;
 { A bit per coefficient of a block of 64 (zigzag order), set where it is
   not zero. }
 function NonzeroMask(cf: PSmallInt): QWord;
@@ -1949,7 +1955,7 @@ end;
 
 function Parse(const data: TBytes; decode: Boolean; out j: TJpeg): TJpegResult;
 var p, first, last, copied, seglen: SizeInt; m: Byte; hs: THuffState; ri, i: Integer;
-    haveFrame: Boolean; e: TJpegError; s: TScan; rawOut: TBitWriter; ac: TArithCond;
+    haveFrame: Boolean; e: TJpegError; s, s2: TScan; rawOut: TBitWriter; ac: TArithCond; r2: TJpegResult;
 
   procedure CopyUpTo(upto: SizeInt);
   begin rawOut.CopyFrom(data, copied, upto); copied := upto; end;
@@ -2021,6 +2027,21 @@ begin
                if j.lossless then Result := DecodeScanLossless(data, last, j, s, copied)
                else if j.arithmetic then Result := DecodeScanArith(data, last, j, s, copied)
                else Result := DecodeScan(data, last, j, s, copied);
+               { an encoder that wrote a DRI and no RST: a sequential
+                 Huffman or lossless scan read again as if without
+                 restarts, from cleared coefficients (the first try wrote
+                 some). Progressive and arithmetic scans are not tried }
+               if not Result.Ok and (s.ri > 0) and not j.progressive and not j.arithmetic then begin
+                 for i := 0 to s.ncomp - 1 do
+                   with j.comp[s.comp[i]] do begin
+                     if Length(coef) > 0 then FillChar(coef[0], Length(coef) * SizeOf(SmallInt), 0);
+                     if Length(samples) > 0 then FillChar(samples[0], Length(samples) * SizeOf(Word), 0);
+                   end;
+                 s2 := s; s2.ri := 0;
+                 if j.lossless then r2 := DecodeScanLossless(data, last, j, s2, copied)
+                 else r2 := DecodeScan(data, last, j, s2, copied);
+                 if r2.Ok then begin s := s2; s.ignoreRi := True; Result := r2; end;
+               end;
                if not Result.Ok then Exit;
              end;
              SetLength(j.scans, Length(j.scans) + 1);
@@ -2082,6 +2103,13 @@ begin
 end;
 
 {$ifdef PJA_FAST}{$pop}{$endif}
+function HasIgnoredRestarts(const j: TJpeg): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  for i := 0 to High(j.scans) do if j.scans[i].ignoreRi then Exit(True);
+end;
+
 function IsMpo(const data: TBytes): Boolean;
 var p, t, ifd, e, n, k, i, off, cnt, images: SizeInt; le: Boolean; m: Byte;
 

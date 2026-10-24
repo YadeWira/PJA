@@ -23,6 +23,7 @@ flip every bit of them.
 | `lossless16_p7_pt5.jpg` | an 80x48 gray plasma (`-seed 62`, 16-bit PGM) → `cjpeg -precision 16 -lossless 7,5`: 16 bits, predictor 7, point transform 5 |
 | `lossless_restart.jpg` | the same at 8 bits → `cjpeg -lossless 4 -restart 3 -grayscale`: a restart every 3 lines |
 | `dnl_baseline.jpg`, `dnl_progressive.jpg`, `dnl_lossless.jpg` | `baseline_color.jpg`, `prog_huffman.jpg` and `lossless_restart.jpg` with the frame's height set to 0 and a DNL segment giving it right after the first scan (B.2.5), which no common encoder writes (libjpeg reads none either) |
+| `dri_no_restarts.jpg` | `color_plasma.jpg` with a DRI segment (an interval of 5 MCUs) and no restart marker in its scan, as some cameras' encoders wrote them (two such files in the corpus): the scan is coded as if there were none |
 | `thumbs_twice.jpg` | a 320x240 plasma (`-seed 31`, `cjpeg -quality 85`) with the same image at 96x72 (`cjpeg -quality 75`) as a thumbnail twice, in an APP1 and in an APP2, as some cameras write it |
 | `two_images.jpg` | the same with the thumbnail once, and a second image after its EOI, a 240x160 plasma (`-seed 32`, `cjpeg -quality 80`), as an MPO has it |
 

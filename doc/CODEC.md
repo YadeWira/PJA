@@ -808,3 +808,33 @@ it (CharLS refuses it) and no file in the test sets has it.
 
 The zpaq-std plugin refuses both, its ZPAQL frozen as v0.0.1 left it.
 
+## Encoder quirks, and the rest as bytes (23/10/2026)
+
+The two files of the 78-file corpus PJA still refused had the same
+quirk: a DRI segment (an interval of 60 and of 34 MCUs) and not one
+restart marker in the scan. Their encoder wrote the DRI and coded as if
+there were none; libjpeg reads the first interval and throws the rest
+away ("extraneous bytes before marker 0xd9"). A patch of differences, as
+first planned, cannot hold this: coding the scan with its restarts shifts
+every bit after the first, and the patch would be the file. So the quirk
+is said instead. pjajpeg reads a sequential Huffman or lossless scan that
+fails with its DRI once more without it, from cleared coefficients, and
+marks it (TScan.ignoreRi); the raw bytes keep the DRI. Stream version 6
+carries the list of such scans (QUIRKS), which the decoder applies to the
+host before rebuilding it; version 5 has no room for it, so the zpaq-std
+plugin, which writes version 5 only, refuses these files. The two files:
+77.3% and 80.0%, and the corpus is taken whole, 78 of 78.
+
+Anything else that starts like a JPEG (FF D8) and that PJA does not take
+goes through the raw bytes' model (version 6, BYTES), with the reason
+kept and shown: `a` prints `(as bytes: Truncated@9000)` for a JPEG cut
+short, which comes out at 98.97% where xz -9e makes it larger. A file the
+model does not shrink either is stored as it is, as before. A file that
+does not start like a JPEG is still refused.
+
+With parts, the host's stream is now the host's header stream and the
+file's bands, coded once (a host with quirks cannot go through
+CompressOne, which writes version 5): the same streams as before. 614
+streams of every set compared with the previous build: the same bytes,
+and two new, the corpus' two files.
+

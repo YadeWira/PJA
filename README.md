@@ -47,13 +47,15 @@ in 17.9 s and 8.2 s.
 What it handles: baseline, extended and progressive JPEG with Huffman or
 arithmetic coding, 8 and 12 bits, any subsampling, restart markers, and the
 oddities real encoders leave (extra restart markers, EOB runs cut by the
-table, data after the end); the JPEGs inside a JPEG (thumbnails, the
+table, data after the end, a DRI with no restart markers); the JPEGs inside a JPEG (thumbnails, the
 further images of an MPO, Ultra HDR gain maps), each compressed as a JPEG
 of its own; lossless JPEG (SOF3) from 2 to 16 bits, every predictor, point
 transforms and restarts; the height given by a DNL segment; JPEG-LS from
 2 to 16 bits, lossless and near-lossless, every interleave mode, and
 subsampled components (no interleave, or line interleave without
-restarts). What it refuses, with the reason: hierarchical JPEG, lossless
+restarts). Anything else that starts like a JPEG
+goes through the raw bytes' model, and `a` says why (`as bytes: ...`). As
+JPEGs it does not take: hierarchical JPEG, lossless
 JPEG with arithmetic coding (SOF11) or subsampled components, and JPEG-LS
 with a point transform or with subsampled components in sample
 interleave.

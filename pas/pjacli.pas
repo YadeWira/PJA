@@ -298,6 +298,12 @@ begin
   if (Length(pja) > 5) and ((pja[5] and FLAG_STORED) <> 0) then Result := '  (stored as is)' else Result := '';
 end;
 
+{ PJA did not take it as a JPEG, and it went as bytes: why }
+function BytesNote(const r: TPackResult): string;
+begin
+  if r.codec.asBytes then Result := '  (as bytes: ' + r.codec.jpeg.Text + ')' else Result := '';
+end;
+
 procedure CompressOne(const f: string);
 var d, pja: TBytes; r: TPackResult; path: string;
 begin
@@ -311,7 +317,7 @@ begin
     Say(f + ' -> ' + path + '  ' + Human(Length(d)) + ' -> ' + Human(Length(pja)) +
         Format('  %.2f%%', [100 * Length(pja) / Length(d)]) +
         { the codec would not have made it smaller }
-        StoredNote(pja));
+        StoredNote(pja) + BytesNote(r));
 end;
 
 procedure ExtractOne(const f: string);

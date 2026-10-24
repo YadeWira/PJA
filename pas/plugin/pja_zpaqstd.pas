@@ -202,10 +202,12 @@ begin
   try
     if StrComp(codecName, 'pja') = 0 then begin
       d := Bytes(src, n);
-      { 8-bit DCT with its height in the frame: the ZPAQL decoder is frozen
-        as v0.0.1 left it, which had neither 12-bit nor lossless JPEG nor DNL }
+      { 8-bit DCT with its height in the frame and its restarts where its DRI
+        says: the ZPAQL decoder is frozen as v0.0.1 left it, which had
+        neither 12-bit nor lossless JPEG nor DNL nor ignored DRIs }
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         (j.precision = 8) and not j.lossless and not j.dnl and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+         (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and
+         (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);
