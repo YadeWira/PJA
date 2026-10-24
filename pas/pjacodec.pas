@@ -267,6 +267,8 @@ begin
   SetLength(jl.comp, Length(j.comp));
   for c := 0 to High(j.comp) do begin
     jl.comp[c].id := j.comp[c].id;
+    jl.comp[c].h := 1; jl.comp[c].v := 1;
+    jl.comp[c].width := j.width; jl.comp[c].height := j.height;
     jl.comp[c].samples := j.comp[c].samples;
   end;
 end;

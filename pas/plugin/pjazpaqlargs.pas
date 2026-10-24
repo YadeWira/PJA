@@ -30,6 +30,9 @@ function ZpaqlArgs(const stream: TBytes): Int64;
 function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;
 function ZpaqlJlsPh(const jl: TJls; symbols: Boolean): Integer;
 function ZpaqlJlsArgs(const stream: TBytes): Int64;
+{ Sampling factors other than 1x1: the pjals ZPAQL, frozen as v0.0.1 left
+  it, has no subsampled JPEG-LS }
+function JlsSubsampled(const jl: TJls): Boolean;
 
 implementation
 
@@ -109,14 +112,22 @@ var j: TJpeg; ph: Integer;
 begin
   Result := -1;
   try
-    { the decoder takes 8-bit DCT JPEGs only }
-    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless then Exit;
+    { the decoder takes 8-bit DCT JPEGs with their height in the frame only }
+    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl then Exit;
     ph := ZpaqlPh(j);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
   except
     Result := -1;
   end;
+end;
+
+function JlsSubsampled(const jl: TJls): Boolean;
+var c: Integer;
+begin
+  Result := False;
+  for c := 0 to High(jl.comp) do
+    if (jl.comp[c].h <> 1) or (jl.comp[c].v <> 1) then Exit(True);
 end;
 
 function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;
@@ -155,7 +166,7 @@ var jl: TJls; symbols: Boolean; ph: Integer;
 begin
   Result := -1;
   try
-    if not StreamJlsHeaders(stream, jl, symbols).Ok then Exit;
+    if not StreamJlsHeaders(stream, jl, symbols).Ok or JlsSubsampled(jl) then Exit;
     ph := ZpaqlJlsPh(jl, symbols);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;

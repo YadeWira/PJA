@@ -50,11 +50,13 @@ oddities real encoders leave (extra restart markers, EOB runs cut by the
 table, data after the end); the JPEGs inside a JPEG (thumbnails, the
 further images of an MPO, Ultra HDR gain maps), each compressed as a JPEG
 of its own; lossless JPEG (SOF3) from 2 to 16 bits, every predictor, point
-transforms and restarts; JPEG-LS from 2 to 16 bits, lossless and
-near-lossless, every interleave mode. What it refuses, with the reason:
-hierarchical JPEG, lossless JPEG with arithmetic coding (SOF11) or
-subsampled components, and JPEG-LS with subsampled components or a point
-transform.
+transforms and restarts; the height given by a DNL segment; JPEG-LS from
+2 to 16 bits, lossless and near-lossless, every interleave mode, and
+subsampled components (no interleave, or line interleave without
+restarts). What it refuses, with the reason: hierarchical JPEG, lossless
+JPEG with arithmetic coding (SOF11) or subsampled components, and JPEG-LS
+with a point transform or with subsampled components in sample
+interleave.
 
 ## Building
 

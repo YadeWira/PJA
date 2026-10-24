@@ -1268,9 +1268,10 @@ begin
 end;
 
 function JlsBandCount(const j: TJls): Integer;
-var total: Int64;
+var total: Int64; c: Integer;
 begin
-  total := Int64(j.width) * j.height * Length(j.comp);
+  total := 0;
+  for c := 0 to High(j.comp) do Inc(total, Int64(j.comp[c].width) * j.comp[c].height);
   Result := Integer(total div JLS_BAND_SAMPLES);
   if Result > MAX_BANDS then Result := MAX_BANDS;
   if Result > j.height then Result := j.height;
@@ -1299,7 +1300,8 @@ end;
 
 function CodeJlsBand(var cd: TCoder; var j: TJls; band: Integer): Boolean;
 var m: TJlsModel; nb, ci, cls, i, maxv, range, half, t1, t2, t3, a, b, c, d, ctx, sgn, px, x, e, v, ex, k,
-    bit, act, nbb, first, bi: Integer; y, y0, y1, base, w: SizeInt; haveUp: Boolean;
+    bit, act, nbb, first, bi: Integer; y, y0, y1, base, w, r, nr: SizeInt; haveUp, sub: Boolean;
+    rowC: array of Integer; rowY, firstRow: array of SizeInt;
     res: array of array of Integer;       { [component] this row's residuals }
     resUp: array of array of Integer;     { [component] the row above's }
     t: array of Integer;
@@ -1307,19 +1309,40 @@ var m: TJlsModel; nb, ci, cls, i, maxv, range, half, t1, t2, t3, a, b, c, d, ctx
 begin
   nb := JlsBandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
-  y0 := SizeInt(j.height) * band div nb; y1 := SizeInt(j.height) * (band + 1) div nb;
-  w := j.width;
   maxv := (1 shl j.bits) - 1; range := maxv + 1; half := (maxv + 1) div 2;
   DefaultThresholds(maxv, 0, t1, t2, t3);
   m.Init;
+  { subsampled: a component of another size than the frame's }
+  sub := False;
+  for ci := 0 to High(j.comp) do
+    if (j.comp[ci].width <> j.width) or (j.comp[ci].height <> j.height) then sub := True;
   res := nil; resUp := nil;
   SetLength(res, Length(j.comp)); SetLength(resUp, Length(j.comp));
   for ci := 0 to High(j.comp) do begin
-    SetLength(res[ci], w); SetLength(resUp[ci], w);
+    SetLength(res[ci], j.comp[ci].width); SetLength(resUp[ci], j.comp[ci].width);
   end;
-  for y := y0 to y1 - 1 do begin
-    haveUp := y > y0;
-    for ci := 0 to High(j.comp) do begin
+  { the band's rows, in coding order: line by line through the components;
+    subsampled, each component's own rows of the band, one component after
+    the other }
+  rowC := nil; rowY := nil; nr := 0;
+  for ci := 0 to High(j.comp) do Inc(nr, j.comp[ci].height * (band + 1) div nb - j.comp[ci].height * band div nb);
+  SetLength(rowC, nr); SetLength(rowY, nr); SetLength(firstRow, Length(j.comp));
+  for ci := 0 to High(j.comp) do firstRow[ci] := SizeInt(j.comp[ci].height) * band div nb;
+  r := 0;
+  if not sub then begin
+    y0 := SizeInt(j.height) * band div nb; y1 := SizeInt(j.height) * (band + 1) div nb;
+    for y := y0 to y1 - 1 do
+      for ci := 0 to High(j.comp) do begin rowC[r] := ci; rowY[r] := y; Inc(r); end;
+  end else
+    for ci := 0 to High(j.comp) do
+      for y := firstRow[ci] to SizeInt(j.comp[ci].height) * (band + 1) div nb - 1 do begin
+        rowC[r] := ci; rowY[r] := y; Inc(r);
+      end;
+  for r := 0 to nr - 1 do begin
+    ci := rowC[r]; y := rowY[r];
+    w := j.comp[ci].width;
+    haveUp := y > firstRow[ci];
+    begin
       t := res[ci]; res[ci] := resUp[ci]; resUp[ci] := t;
       if ci = 0 then cls := 0 else cls := 1;
       base := y * w;
@@ -1347,7 +1370,8 @@ begin
         if i > 0 then Inc(nbb, Abs(res[ci][i - 1]));
         if haveUp then Inc(nbb, Abs(resUp[ci][i]));
         nbb := Clip(FineLog(nbb), JLS_NB - 1);
-        if ci > 0 then first := Clip(FineLog(res[0][i]), JLS_FIRST - 2) else first := JLS_FIRST - 1;
+        { the first component's residual at this column, when it has one }
+        if (ci > 0) and not sub then first := Clip(FineLog(res[0][i]), JLS_FIRST - 2) else first := JLS_FIRST - 1;
         bi := cls * JLS_ACT + act;
         { zero or not }
         bit := CodeMix(cd, m.mxZ, bi, m.z1[bi], m.z2[cls * JLS_CTX + ctx],
@@ -1474,9 +1498,13 @@ type
     { [component] the sample just coded in regular mode: its texture
       context and prediction, to learn from the sample when it comes }
     pendTex, pendP, pendP2: array[0..3] of Integer;
-    w, near, maxval, scale: Integer;
+    near, maxval, scale: Integer;
+    { [component] its width; and whether it is the first's (its value at
+      the same column is a context then: not with subsampling) }
+    wc: array[0..3] of Integer;
+    sameAsFirst: array[0..3] of Boolean;
     constructor Create(var coder: TCoder);
-    procedure BeginScan(const s: TJlsScan; width: Integer); override;
+    procedure BeginScan(const s: TJlsScan; const j: TJls); override;
     function Mapped(m, c, i, k, ctx, px, sgn: Integer; inv: Boolean; out v: Integer): Boolean; override;
     procedure Sample(c, i, x: Integer); override;
     function RunBit(bit, c, i, runIndex: Integer): Integer; override;
@@ -1505,14 +1533,19 @@ begin
   for k := 0 to SYM_TEX - 1 do begin biasSum[k] := 0; biasN[k] := 1; end;
 end;
 
-procedure TJlsSymModel.BeginScan(const s: TJlsScan; width: Integer);
-var c, l: Integer;
+procedure TJlsSymModel.BeginScan(const s: TJlsScan; const j: TJls);
+var c, l, width: Integer;
 begin
-  w := width; near := s.near; maxval := s.maxval;
+  near := s.near; maxval := s.maxval;
   { the gradient thresholds below are for 8 bits }
   scale := Max(1, (maxval + 1) div 256);
   for c := 0 to 3 do begin
     vals[c] := nil; errs[c] := nil;
+    width := 0;
+    if c < s.ncomp then width := j.comp[s.comp[c]].width;
+    wc[c] := width;
+    sameAsFirst[c] := (c < s.ncomp) and (j.comp[s.comp[c]].width = j.comp[s.comp[0]].width) and
+                      (j.comp[s.comp[c]].height = j.comp[s.comp[0]].height);
     if c < s.ncomp then begin SetLength(vals[c], width + 2); SetLength(errs[c], width + 2); end;
     for l := 0 to 2 do begin
       lines[c, l] := nil;
@@ -1571,7 +1604,7 @@ begin
   row := vals[c];
   { left, above, above right: the line above is still there right of i }
   nb := Clip(FineLog(Int64(row[i]) + row[i + 1] + row[i + 2] div 2), SYM_NB - 1);
-  if c > 0 then x := Clip(FineLog(vals[0][i + 1]), SYM_X - 2) else x := SYM_X - 1;
+  if (c > 0) and sameAsFirst[c] then x := Clip(FineLog(vals[0][i + 1]), SYM_X - 2) else x := SYM_X - 1;
   q := 2 * near + 1;
   { a second prediction, CALIC's GAP with its error feedback, and the
     mapped value JPEG-LS would see if it were right }
@@ -1648,7 +1681,7 @@ function TJlsSymModel.RunBit(bit, c, i, runIndex: Integer): Integer;
 var above: Integer;
 begin
   { what the line above had at this column: a run (0) or how much }
-  if i < w then above := Clip(FineLog(vals[c][i + 1]), 7) else above := 0;
+  if i < wc[c] then above := Clip(FineLog(vals[c][i + 1]), 7) else above := 0;
   Result := cd^.Code(rb[(Min(c, 1) * 32 + runIndex) * 8 + above], bit);
 end;
 

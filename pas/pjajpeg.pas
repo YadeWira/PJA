@@ -117,6 +117,9 @@ type
     { lossless JPEG (SOF3, Annex H): samples, not coefficients; each scan's
       ss is its predictor and al its point transform, the same in all }
     lossless: Boolean;
+    { the frame's height is 0, and a DNL segment after the first scan
+      gives it }
+    dnl: Boolean;
     progressive: Boolean;
     arithmetic: Boolean;
     comp: array of TComponent;
@@ -1678,7 +1681,7 @@ begin
 end;
 
 function ReadSof(const d: TBytes; p, last: SizeInt; var j: TJpeg): TJpegError;
-var nf, i, k: Integer; blocks: Int64;
+var nf, i, k: Integer; blocks: Int64; q: SizeInt;
 begin
   if last - p < 6 then Exit(jeBadSof);
   if j.lossless then begin
@@ -1687,7 +1690,17 @@ begin
     if (d[p] <> 8) and (d[p] <> 12) then Exit(jeUnsupported);
   j.precision := d[p];
   j.height := U16(d, p + 1); j.width := U16(d, p + 3); nf := d[p + 5];
-  if j.height = 0 then Exit(jeUnsupported);   { height in a DNL }
+  if j.height = 0 then begin
+    { the height comes in a DNL after the first scan (B.2.5): found ahead,
+      since no FF D C can be inside entropy-coded data, where FF is followed
+      by 00 or a restart marker }
+    q := last;
+    while (q + 6 <= Length(d)) and not ((d[q] = $FF) and (d[q + 1] = $DC) and (U16(d, q + 2) = 4)) do Inc(q);
+    if q + 6 > Length(d) then Exit(jeBadSof);
+    j.height := U16(d, q + 4);
+    if j.height = 0 then Exit(jeBadSof);
+    j.dnl := True;
+  end;
   if (j.width = 0) or (nf < 1) or (nf > 4) or (last - p <> 6 + 3 * nf) then Exit(jeBadSof);
   SetLength(j.comp, nf);
   j.hmax := 1; j.vmax := 1;
@@ -1975,6 +1988,12 @@ begin
              if seglen <> 4 then Exit(Fail(jeBadDri, first));
              ri := U16(data, first);
            end;
+      $DC: begin
+             { DNL: only where the frame left its height to it, after the
+               first scan, and saying the height read ahead }
+             if not j.dnl or (Length(j.scans) <> 1) or (seglen <> 4) or (U16(data, first) <> j.height) then
+               Exit(Fail(jeUnexpectedMarker, p - 1, m));
+           end;
       $C0, $C1, $C2, $C9, $CA, $C3: begin
              if haveFrame then Exit(Fail(jeRepeatedSof, p - 1));
              j.lossless := m = $C3;
@@ -1986,7 +2005,7 @@ begin
            end;
       $CC: if not ReadDac(data, first, last, ac) then Exit(Fail(jeBadDac, first));
       { JPEG-LS is $F7; $CB lossless with arithmetic coding }
-      $C5..$C7, $CB, $CD..$CF, $DC, $DE, $DF, $F7:
+      $C5..$C7, $CB, $CD..$CF, $DE, $DF, $F7:
            Exit(Fail(jeUnsupported, p - 1, m));
       $DA: begin
              if not haveFrame then Exit(Fail(jeUnexpectedMarker, p - 1, m));

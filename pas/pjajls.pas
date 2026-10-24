@@ -35,6 +35,10 @@ const
 type
   TJlsComponent = record
     id: Byte;
+    { sampling factors, and the component's own size (T.87 A.2:
+      ceil(X * h / hmax) by ceil(Y * v / vmax), the frame's when nothing is
+      subsampled) }
+    h, v, width, height: Integer;
     samples: array of Word;      { width * height, row by row }
   end;
 
@@ -66,7 +70,7 @@ type
     encoding and returns it; when decoding it ignores it and returns the
     value it decodes. c is the component's place in the scan, i the column. }
   TJlsSymbols = class
-    procedure BeginScan(const s: TJlsScan; width: Integer); virtual; abstract;
+    procedure BeginScan(const s: TJlsScan; const j: TJls); virtual; abstract;
     { A mapped error value (A.5.2 and A.7.2.1): ctx is the regular context
       (1..364), or 365 + the run context of an interruption sample (0, 1).
       k is the Golomb parameter JPEG-LS would use; the error is
@@ -424,6 +428,7 @@ type
   TScanState = record
     cd: TJlsCoder;
     width: Integer;
+    cw: array[0..3] of Integer;         { each component's width, its place in the scan }
     prev, cur: array[0..3] of TLine;
     runIdx: array[0..3] of Integer;     { line interleave: one per component }
     runs: ^TJlsScan;                    { where the run lengths go or come from }
@@ -610,7 +615,7 @@ function CodeLine(var st: TScanState; c: Integer; var rd: TJlsReader; var wr: TJ
 var w, i, ra, rb, rc, rd_, qs, x, run, left, cnt, rbI, err: Integer; ok: Boolean;
     p, cu: TLine;
 begin
-  w := st.width;
+  w := st.cw[c];
   p := st.prev[c]; cu := st.cur[c];
   p[w + 1] := p[w];          { the sample past the end of the line above }
   cu[0] := p[1];             { the sample before the start: the one above it }
@@ -755,6 +760,30 @@ begin
   Result := True;
 end;
 
+{ A line-interleaved scan of components with sampling factors other than
+  1x1 goes by groups of lines: v lines of each component in turn (T.87
+  A.2.3). Without subsampling every factor is 1 and a group is a line. }
+function Grouped(const j: TJls; const s: TJlsScan): Boolean;
+var c: Integer;
+begin
+  Result := False;
+  for c := 0 to s.ncomp - 1 do
+    if (j.comp[s.comp[c]].h <> 1) or (j.comp[s.comp[c]].v <> 1) then Exit(True);
+end;
+
+{ What a scan's restart intervals and CodeLines count: the lines of its
+  component (no interleave), its groups (subsampled, line interleave), or
+  the frame's lines }
+function ScanRows(const j: TJls; const s: TJlsScan): Integer;
+var c: Integer;
+begin
+  if s.ilv = 0 then Exit(j.comp[s.comp[0]].height);
+  if not Grouped(j, s) then Exit(j.height);
+  Result := 0;
+  for c := 0 to s.ncomp - 1 do
+    with j.comp[s.comp[c]] do Result := Max(Result, (height + v - 1) div v);
+end;
+
 procedure SwapLines(var st: TScanState; n: Integer);
 var c: Integer; t: TLine;
 begin
@@ -774,21 +803,37 @@ end;
 { All the lines of a scan between two restarts (or all of them). }
 function CodeLines(var st: TScanState; var j: TJls; const s: TJlsScan; var rd: TJlsReader; var wr: TJlsWriter;
                    encoding: Boolean; y0, y1: Integer): Boolean;
-var y, c, n: Integer; comps: TSamplesPtr; rowBase: SizeInt; dummy: array of Word;
+var y, c, n, k, line: Integer; comps: TSamplesPtr; dummy: array of Word; t: TLine;
 begin
   n := s.ncomp;
   for c := 0 to n - 1 do comps[c] := @j.comp[s.comp[c]];
   dummy := nil;
+  if (s.ilv = 1) and Grouped(j, s) then begin
+    { y counts groups: v lines of each component in turn, each line of a
+      component following its own previous one }
+    for y := y0 to y1 - 1 do
+      for c := 0 to n - 1 do
+        for k := 0 to comps[c]^.v - 1 do begin
+          line := y * comps[c]^.v + k;
+          if line >= comps[c]^.height then Break;
+          t := st.prev[c]; st.prev[c] := st.cur[c]; st.cur[c] := t;
+          st.cd.runIndex := st.runIdx[c];
+          if not CodeLine(st, c, rd, wr, encoding, comps[c]^.samples, SizeInt(line) * st.cw[c], comps[c]^.samples) then
+            Exit(False);
+          st.runIdx[c] := st.cd.runIndex;
+        end;
+    Exit(True);
+  end;
   for y := y0 to y1 - 1 do begin
     SwapLines(st, n);
-    rowBase := SizeInt(y) * st.width;
     if s.ilv = 2 then begin
-      if not CodeLineSample(st, n, rd, wr, encoding, comps, rowBase) then Exit(False);
+      if not CodeLineSample(st, n, rd, wr, encoding, comps, SizeInt(y) * st.width) then Exit(False);
     end else
       for c := 0 to n - 1 do begin
         { line interleave: the contexts are shared, the run index is not }
         st.cd.runIndex := st.runIdx[c];
-        if not CodeLine(st, c, rd, wr, encoding, comps[c]^.samples, rowBase, comps[c]^.samples) then Exit(False);
+        if not CodeLine(st, c, rd, wr, encoding, comps[c]^.samples, SizeInt(y) * st.cw[c], comps[c]^.samples) then
+          Exit(False);
         st.runIdx[c] := st.cd.runIndex;
       end;
   end;
@@ -801,8 +846,9 @@ begin
   st.cd.Setup(s);
   st.width := j.width;
   for c := 0 to s.ncomp - 1 do begin
-    st.prev[c] := nil; SetLength(st.prev[c], j.width + 2);
-    st.cur[c] := nil; SetLength(st.cur[c], j.width + 2);
+    st.cw[c] := j.comp[s.comp[c]].width;
+    st.prev[c] := nil; SetLength(st.prev[c], st.cw[c] + 2);
+    st.cur[c] := nil; SetLength(st.cur[c], st.cw[c] + 2);
   end;
   ClearLines(st, s.ncomp);
 end;
@@ -832,15 +878,15 @@ begin
   s.runs := nil; st.runs := @s; st.runPos := 0;
   wr := Default(TJlsWriter);
   p := first; y0 := 0; rst := 0;
-  while y0 < j.height do begin
-    if s.ri > 0 then y1 := Min(j.height, y0 + s.ri) else y1 := j.height;
+  while y0 < ScanRows(j, s) do begin
+    if s.ri > 0 then y1 := Min(ScanRows(j, s), y0 + s.ri) else y1 := ScanRows(j, s);
     stop := SegmentEnd(data, p);
     rd.Init(data, p, stop);
     if y0 > 0 then begin st.cd.ResetState; ClearLines(st, s.ncomp); end;
     if not CodeLines(st, j, s, rd, wr, False, y0, y1) then Exit(JFail(jeBadCode, rd.p));
     { a decoder that needed bits past the end read into nothing }
     if rd.Overrun > 0 then Exit(JFail(jeTruncated, stop));
-    if y1 < j.height then begin
+    if y1 < ScanRows(j, s) then begin
       if (stop + 1 >= Length(data)) or (data[stop + 1] <> $D0 + (rst and 7)) then Exit(JFail(jeBadRst, stop));
       p := stop + 2; Inc(rst);
     end else p := stop;
@@ -859,8 +905,8 @@ begin
   rd := Default(TJlsReader);
   y0 := 0; rst := 0;
   wr.Init;
-  while y0 < j.height do begin
-    if s.ri > 0 then y1 := Min(j.height, y0 + s.ri) else y1 := j.height;
+  while y0 < ScanRows(j, s) do begin
+    if s.ri > 0 then y1 := Min(ScanRows(j, s), y0 + s.ri) else y1 := ScanRows(j, s);
     if y0 > 0 then begin
       wr.EndScan;
       if wr.n + 2 > Length(wr.d) then SetLength(wr.d, 2 * Length(wr.d) + 2);
@@ -904,7 +950,7 @@ begin
 end;
 
 function Parse(const data: TBytes; decode: Boolean; out j: TJls): TJpegResult;
-var p, first, last, copied, seglen: SizeInt; m: Byte; ri, i, k, c, id, ns: Integer; haveFrame: Boolean;
+var p, first, last, copied, seglen: SizeInt; m: Byte; ri, i, k, c, id, ns, hmax, vmax: Integer; haveFrame: Boolean;
     preset: TPreset; s: TJlsScan; rawN: SizeInt; total: Int64; dt1, dt2, dt3: Integer;
 
   procedure CopyUpTo(upto: SizeInt);
@@ -945,16 +991,25 @@ begin
              if (j.bits < 2) or (j.bits > 16) then Exit(JFail(jeBadSof, first));
              if (j.width = 0) or (j.height = 0) then Exit(JFail(jeUnsupported, first, m));
              if (k < 1) or (k > 4) or (last - first <> 6 + 3 * k) then Exit(JFail(jeBadSof, first));
-             total := Int64(j.width) * j.height * k;
-             if total > MAX_SAMPLES then Exit(JFail(jeTooLarge, first));
              SetLength(j.comp, k);
+             hmax := 1; vmax := 1;
              for i := 0 to k - 1 do begin
                j.comp[i].id := data[first + 6 + 3 * i];
                for c := 0 to i - 1 do if j.comp[c].id = j.comp[i].id then Exit(JFail(jeBadSof, first));
-               { subsampled JPEG-LS is not handled }
-               if data[first + 7 + 3 * i] <> $11 then Exit(JFail(jeUnsupported, first, m));
-               SetLength(j.comp[i].samples, j.width * j.height);
+               j.comp[i].h := data[first + 7 + 3 * i] shr 4; j.comp[i].v := data[first + 7 + 3 * i] and 15;
+               if (j.comp[i].h < 1) or (j.comp[i].h > 4) or (j.comp[i].v < 1) or (j.comp[i].v > 4) then
+                 Exit(JFail(jeBadSof, first));
+               hmax := Max(hmax, j.comp[i].h); vmax := Max(vmax, j.comp[i].v);
              end;
+             { each component's own size (T.87 A.2) }
+             total := 0;
+             for i := 0 to k - 1 do begin
+               j.comp[i].width := Integer((Int64(j.width) * j.comp[i].h + hmax - 1) div hmax);
+               j.comp[i].height := Integer((Int64(j.height) * j.comp[i].v + vmax - 1) div vmax);
+               Inc(total, Int64(j.comp[i].width) * j.comp[i].height);
+             end;
+             if total > MAX_SAMPLES then Exit(JFail(jeTooLarge, first));
+             for i := 0 to k - 1 do SetLength(j.comp[i].samples, j.comp[i].width * j.comp[i].height);
              haveFrame := True;
            end;
       $F8: begin
@@ -999,6 +1054,11 @@ begin
              if (s.ilv = 0) and (ns <> 1) then Exit(JFail(jeBadSos, first));
              if (s.ilv > 0) and (ns < 2) then Exit(JFail(jeBadSos, first));
              if (s.ilv = 2) and (ns < 3) then Exit(JFail(jeUnsupported, first, $DA));
+             { subsampling: none in sample interleave (T.87 needs the same
+               sampling there), and no restarts in line interleave, whose
+               intervals would count groups of lines }
+             if Grouped(j, s) and ((s.ilv = 2) or ((s.ilv = 1) and (ri > 0))) then
+               Exit(JFail(jeUnsupported, first, $DA));
              { the parameters in force }
              if preset.maxval <> 0 then s.maxval := preset.maxval else s.maxval := (1 shl j.bits) - 1;
              if (s.maxval < 1) or (s.maxval > (1 shl j.bits) - 1) then Exit(JFail(jeBadLse, first));
@@ -1071,12 +1131,12 @@ begin
     sc := j.scans[si];
     InitScanState(st, j, sc);
     st.cd.symbols := symbols;
-    symbols.BeginScan(sc, j.width);
+    symbols.BeginScan(sc, j);
     if not encoding then j.scans[si].runs := nil;
     st.runs := @j.scans[si]; st.runPos := 0;
     y0 := 0;
-    while y0 < j.height do begin
-      if sc.ri > 0 then y1 := Min(j.height, y0 + sc.ri) else y1 := j.height;
+    while y0 < ScanRows(j, sc) do begin
+      if sc.ri > 0 then y1 := Min(ScanRows(j, sc), y0 + sc.ri) else y1 := ScanRows(j, sc);
       if y0 > 0 then begin st.cd.ResetState; ClearLines(st, sc.ncomp); end;
       if not CodeLines(st, j, sc, rd, wr, encoding, y0, y1) then Exit(False);
       y0 := y1;

@@ -107,7 +107,7 @@ end;
   else, so that each block's stream is the one its ZPAQL decodes }
 function CompressAs(ls: Boolean; src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64;
-var stream, d: TBytes; r: TCodecResult; j: TJpeg;
+var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
@@ -118,7 +118,9 @@ begin
     r := Compress(d, stream, False, 1, False, False);
     if not r.Ok then Exit(ZS_ERR_DATA);
     { a 12-bit or a lossless JPEG: PJA takes it, the frozen ZPAQL would not }
-    if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless) then Exit(ZS_ERR_DATA);
+    if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl) then Exit(ZS_ERR_DATA);
+    { the same for a subsampled JPEG-LS file and the pjals ZPAQL }
+    if ls and (not StreamJlsHeaders(stream, jl, symbols).Ok or JlsSubsampled(jl)) then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
     Result := Length(stream);
@@ -200,15 +202,15 @@ begin
   try
     if StrComp(codecName, 'pja') = 0 then begin
       d := Bytes(src, n);
-      { 8-bit DCT: the ZPAQL decoder is frozen as v0.0.1 left it, which had
-        neither 12-bit nor lossless JPEG }
+      { 8-bit DCT with its height in the frame: the ZPAQL decoder is frozen
+        as v0.0.1 left it, which had neither 12-bit nor lossless JPEG nor DNL }
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         (j.precision = 8) and not j.lossless and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+         (j.precision = 8) and not j.lossless and not j.dnl and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);
       { compress() keeps the smaller of the two models: either has to fit }
-      if IsJls(d) and VerifyJls(d, jl).Ok and (Length(jl.scans) <= ZPAQL_LS_MAX_SCANS) and
+      if IsJls(d) and VerifyJls(d, jl).Ok and not JlsSubsampled(jl) and (Length(jl.scans) <= ZPAQL_LS_MAX_SCANS) and
          (ZpaqlJlsPh(jl, False) <= ZPAQL_MAX_PH) and (ZpaqlJlsPh(jl, True) <= ZPAQL_MAX_PH) then Result := 1;
     end;
   except

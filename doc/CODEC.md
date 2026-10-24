@@ -776,3 +776,35 @@ taking a little more where the JPEG-LS file is the input.
 The zpaq-std plugin refuses lossless JPEG: its ZPAQL is frozen as v0.0.1
 left it.
 
+## DNL and subsampled JPEG-LS (23/10/2026)
+
+**DNL.** A frame may say its height is 0 and give it in a DNL segment
+right after the first scan (T.81 B.2.5), as some scanners and fax
+software did. pjajpeg finds the DNL ahead when it reads such a frame (no
+FF DC can be inside entropy-coded data) and sizes the image by it; the
+SOF's 0 and the DNL stay in the raw bytes as they were, and a DNL
+anywhere else, or saying another height, is refused. libjpeg reads none
+("DNL not supported"); PJA takes them, Huffman, progressive and lossless.
+
+**Subsampled JPEG-LS.** T.87 lets a frame's components have sampling
+factors (A.2): each component is ceil(X·H/Hmax) by ceil(Y·V/Vmax), and in
+line interleave the scan goes by groups, V lines of each component in
+turn, its contexts shared and its run index its own. CharLS has none (not
+even its development version), so this follows the standard, with the
+conformance image T8SSE0 (2x4, 2x1, 1x2, in the real JPEG-LS test files)
+as the check: decoded by these rules, its first component is the
+conformance set's non-subsampled image's, all 65,536 samples. Both models
+take it: the samples model goes component by component with their own
+sizes (the first component's residual is a context only where the sizes
+match), the symbols model takes each component's width. Without
+subsampling nothing changed: 134 JPEG-LS and lossless JPEG streams of
+before, the same bytes. T8SSE0 now comes back (8% smaller, the model
+picked by size as always); sample interleave with subsampling, which T.87
+does not allow, and restarts in a subsampled line-interleaved scan stay
+refused.
+
+The point transform of JPEG-LS stays refused: no encoder at hand writes
+it (CharLS refuses it) and no file in the test sets has it.
+
+The zpaq-std plugin refuses both, its ZPAQL frozen as v0.0.1 left it.
+
