@@ -42,3 +42,8 @@ ZS=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/solid_color.jpg" "$PJA/tests/
     "$PJA/tests/jls/plasma17x13_line_rst4.jls")
 "$OUT/zpaql_segments" "$OUT/zpaql" "${ZS[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" "$OUT/zpaql" "${ZS[@]}" | tail -1
+# pjax: a DNL (version 5), and a thumbnail written twice (version 6, a copy)
+rm -rf "$OUT/zpaqlx"; mkdir -p "$OUT/zpaqlx"
+ZX=("$PJA/tests/jpg/dnl_baseline.jpg" "$PJA/tests/jpg/image_after_eoi.jpg")
+"$OUT/zpaql_segments" --pjax "$OUT/zpaqlx" "${ZX[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pjax "$OUT/zpaqlx" "${ZX[@]}" | tail -1

@@ -5,6 +5,7 @@ for byte; and, per decoder, its two smallest files as segments of one
 block, as zpaq-std groups them.
 
     test_pjadec.py <segment dir> <jpeg> ...
+    test_pjadec.py --pjax <segment dir> <jpeg> ...   pjax's (pjaxzpaql.inc)
 
 The segments come from pas/tests/zpaql_segments, with the $3 the plugin's
 query gives for each: the decoder runs with exactly that H (it measures its
@@ -19,13 +20,22 @@ import zpaqlvm
 REPO = os.path.dirname(os.path.dirname(HERE))
 
 
+args = sys.argv[1:]
+# --pjax: the segments are the pjax codec's, every file through its decoder
+pjax = args[:1] == ['--pjax']
+if pjax:
+    args = args[1:]
+segdir, jpegs = args[0], args[1:]
+
+
 def config(name):
     inc = open(os.path.join(REPO, 'pas', 'plugin', name)).read()
     return '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", inc, re.M)) + '\n'
 
 
 cfgs = {False: config('pjazpaql.inc'), True: config('pjalszpaql.inc')}
-segdir, jpegs = sys.argv[1], sys.argv[2:]
+if pjax:
+    cfgs = {False: config('pjaxzpaql.inc'), True: config('pjaxzpaql.inc')}
 fails = 0
 for j in jpegs:
     want = open(j, 'rb').read()

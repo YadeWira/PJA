@@ -310,5 +310,34 @@ def want_seg(b):
 outs, _, _ = zpaqlvm.run_segments(cfg, segs, [])
 check('reset between segments', b''.join(outs), b''.join(want_seg(b) for b in segs))
 
+# if on a constant: only the branch taken; fresh(): the state as it starts
+src = '''
+FLAG = 0
+COUNTS = array(3)
+total = 5
+def onlyflag():
+    out(99)
+def run(k):
+    global total
+    for j in range(k):
+        COUNTS[j % 3] = COUNTS[j % 3] + 1
+        total = total + 1
+    out(total)
+    out(COUNTS[0])
+def main():
+    if FLAG:
+        onlyflag()
+    run(4)
+    keep = total
+    fresh()
+    run(2)
+    out(keep)
+    if not FLAG:
+        out(7)
+'''
+cfg, _, c = zpaqlc.compile_source(src, 'test', '16', '16')
+check('if on a constant, fresh()', run(src), bytes([9, 2, 7, 1, 9, 7]))
+check('  the branch not taken is not compiled', b'onlyflag' in cfg.encode(), False)
+
 print('%d cells, %d failures' % (cells, fails))
 sys.exit(1 if fails else 0)

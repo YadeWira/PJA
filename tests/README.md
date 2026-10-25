@@ -26,6 +26,7 @@ flip every bit of them.
 | `dri_no_restarts.jpg` | `color_plasma.jpg` with a DRI segment (an interval of 5 MCUs) and no restart marker in its scan, as some cameras' encoders wrote them (two such files in the corpus): the scan is coded as if there were none |
 | `thumbs_twice.jpg` | a 320x240 plasma (`-seed 31`, `cjpeg -quality 85`) with the same image at 96x72 (`cjpeg -quality 75`) as a thumbnail twice, in an APP1 and in an APP2, as some cameras write it |
 | `two_images.jpg` | the same with the thumbnail once, and a second image after its EOI, a 240x160 plasma (`-seed 32`, `cjpeg -quality 80`), as an MPO has it |
+| `image_after_eoi.jpg` | `solid_color.jpg` with `baseline_444.jpg` after its EOI (`cat`): a small file of stream version 6, for the pjax ZPAQL in the Python interpreter |
 
 ## `jls/`
 

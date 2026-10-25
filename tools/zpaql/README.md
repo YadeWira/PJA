@@ -11,7 +11,7 @@ build time only; nothing of them goes into PJA itself.
 | `zpaqlc.py` | compiles a small language (a subset of Python: 32-bit unsigned values, arrays in ZPAQL's H, functions without recursion, signed comparisons and shifts) to a ZPAQL PCOMP program |
 | `zpaqlvm.py` | runs a PCOMP program as libzpaq does, one instruction at a time, to test and debug it |
 | `test_zpaqlc.py` | random expressions against exact 32-bit arithmetic, and programs for control flow, calls, arrays, signed helpers, long jumps and variables spilled to H |
-| `gen_pjadec.py` | builds the plugin's two decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) and `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones); `--check` only verifies all three are current |
+| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) and `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`); `--check` only verifies all four are current |
 | `test_pjadec.py` | those decoders run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG or JPEG-LS file back byte for byte |
 
 ```sh
@@ -27,6 +27,13 @@ Only what `main()` reaches is compiled: functions it never calls, and
 arrays and tables nothing reads, are left out, so the two decoders share
 their sources (the head stream, the coder, the mixers) and each pays only
 for what it uses.
+
+An `if` on a constant compiles only the branch taken (its test, too, is
+gone): the shared sources say `if PJAX:` for what only pjax's program has,
+and the frozen programs, compiled with `PJAX = 0`, come out as they were,
+byte for byte. `fresh(A, B, ...)` puts every global back to its first
+value and every array but the tables, the heap and the ones named back to
+zeros, and goes on: pjax decodes several JPEGs in one segment with it.
 
 `reset(n)` ends a segment so that the next segment of the same block
 starts as the first did: libzpaq keeps H, M and the registers between

@@ -21,6 +21,9 @@ The source is a subset of Python, read with the ast module:
     M[0 ..] holds the segment as it came; inlen() is its length.
     base(arr) is arr's first word in H, for code that takes addresses.
     out(x) writes the byte x; error() stops with a ZPAQL error.
+    fresh(A, B, ...) puts every global back to its first value and every
+    array but the tables, the heap and the ones named back to zeros, and
+    goes on: the same code run again on a second input within one segment.
     reset(n) ends the segment so that the next one starts as the first
     did: H[0 .. n) and every R register in use back to zero (n is past
     the last word the program used: its heap pointer), then halt. libzpaq
@@ -201,6 +204,46 @@ class Compiler:
             if f:
                 return f() & M32
         err(node, 'not a constant expression')
+
+    def static_test(self, node):
+        """True or False when a condition is known when compiling (an `if`
+        on a constant: what one program of a shared source has and another
+        has not); None when it is not"""
+        try:
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                v = self.static_test(node.operand)
+                return None if v is None else not v
+            if isinstance(node, ast.BoolOp):
+                vs = [self.static_test(v) for v in node.values]
+                if isinstance(node.op, ast.And):
+                    if any(v is False for v in vs): return False
+                    return True if all(v is True for v in vs) else None
+                if any(v is True for v in vs): return True
+                return False if all(v is False for v in vs) else None
+            if isinstance(node, ast.Compare) and len(node.ops) == 1:
+                a, b = self.const_eval(node.left), self.const_eval(node.comparators[0])
+                op = type(node.ops[0])
+                return {ast.Eq: a == b, ast.NotEq: a != b, ast.Lt: a < b, ast.LtE: a <= b,
+                        ast.Gt: a > b, ast.GtE: a >= b}[op]
+            if isinstance(node, (ast.Name, ast.Constant)):
+                return self.const_eval(node) != 0
+        except (CompileError, KeyError):
+            return None
+        return None
+
+    def live(self, node):
+        """node's sub-nodes, but of an `if` on a constant only the branch
+        taken"""
+        todo = [node]
+        while todo:
+            n = todo.pop()
+            yield n
+            if isinstance(n, ast.If):
+                v = self.static_test(n.test)
+                if v is not None:
+                    todo.extend(n.body if v else n.orelse)
+                    continue
+            todo.extend(ast.iter_child_nodes(n))
 
     def collect(self, tree):
         # the constants first, in any order: arrays and tables may use ones
@@ -585,6 +628,29 @@ class Compiler:
             if self.lreset is None:
                 self.lreset = a.label()
             self.expr(args[0], depth); a.op('d=a'); a.jmp('jmp', self.lreset); return
+        if name == 'fresh':
+            # every global back to its first value, every array that is not
+            # a table nor the heap back to zeros: the program's state as it
+            # starts, for a second run of the same code in one segment; the
+            # caller's locals and the heap are left alone
+            keep = set()
+            for x in args:
+                if not isinstance(x, ast.Name) or x.id not in self.arrays:
+                    err(node, 'fresh() takes the arrays to keep')
+                keep.add(x.id)
+            for gname, slot in self.globals.items():
+                self.const_a(self.ginit.get(gname, 0)); self.store_a(slot)
+            for aname in self.arr_order:
+                if aname not in self.used or aname == self.heap or aname in self.tables or aname in keep:
+                    continue
+                slot, size = self.arrays[aname]
+                lloop, ldone = a.label(), a.label()
+                self.load_a(slot); a.op('d=a'); self.const_a(size); a.op('c=a')
+                a.put(lloop)
+                a.op('a=c'); a.op('a== 0'); a.jmp('jt', ldone)
+                a.op('a=0'); a.op('*d=a'); a.op('d++'); a.op('c--'); a.jmp('jmp', lloop)
+                a.put(ldone)
+            return
         if name == 'base':
             if len(args) != 1 or not isinstance(args[0], ast.Name) or args[0].id not in self.arrays:
                 err(node, 'base() takes an array')
@@ -702,6 +768,10 @@ class Compiler:
                 err(s, 'a call inside an augmented index')
             self.assign(t, ast.BinOp(left=t, op=s.op, right=s.value, lineno=s.lineno)); return
         if isinstance(s, ast.If):
+            v = self.static_test(s.test)
+            if v is not None:
+                # known now: only the branch taken is compiled
+                self.stmts(s.body if v else s.orelse); return
             lelse, lend = a.label(), a.label()
             self.branch_false(s.test, lelse)
             self.stmts(s.body)
@@ -787,7 +857,7 @@ class Compiler:
         reach, todo, names = {'main'}, ['main'], set()
         while todo:
             f = self.funcs[todo.pop()]
-            for n in ast.walk(f.node):
+            for n in self.live(f.node):
                 if isinstance(n, ast.Name):
                     names.add(n.id)
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.funcs \
@@ -798,6 +868,7 @@ class Compiler:
     def program(self):
         a = self.asm
         reach, used = self.reachable()
+        self.used = used
         self.funcs = {n: f for n, f in self.funcs.items() if n in reach}
         for f in self.funcs.values():
             self.frame(f)

@@ -838,3 +838,37 @@ CompressOne, which writes version 5): the same streams as before. 614
 streams of every set compared with the previous build: the same bytes,
 and two new, the corpus' two files.
 
+## The pjax codec, for zpaq-std (25/10/2026)
+
+zpaq-std asked for what 0.0.2 added, as new codecs beside the frozen pja
+and pjals: one plugin file, each codec with its own ZPAQL (65,535 bytes of
+bytecode at most), tried in an order the family fixes. pjax comes first:
+the Huffman JPEGs that need stream version 6, with JPEGs inside them
+(EXIF thumbnails, MPO, Ultra HDR), 12 bits, a DNL or a DRI with no
+restarts; pja keeps every other JPEG, pjals JPEG-LS; lossless JPEG and
+subsampled JPEG-LS are for later codecs.
+
+Its decoder shares pja's sources. zpaqlc now compiles an `if` on a
+constant as the branch taken alone, and the shared sources test `PJAX`
+for what only pjax has: the frozen programs, compiled with `PJAX = 0`,
+are the same bytes. pjax reads version 5 as pja does, or version 6: its
+parts table and quirk list, each part (a version 5 stream of its own)
+decoded first into H, then the host, whose bytes go out with each part put
+back where it was, in place of the host's zeros (inside a segment) or
+between its bytes (after its EOI). Between two JPEGs, zpaqlc's `fresh()`
+puts the decoder's globals and arrays back as they start. The arithmetic
+coder is left out (pja keeps those files), which is what makes room:
+57,709 bytes. CompressPjax writes only what that decoder reads: Huffman
+hosts and parts, parts of one level, no bytes mode; the query sizes H as
+the sum of what each JPEG's decoding takes and the parts' bytes.
+
+Checked with libzpaq (zpaq 7.15's engine): every file of the MPO set (6,
+5 as version 6) and of the 78-file corpus pjax takes (69, 26 as version
+6) back byte for byte; blocks of 4 to 6 files of every kind, version 5
+and 6 mixed, back; 300 damaged segments: 299 errors and one the same,
+none hanging or crashing. On zpaq-std 1.7.0 with -sat in the family's
+order, 116 files: pjax took 36, pja 54, pjals 18, every block ZPAQL OK,
+zpaq 7.15 gave every file back, and the archive came out 1.84% smaller
+than without pjax. Windows 10, 64 and 32 bits: every block OK, every file
+back.
+

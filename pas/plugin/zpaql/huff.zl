@@ -9,7 +9,10 @@ outn = 0
 
 def putbyte(v):
     global outn
-    out(v)
+    if PJAX:
+        sink(v)
+    else:
+        out(v)
     outn += 1
 
 def putbits(v, n):
@@ -589,31 +592,40 @@ def recompose():
         while p < SCUT[si]:
             putbyte(H[rawbase + p])
             p += 1
-        if arithmetic:
-            encodescanarith(si)
-        else:
+        if PJAX:
+            # Huffman only: pjax leaves the arithmetic coder out
+            if arithmetic:
+                error()
             encodescan(si)
+        else:
+            if arithmetic:
+                encodescanarith(si)
+            else:
+                encodescan(si)
     while p < rawlen:
         putbyte(H[rawbase + p])
         p += 1
 
 def main():
     global origsize, hp
-    hp = base(HEAP)
-    probeh()
-    tables()
-    modeltables()
-    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
-    if M[SEG] != 5 or M[SEG + 1] != 0:
-        error()
-    hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
-    dinit(SEG + 6, SEG + 6 + hlen)
-    coderaw(origsize)
-    parseheaders()
-    scanbits()
-    decodebands(SEG + 6 + hlen, inlen())
-    recompose()
-    if outn != origsize:
-        error()
-    # the next segment of the block, if any, starts from scratch
-    reset(hp)
+    if PJAX:
+        pjaxmain()
+    else:
+        hp = base(HEAP)
+        probeh()
+        tables()
+        modeltables()
+        origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+        if M[SEG] != 5 or M[SEG + 1] != 0:
+            error()
+        hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
+        dinit(SEG + 6, SEG + 6 + hlen)
+        coderaw(origsize)
+        parseheaders()
+        scanbits()
+        decodebands(SEG + 6 + hlen, inlen())
+        recompose()
+        if outn != origsize:
+            error()
+        # the next segment of the block, if any, starts from scratch
+        reset(hp)

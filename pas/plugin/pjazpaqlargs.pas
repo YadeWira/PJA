@@ -13,6 +13,7 @@ uses SysUtils, pjajpeg, pjajls, pjacodec, pjamodel;
 
 {$I pjazpaql.inc}
 {$I pjalszpaql.inc}
+{$I pjaxzpaql.inc}
 
 const
   { the largest H a block may ask for: 2^26 words, 256 MB }
@@ -23,6 +24,8 @@ const
 function ZpaqlWords(const j: TJpeg): Int64;
 { log2 of that, rounded up: the H the decoder's config asks for. }
 function ZpaqlPh(const j: TJpeg): Integer;
+{ log2 of a number of words, rounded up: an H of that size holds them. }
+function Log2Words(w: Int64): Integer;
 { For a PJA stream (compress()'s output): $3 in bits 0-7, or -1. }
 function ZpaqlArgs(const stream: TBytes): Int64;
 { The same three for the JPEG-LS decoder (pjals), symbols: the stream uses
@@ -30,6 +33,15 @@ function ZpaqlArgs(const stream: TBytes): Int64;
 function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;
 function ZpaqlJlsPh(const jl: TJls; symbols: Boolean): Integer;
 function ZpaqlJlsArgs(const stream: TBytes): Int64;
+{ The pjax codec's: its stream (version 5 or 6, pjacodec.CompressPjax)
+  decoded JPEG by JPEG, each in memory of its own, and each part's bytes
+  kept until the host puts them back. -1 for what its ZPAQL does not take. }
+function ZpaqlPjaxWords(const stream: TBytes): Int64;
+function ZpaqlPjaxArgs(const stream: TBytes): Int64;
+{ For the detection, before compressing: an upper bound of what pjax's
+  stream of this verified JPEG would take, every candidate part counted
+  (a part that does not pay is left out later); also whether it has any. }
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out hasParts: Boolean): Int64;
 { Sampling factors other than 1x1: the pjals ZPAQL, frozen as v0.0.1 left
   it, has no subsampled JPEG-LS }
 function JlsSubsampled(const jl: TJls): Boolean;
@@ -128,6 +140,97 @@ begin
   Result := False;
   for c := 0 to High(jl.comp) do
     if (jl.comp[c].h <> 1) or (jl.comp[c].v <> 1) then Exit(True);
+end;
+
+function U32At(const d: TBytes; p: SizeInt): Int64;
+begin
+  Result := Int64(d[p]) or (Int64(d[p + 1]) shl 8) or (Int64(d[p + 2]) shl 16) or (Int64(d[p + 3]) shl 24);
+end;
+
+{ What one version 5 stream takes beyond the decoder's own words: -1 if
+  pjax does not decode it (arithmetic, lossless, JPEG-LS) }
+function OneJpegWords(const st: TBytes): Int64;
+var j: TJpeg;
+begin
+  if not StreamHeaders(st, j).Ok or j.arithmetic or j.lossless then Exit(-1);
+  Result := ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
+end;
+
+function ZpaqlPjaxWords(const stream: TBytes): Int64;
+var n, q: Int64; i: Integer; p, at, k: SizeInt; w: Int64; copy_: Boolean;
+begin
+  Result := -1;
+  if Length(stream) < 2 then Exit;
+  if stream[0] = STREAM_VERSION then begin
+    w := OneJpegWords(stream);
+    if w >= 0 then Result := ZPAQL_X_STATIC_WORDS + w;
+    Exit;
+  end;
+  { version 6: no bytes, at most 256 parts, each part version 5 }
+  if (stream[0] <> STREAM_PARTS) or (stream[1] > 1) or (Length(stream) < 6) then Exit;
+  n := U32At(stream, 2);
+  if n > 256 then Exit;
+  p := 6 + 13 * n;
+  if p > Length(stream) then Exit;
+  if stream[1] = 1 then begin
+    if p + 4 > Length(stream) then Exit;
+    q := U32At(stream, p);
+    p := p + 4 + 4 * q;
+    if (q > 256) or (p > Length(stream)) then Exit;
+  end;
+  Result := ZPAQL_X_STATIC_WORDS;
+  at := p;
+  for i := 0 to n - 1 do begin
+    copy_ := stream[6 + 13 * i + 12] and 2 <> 0;
+    if copy_ then Continue;
+    k := U32At(stream, 6 + 13 * i + 8);
+    if at + k > Length(stream) then Exit(-1);
+    w := OneJpegWords(Copy(stream, at, k));
+    if w < 0 then Exit(-1);
+    { its decoding, and its bytes until the host is out }
+    Result := Result + w + U32At(stream, 6 + 13 * i + 4);
+    at := at + k;
+  end;
+  w := OneJpegWords(Copy(stream, at, Length(stream) - at));
+  if w < 0 then Exit(-1);
+  Result := Result + w;
+end;
+
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out hasParts: Boolean): Int64;
+var k, len: SizeInt; sj: TJpeg;
+begin
+  hasParts := False;
+  Result := ZPAQL_X_STATIC_WORDS + ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
+  { as pjacodec.CompressAt looks for them: FF D8 FF from the third byte on,
+    a Huffman JPEG inside the host's segments or after its end }
+  k := 2;
+  while k + 3 <= Length(d) do begin
+    if (d[k] = $FF) and (d[k + 1] = $D8) and (d[k + 2] = $FF) and
+       Decompose(Copy(d, k, Length(d) - k), sj).Ok and not sj.arithmetic and not sj.lossless then begin
+      len := sj.eoi;
+      if (k >= j.eoi) or (k + len <= j.eoi) then begin
+        hasParts := True;
+        Result := Result + ZpaqlWords(sj) - ZPAQL_STATIC_WORDS + len;
+        Inc(k, len);
+        Continue;
+      end;
+    end;
+    Inc(k);
+  end;
+end;
+
+function ZpaqlPjaxArgs(const stream: TBytes): Int64;
+var w: Int64;
+begin
+  Result := -1;
+  try
+    w := ZpaqlPjaxWords(stream);
+    if w < 0 then Exit;
+    Result := Log2Words(w);
+    if Result > ZPAQL_MAX_PH then Result := -1;
+  except
+    Result := -1;
+  end;
 end;
 
 function ZpaqlJlsWords(const jl: TJls; symbols: Boolean): Int64;

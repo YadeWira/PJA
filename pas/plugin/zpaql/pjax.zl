@@ -1,0 +1,192 @@
+"""The pjax codec's decoder: what pja's decodes (Huffman only), in a stream
+of version 5 or 6 (pjacodec's STREAM_PARTS): the JPEGs inside the JPEG,
+each a version 5 stream of its own, decoded first into H; then the host,
+whose bytes go out with each part put back in its place (zeros in the host
+where the part was inside a segment, nothing where it was after the EOI).
+Also 12-bit JPEG, a DNL's height, and the scans whose DRI the encoder did
+not follow (QUIRKS). Between two JPEGs, fresh() puts the decoder's state
+back as it starts; the parts' table is kept."""
+
+MAXP = 256
+POFF = array(MAXP)        # each part: where in the file, its length, mode,
+PLEN = array(MAXP)        # the earlier part it copies (or MAXP), its stream,
+PMODE = array(MAXP)       # and where its bytes went in H
+PCOPY = array(MAXP)
+PFIRST = array(MAXP)
+PLAST = array(MAXP)
+PBUF = array(MAXP)
+QS = array(MAXP)          # the host's scans with no restarts, and how many
+NQ = array(1)
+FLAGS_QUIRKS = 1
+
+# the sink: 0 into a part's buffer, 1 the file, the parts put in
+smode = 0
+sbuf = 0
+spos = 0
+fpos = 0
+npart = 0
+nextp = 0
+drop = 0
+
+def u32(p):
+    return M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+
+def dnlheight(p):
+    """the height of the DNL after the frame (no FF DC can be inside the
+    entropy-coded data, which is not in raw anyway)"""
+    q = p
+    while q + 6 <= rawlen:
+        if rb(q) == 255 and rb(q + 1) == 220 and u16(q + 2) == 4:
+            h = u16(q + 4)
+            if h == 0:
+                error()
+            return h
+        q += 1
+    error()
+    return 0
+
+def emitpart(i):
+    """part i's bytes to the file"""
+    global fpos
+    b = PBUF[i]
+    if PCOPY[i] != MAXP:
+        b = PBUF[PCOPY[i]]
+    for k in range(PLEN[i]):
+        out(H[b + k])
+    fpos = fpos + PLEN[i]
+
+def sink(v):
+    global spos, fpos, nextp, drop
+    if smode == 0:
+        H[sbuf + spos] = v
+        spos += 1
+        return
+    # the parts that start here, before the host's byte
+    while nextp < npart and drop == 0 and POFF[nextp] == fpos:
+        emitpart(nextp)
+        if PMODE[nextp] & 1:
+            drop = PLEN[nextp]
+        nextp += 1
+    if drop > 0:
+        # the host's zeros where the part was
+        if v != 0:
+            error()
+        drop -= 1
+        return
+    out(v)
+    fpos += 1
+
+def decodeone(first, last, cap, quirks):
+    """a version 5 stream from M[first .. last) through the sink; cap: the
+    largest its raw part may be"""
+    if last - first < 6 or M[first] != 5 or M[first + 1] != 0:
+        error()
+    hlen = u32(first + 2)
+    if first + 6 + hlen > last:
+        error()
+    dinit(first + 6, first + 6 + hlen)
+    coderaw(cap)
+    parseheaders()
+    if arithmetic:
+        error()
+    if quirks:
+        for k in range(NQ[0]):
+            if QS[k] >= nscans or SRI[QS[k]] == 0:
+                error()
+            SRI[QS[k]] = 0
+    scanbits()
+    decodebands(first + 6 + hlen, last)
+    recompose()
+
+def pjaxmain():
+    global origsize, hp, hsize, smode, sbuf, spos, fpos, npart, nextp, drop
+    hp = base(HEAP)
+    probeh()
+    tables()
+    modeltables()
+    size = u32(0)
+    end = inlen()
+    if M[SEG] == 5:
+        origsize = size
+        smode = 1
+        decodeone(SEG, end, size, 0)
+        if outn != size:
+            error()
+        reset(hp)
+    # version 6: its flags, the parts, the quirks
+    if end < SEG + 6 or M[SEG] != 6 or (M[SEG + 1] & ~FLAGS_QUIRKS) != 0:
+        error()
+    flags = M[SEG + 1]
+    n = u32(SEG + 2)
+    if n > MAXP or (n == 0 and flags == 0):
+        error()
+    p = SEG + 6
+    for i in range(n):
+        POFF[i] = u32(p)
+        PLEN[i] = u32(p + 4)
+        PMODE[i] = M[p + 12]
+        PCOPY[i] = MAXP
+        if PMODE[i] & 2:
+            PCOPY[i] = u32(p + 8)
+            if PCOPY[i] >= i or PLEN[PCOPY[i]] != PLEN[i]:
+                error()
+        else:
+            PLAST[i] = u32(p + 8)          # its length, for now
+        if PLEN[i] < 4 or PMODE[i] > 3 or (i > 0 and POFF[i] < POFF[i - 1] + PLEN[i - 1]):
+            error()
+        p += 13
+    NQ[0] = 0
+    if flags & FLAGS_QUIRKS:
+        nq = u32(p)
+        p += 4
+        if nq < 1 or nq > MAXP:
+            error()
+        for k in range(nq):
+            QS[k] = u32(p)
+            if k > 0 and QS[k] <= QS[k - 1]:
+                error()
+            p += 4
+        NQ[0] = nq
+    for i in range(n):
+        if PCOPY[i] == MAXP:
+            PFIRST[i] = p
+            p = p + PLAST[i]
+            PLAST[i] = p
+            if p > end:
+                error()
+    # the parts, each into a buffer of its own
+    for i in range(n):
+        if PCOPY[i] == MAXP:
+            keephp = hp
+            keephs = hsize
+            buf = alloc(PLEN[i])
+            keephp = hp
+            fresh(POFF, PLEN, PMODE, PCOPY, PFIRST, PLAST, PBUF, QS, NQ)
+            hp = keephp
+            hsize = keephs
+            tables()
+            modeltables()
+            PBUF[i] = buf
+            smode = 0
+            sbuf = buf
+            decodeone(PFIRST[i], PLAST[i], PLEN[i], 0)
+            if outn != PLEN[i]:
+                error()
+    # the host, the parts put back as its bytes go out
+    keephp = hp
+    keephs = hsize
+    fresh(POFF, PLEN, PMODE, PCOPY, PFIRST, PLAST, PBUF, QS, NQ)
+    hp = keephp
+    hsize = keephs
+    tables()
+    modeltables()
+    smode = 1
+    npart = n
+    decodeone(p, end, size, flags & FLAGS_QUIRKS)
+    # the parts after the host's last byte (an MPO's next images)
+    while nextp < npart and drop == 0 and POFF[nextp] == fpos:
+        emitpart(nextp)
+        nextp += 1
+    if drop != 0 or nextp != npart or fpos != size:
+        error()
+    reset(hp)

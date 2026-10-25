@@ -86,6 +86,10 @@ type
   one the zpaq-std plugin's ZPAQL reads. }
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True;
                   threads: Integer = 1; fast: Boolean = False; parts: Boolean = True): TCodecResult;
+{ What the zpaq-std plugin's pjax codec writes: version 5 or 6 for a
+  Huffman JPEG (8 or 12 bits, DNL, quirks), its parts version 5 and Huffman
+  too, nothing as bytes: what pjax's ZPAQL decodes. }
+function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True; threads: Integer = 1): TCodecResult;
 { stream -> JPEG. maxRaw caps the raw part a damaged stream can claim.
   expected: the JPEG's size when the caller knows it (the .pja does), to
   allocate it once; 0 if not. Only a hint: the result is not checked
@@ -688,11 +692,16 @@ begin
 end;
 
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
-                    fast: Boolean; depth: Integer): TCodecResult;
+                    fast: Boolean; depth: Integer; huffOnly: Boolean = False): TCodecResult;
 var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from: SizeInt; n, i, c: Integer;
-    sub, ps, host, hs, hostHead: TBytes; ok: Boolean; whole, withParts, without: Int64; quirks: TScanList;
+    sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TScanList;
 begin
   stream := nil;
+  { huffOnly (the zpaq-std plugin's pjax): Huffman JPEGs and parts of one
+    level, version 5 each, what its ZPAQL decodes }
+  if huffOnly and (IsJls(jpeg) or (Length(jpeg) >= High(Cardinal))) then begin
+    Result := CodecFail(ceJpeg); Result.jpeg.err := jeUnsupported; Exit;
+  end;
   if (depth >= MAX_PART_DEPTH) or IsJls(jpeg) or (Length(jpeg) >= High(Cardinal)) then
     Exit(CompressOne(jpeg, stream, verify, threads, fast));
   { the file as PJA takes it today, decoded once: it gives the parts' places
@@ -700,6 +709,9 @@ begin
   Result := CodecFail(ceOk);
   Result.jpeg := VerifyRoundTrip(jpeg, j);
   if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
+  if huffOnly and (j.arithmetic or j.lossless) then begin
+    Result.err := ceJpeg; Result.jpeg.err := jeUnsupported; Exit;
+  end;
   quirks := QuirkScans(j);
   { every FF D8 FF that starts a JPEG PJA takes; none can be inside
     entropy-coded data, where FF is followed by 00 or a restart marker }
@@ -710,9 +722,10 @@ begin
     if (jpeg[k] = $FF) and (jpeg[k + 1] = $D8) and (jpeg[k + 2] = $FF) and
        Decompose(Copy(jpeg, k, Length(jpeg) - k), sj).Ok then begin
       len := sj.eoi;
+      fit := not huffOnly or not (sj.arithmetic or sj.lossless);
       sj := Default(TJpeg);
       { wholly inside the host's segments or wholly after its end }
-      if (k >= j.eoi) or (k + len <= j.eoi) then begin
+      if fit and ((k >= j.eoi) or (k + len <= j.eoi)) then begin
         { the same bytes as an earlier part: a copy of it }
         c := -1;
         for i := 0 to n - 1 do
@@ -720,7 +733,10 @@ begin
         ps := nil;
         if c < 0 then begin
           sub := Copy(jpeg, k, len);
-          if not CompressAt(sub, ps, False, threads, fast, depth + 1).Ok or (Length(ps) + PART_ENTRY >= len) then ps := nil;
+          if huffOnly then ok := CompressOne(sub, ps, False, threads, fast).Ok
+          else ok := CompressAt(sub, ps, False, threads, fast, depth + 1).Ok;
+          if not ok or (Length(ps) + PART_ENTRY >= len) then ps := nil;
+          ok := False;
         end;
         if (c >= 0) or (ps <> nil) then begin
           SetLength(parts, n + 1);
@@ -919,6 +935,11 @@ begin
   if op + (Length(host) - hp) <> Length(jpeg) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
   if hp < Length(host) then Move(host[hp], jpeg[op], Length(host) - hp);
   Result := CodecFail(ceOk);
+end;
+
+function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
+begin
+  Result := CompressAt(jpeg, stream, verify, threads, False, 0, True);
 end;
 
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;

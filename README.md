@@ -95,16 +95,20 @@ at all. The 32-bit build's speed is not measured yet.
 as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
 (codecs for specific formats), on its plugin ABI 1: `pas/plugin/build.sh
 DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
-`pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds two
-codecs: `pja` for JPEG and `pjals` for JPEG-LS. Each detects its files by
-their bytes, writes the full-model stream (`pja stream v5 full`), and
-leaves verification to zpaq-std, which decodes every block before writing
-it. Every block also carries the codec's decoder in ZPAQL, so that any
-zpaq reads the archive without the plugin. Both decoders are compiled from
-`pas/plugin/zpaql/` with `tools/zpaql/`: `pja`'s (62,294 bytes of ZPAQL)
-covers every JPEG PJA handles, Huffman or arithmetic, sequential or
-progressive; `pjals`'s (55,989 bytes) covers every JPEG-LS file PJA
-handles, with either of its two models.
+`pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds three
+codecs, tried in this order: `pjax` for the JPEGs that need stream
+version 6 (JPEGs inside them: EXIF thumbnails, MPO, Ultra HDR; 12 bits;
+a DNL; a DRI with no restarts), `pja` for every other JPEG, and `pjals`
+for JPEG-LS. Each detects its files by their bytes and leaves
+verification to zpaq-std, which decodes every block before writing it.
+Every block also carries the codec's decoder in ZPAQL, so that any zpaq
+reads the archive without the plugin, and several files may share a
+block. The decoders are compiled from `pas/plugin/zpaql/` with
+`tools/zpaql/`: `pja`'s (62,294 bytes of ZPAQL) covers every JPEG PJA
+handles, Huffman or arithmetic, sequential or progressive; `pjals`'s
+(55,989 bytes) every JPEG-LS file, with either of its two models; `pjax`'s
+(57,709 bytes) the Huffman JPEGs of version 6. `pja` and `pjals` are frozen
+as v0.0.1 left them.
 Its memory is sized for each block: the plugin tells zpaq-std how much
 the decoder will need for that file (2 MB for a small one, 16 MB for a
 photo of 200 KB, at most 256 MB).

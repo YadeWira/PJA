@@ -342,9 +342,17 @@ def readdht(p, last):
 
 def readsof(p):
     global width, height, ncomp, hmax, vmax, mcusx, mcusy
-    if rb(p) != 8:
-        error()
+    if PJAX:
+        # 8 or 12 bits; a height of 0 is given by a DNL further on
+        if rb(p) != 8 and rb(p) != 12:
+            error()
+    else:
+        if rb(p) != 8:
+            error()
     height = u16(p + 1)
+    if PJAX:
+        if height == 0:
+            height = dnlheight(p)
     width = u16(p + 3)
     ncomp = rb(p + 5)
     hmax = 1
@@ -469,6 +477,8 @@ def parseheaders():
             progressive = 1
         elif m == 204:
             readdac(first, last)
+        elif PJAX and m == 220:
+            pass                # pjax: a DNL, its height read with the frame
         elif m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
             error()
         elif m == 218:
