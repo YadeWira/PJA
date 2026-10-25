@@ -40,8 +40,9 @@ function ZpaqlPjaxWords(const stream: TBytes): Int64;
 function ZpaqlPjaxArgs(const stream: TBytes): Int64;
 { For the detection, before compressing: an upper bound of what pjax's
   stream of this verified JPEG would take, every candidate part counted
-  (a part that does not pay is left out later); also whether it has any. }
-function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out hasParts: Boolean): Int64;
+  (a part that does not pay is left out later); also how many bytes of
+  them come after the host's EOI (an MPO's or an Ultra HDR's next images). }
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64): Int64;
 { Sampling factors other than 1x1: the pjals ZPAQL, frozen as v0.0.1 left
   it, has no subsampled JPEG-LS }
 function JlsSubsampled(const jl: TJls): Boolean;
@@ -196,10 +197,10 @@ begin
   Result := Result + w;
 end;
 
-function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out hasParts: Boolean): Int64;
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64): Int64;
 var k, len: SizeInt; sj: TJpeg;
 begin
-  hasParts := False;
+  after := 0;
   Result := ZPAQL_X_STATIC_WORDS + ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
   { as pjacodec.CompressAt looks for them: FF D8 FF from the third byte on,
     a Huffman JPEG inside the host's segments or after its end }
@@ -209,7 +210,7 @@ begin
        Decompose(Copy(d, k, Length(d) - k), sj).Ok and not sj.arithmetic and not sj.lossless then begin
       len := sj.eoi;
       if (k >= j.eoi) or (k + len <= j.eoi) then begin
-        hasParts := True;
+        if k >= j.eoi then Inc(after, len);
         Result := Result + ZpaqlWords(sj) - ZPAQL_STATIC_WORDS + len;
         Inc(k, len);
         Continue;

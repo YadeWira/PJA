@@ -872,3 +872,23 @@ zpaq 7.15 gave every file back, and the archive came out 1.84% smaller
 than without pjax. Windows 10, 64 and 32 bits: every block OK, every file
 back.
 
+### Which files pjax takes (0.0.4)
+
+zpaq-std measured 0.0.3 on its 79 files and got a larger archive with
+pjax than without it (+0.40%): pjax took 15 common photos for their EXIF
+thumbnail, and since zpaq-std puts only consecutive files of one codec in
+a block, they split pja's blocks into small ones that did not pay their
+ZPAQL. Per file, a thumbnail gains 54 bytes to 7.7 KB over pja; the JPEGs
+after the EOI (a camera's MPO) 200 KB to 1.15 MB, about a fifth of their
+size. pjax's detect now takes 12 bits, a DNL, a DRI with no restarts
+(none of which pja takes), or 256 KiB or more of JPEGs after the EOI; the
+format and the ZPAQL do not change. zpaq-std -sat in the family's order,
+plain zpaq 7.15 giving every file back:
+
+| files | without pjax | pjax 0.0.3 | pjax 0.0.4 |
+|---|---|---|---|
+| zpaq-std's 79 | 19,451,097 | 19,529,480 (+0.40%) | 19,451,097 (the same) |
+| our 116 | 33,355,687 | 32,742,655 (-1.84%) | 32,047,857 (-3.92%) |
+
+On zpaq-std's files pjax takes only the three pja cannot (two 12-bit, one
+DRI with no restarts), which go as -m says, as they did without it.

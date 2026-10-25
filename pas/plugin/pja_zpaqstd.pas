@@ -55,6 +55,9 @@ const
   ZS_QUERY_SEGMENTS = 3;
   ZPAQL_MAX_SCANS = 256;
   ZPAQL_LS_MAX_SCANS = 64;    { jls.zl's JMAXSCANS }
+  { the JPEGs after the EOI pjax's detect asks for: they gain about a fifth
+    of their size, which then pays pjax's ZPAQL (57,709 bytes) on its own }
+  PJAX_MIN_AFTER = 256 * 1024;
   ZS_CODEC_ABI  = 1;
   ZS_ERR_DATA   = -1;
   ZS_ERR_MEMORY = -2;
@@ -245,7 +248,7 @@ begin
 end;
 
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
-var d: TBytes; j: TJpeg; jl: TJls; w: Int64; hasParts: Boolean;
+var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64;
 begin
   Result := 0;
   if (codecName = nil) or (n < 4) or (n > MAX_BLOCK) then Exit;
@@ -260,13 +263,16 @@ begin
          (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjax') = 0 then begin
-      { a Huffman JPEG with what only version 6 holds: JPEGs inside it, 12
-        bits, a DNL, a DRI with no restarts; the others are pja's }
+      { a Huffman JPEG with what only version 6 holds: 12 bits, a DNL, a DRI
+        with no restarts (pja takes none of them), or JPEGs after its EOI of
+        PJAX_MIN_AFTER bytes or more. A camera's thumbnails gain a few KB,
+        which do not pay pjax's ZPAQL nor the pja block they would split:
+        those files are pja's }
       d := Bytes(src, n);
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
          not j.arithmetic and not j.lossless and (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
-        w := ZpaqlPjaxFileWords(d, j, hasParts);
-        if (hasParts or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and (Log2Words(w) <= ZPAQL_MAX_PH) then
+        w := ZpaqlPjaxFileWords(d, j, after);
+        if ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and (Log2Words(w) <= ZPAQL_MAX_PH) then
           Result := 1;
       end;
     end else if StrComp(codecName, 'pjals') = 0 then begin

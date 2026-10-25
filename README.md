@@ -97,9 +97,9 @@ as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
 DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
 `pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds three
 codecs, tried in this order: `pjax` for the JPEGs that need stream
-version 6 (JPEGs inside them: EXIF thumbnails, MPO, Ultra HDR; 12 bits;
-a DNL; a DRI with no restarts), `pja` for every other JPEG, and `pjals`
-for JPEG-LS. Each detects its files by their bytes and leaves
+version 6 (12 bits; a DNL; a DRI with no restarts; 256 KiB or more of
+JPEGs after the EOI, as an MPO or an Ultra HDR file has them), `pja` for
+every other JPEG, EXIF thumbnails included, and `pjals` for JPEG-LS. Each detects its files by their bytes and leaves
 verification to zpaq-std, which decodes every block before writing it.
 Every block also carries the codec's decoder in ZPAQL, so that any zpaq
 reads the archive without the plugin, and several files may share a
