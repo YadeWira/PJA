@@ -801,21 +801,6 @@ begin
   end;
 end;
 
-{ |v| >= 1 with a single context row: bit length in unary with
-  expo[ebase + i], then the mantissa. For the DC. }
-procedure CodeMagnitude(var cd: TCoder; var expo: TBits; ebase: Integer;
-                        var mant1: TBits; m1, m1stride: Integer; var mant: TBits; maxE: Integer; var a: Integer);
-var e, i: Integer;
-begin
-  if cd.encoding then e := BitLen(a) else e := 0;
-  i := 1;
-  while i < maxE do begin
-    if cd.Code(expo[ebase + i - 1], Ord(e > i)) = 0 then Break;
-    Inc(i);
-  end;
-  CodeMantissa(cd, mant1, m1, m1stride, mant, maxE, i, a);
-end;
-
 { 0, 1 or 2 for a negative, zero or positive v. Comparisons, not branches:
   the sign of a neighbour is as unpredictable as the data. }
 function Sgn3(v: Int64): Integer; inline;

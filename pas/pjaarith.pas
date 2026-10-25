@@ -80,8 +80,6 @@ type
     procedure InitLive(s: TLiveStream);
     function Decode(prob: Integer): Integer;
     function Direct(count: Integer): Cardinal;
-    { Bytes consumed so far, counting the ones read past the end. }
-    function Position: SizeInt;
   end;
 
   TAdaptiveBit = record
@@ -304,9 +302,6 @@ begin
   Result := 0;
   for k := 1 to count do Result := (Result shl 1) or Cardinal(Decode(PROB_ONE div 2));
 end;
-
-function TArithDecoder.Position: SizeInt;
-begin Result := p; end;
 
 { ---------- counter ---------- }
 

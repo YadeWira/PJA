@@ -1,6 +1,7 @@
 { Layer 4 against damaged streams: every JPEG in the directory is compressed,
   and then every bit of the stream (up to the first max bytes) is flipped
-  and every truncation tried. Decompress may give an error or a JPEG (a
+  and every truncation tried. So is the stream of the first file cut in
+  half, which PJA takes only as bytes (stream version 6, BYTES). Decompress may give an error or a JPEG (a
   different one is caught later by the container's size and hash); an
   exception is a FAILURE.
 
@@ -15,7 +16,7 @@ begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := n
 
 var
   files: TStringList; sr: TSearchRec; i, b, maxBytes: Integer; n: SizeInt;
-  variants, decoded, same, failures: Int64; d, st, m, back: TBytes;
+  variants, decoded, same, failures: Int64; d, st, m, back: TBytes; r: TCodecResult; bytesDone: Boolean;
 
 procedure Try1(const x: TBytes; const what: string);
 begin
@@ -53,6 +54,24 @@ begin
     end;
     for b := 0 to Length(st) - 1 do Try1(Copy(st, 0, b), Format('%s truncated to %d', [ExtractFileName(files[i]), b]));
   end;
+  { a file cut in half goes as bytes: that stream damaged the same way }
+  bytesDone := False;
+  for i := 0 to files.Count - 1 do begin
+    if bytesDone then Break;
+    d := ReadFile(files[i]);
+    d := Copy(d, 0, Length(d) div 2);
+    r := Compress(d, st, True, 1);
+    if not r.Ok or not r.asBytes then Continue;
+    bytesDone := True;
+    n := Length(st); if n > maxBytes then n := maxBytes;
+    for b := 0 to n * 8 - 1 do begin
+      m := Copy(st, 0, Length(st));
+      m[b div 8] := m[b div 8] xor (1 shl (b mod 8));
+      Try1(m, Format('%s cut in half, as bytes, bit %d', [ExtractFileName(files[i]), b]));
+    end;
+    for b := 0 to Length(st) - 1 do Try1(Copy(st, 0, b), Format('%s cut in half, as bytes, truncated to %d', [ExtractFileName(files[i]), b]));
+  end;
+  if not bytesDone then begin Inc(failures); Writeln('  FAIL no file cut in half went as bytes'); end;
   { decoded but different is expected: the codec does not verify, the
     container does (size and hash of the original) }
   Writeln(files.Count, ' files, ', variants, ' variants, ', decoded, ' decoded (', same,
