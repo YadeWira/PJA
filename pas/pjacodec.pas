@@ -43,7 +43,7 @@ uses SysUtils, pjajpeg, pjajls;
 
 const
   { PJA's release: the command and the zpaq-std plugin say this one }
-  PJA_VERSION = '0.0.1';
+  PJA_VERSION = '0.0.2';
   { 5 since 0.0.1: the predictions' arithmetic made 32-bit (pjamodel.W32),
     so a ZPAQL decoder can follow it exactly; 4 streams decoded with the
     64-bit one and are no longer read }
@@ -51,7 +51,8 @@ const
   { a JPEG with other JPEGs inside it (an EXIF thumbnail, the further
     images of an MPO, an Ultra HDR gain map): each of them as a stream of
     its own, the rest as a version 5 stream (doc/CODEC.md). Compress writes
-    it only when it found such a JPEG, version 5 otherwise }
+    it only when it found such a JPEG, version 5 otherwise. Since 0.0.2,
+    with the encoder quirks and the files taken as bytes too }
   STREAM_PARTS = 6;
   { the header: version, model, header stream length }
   STREAM_HEADER = 6;
