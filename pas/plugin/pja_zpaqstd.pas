@@ -164,6 +164,37 @@ begin
   end;
 end;
 
+{ pjall: a lossless JPEG's version 5 stream, its ZPAQL's }
+function LlCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var stream: TBytes;
+begin
+  if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
+  try
+    { no verification here: zpaq-std decodes every block and compares }
+    if not Compress(Bytes(src, n), stream, False, 1, False, False).Ok then Exit(ZS_ERR_DATA);
+    if ZpaqlLjpegArgs(stream) < 0 then Exit(ZS_ERR_DATA);
+    if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
+    if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
+    Result := Length(stream);
+  except
+    on EOutOfMemory do Result := ZS_ERR_MEMORY;
+    on Exception do Result := ZS_ERR_DATA;
+  end;
+end;
+
+function LlQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := ZpaqlLjpegArgs(Bytes(src, n));
+  except
+    Result := -1;
+  end;
+end;
+
 function XDecompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   param: LongInt): Int64; cdecl;
 var jpeg: TBytes; r: TCodecResult;
@@ -275,6 +306,14 @@ begin
         if ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and (Log2Words(w) <= ZPAQL_MAX_PH) then
           Result := 1;
       end;
+    end else if StrComp(codecName, 'pjall') = 0 then begin
+      { a lossless JPEG (SOF3), its restarts where its DRI says: no other
+        codec takes it }
+      d := Bytes(src, n);
+      if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
+         j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
+         (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+         (Log2Words(ZpaqlLjpegWords(j)) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);
       { compress() keeps the smaller of the two models: either has to fit }
@@ -308,6 +347,15 @@ const
     'commit=' + {$I %PJA_COMMIT%} + #10 +
     'format=PJA codec stream v6 (or v5) of a Huffman JPEG: the JPEGs inside it as JPEGs, 12 bits, DNL, a DRI with no restarts'#10 +
     'notes=lossless: the original rebuilt byte for byte; for the JPEGs pja leaves its embedded ones raw in (EXIF thumbnails, MPO, Ultra HDR); try it before pja'#10;
+  INFO_LL: AnsiString =
+    'name=pjall'#10 +
+    'version=' + PJA_VERSION + ' (stream v5)'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    'format=PJA codec stream v5 of a lossless JPEG (SOF3, Huffman): its samples through the JPEG-LS samples model'#10 +
+    'notes=lossless: the original rebuilt byte for byte; 2 to 16 bits, predictors 1 to 7, point transform, restarts, DNL'#10;
   INFO_LS: AnsiString =
     'name=pjals'#10 +
     'version=' + PJA_VERSION + ' (stream v5)'#10 +
@@ -338,6 +386,11 @@ end;
 function XData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
   Result := DataOf(PJAX_ZPAQL, INFO_X, what, size);
+end;
+
+function LlData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALL_ZPAQL, INFO_LL, what, size);
 end;
 
 function CodecData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
@@ -390,6 +443,19 @@ const
     data: @XData
   );
 
+  ZsCodecLl: TZsCodec = (
+    abi: ZS_CODEC_ABI;
+    name: 'pjall';
+    library_: 'pja stream v5 lossless jpeg (YadeWira/PJA)';
+    min_level: LEVEL_FULL;
+    max_level: LEVEL_FULL;
+    bound: @CodecBound;
+    compress_: @LlCompress;
+    decompress_: @CodecDecompress;
+    query: @LlQuery;
+    data: @LlData
+  );
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -401,6 +467,7 @@ begin
     0: Result := @ZsCodec;
     1: Result := @ZsCodecLs;
     2: Result := @ZsCodecX;
+    3: Result := @ZsCodecLl;
   else Result := nil;
   end;
 end;

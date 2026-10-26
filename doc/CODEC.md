@@ -892,3 +892,29 @@ plain zpaq 7.15 giving every file back:
 
 On zpaq-std's files pjax takes only the three pja cannot (two 12-bit, one
 DRI with no restarts), which go as -m says, as they did without it.
+
+## The pjall codec, for zpaq-std (25/10/2026)
+
+The family's next codec: lossless JPEG (SOF3, Huffman), 2 to 16 bits,
+every predictor, a point transform, restarts, a DNL; stream version 5 as
+pja writes it for such a file. No other codec takes these files (pja's
+and pjax's ZPAQL have no lossless scans), so pjall takes every one its
+ZPAQL fits; a block that does not pay goes as -m says, as it would have.
+
+Its decoder adds little to what was there: pja's header parser (pjadec.zl,
+whose `if PJALL:` hands an SOF3 to ljpeg.zl), JPEG-LS's samples model
+(jls.zl's samplesband, on the samples as LosslessView shows them), and
+ljpeg.zl, which writes the scans again as pjajpeg.EncodeScanLossless does.
+30,508 bytes of ZPAQL; the other three programs, compiled with PJALL = 0,
+are byte for byte as before.
+
+Checked with libzpaq (zpaq 7.15's engine): the 36 synthetic lossless
+JPEGs (8, 12 and 16 bits, gray and colour, predictors 1 to 7, point
+transforms, restarts) and 60 photos as lossless JPEG (predictors 1 and 6)
+back byte for byte; blocks of 6 and 4 segments back; 300 damaged
+segments: 299 errors and one the same, none hanging or crashing. zpaq-std
+-sat in the family's order on those 96 files with zpaq-std's 79: 151,373,263
+bytes with 0.0.4, 128,835,877 with pjall (-14.9%; its photos at 29 to 74%
+of their size), every block ZPAQL OK, zpaq 7.15 giving every file back.
+Windows 10, 64 and 32 bits: the same archive, every file back without
+the plugin.

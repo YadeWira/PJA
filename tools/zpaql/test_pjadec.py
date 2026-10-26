@@ -6,6 +6,7 @@ block, as zpaq-std groups them.
 
     test_pjadec.py <segment dir> <jpeg> ...
     test_pjadec.py --pjax <segment dir> <jpeg> ...   pjax's (pjaxzpaql.inc)
+    test_pjadec.py --pjall <segment dir> <jpeg> ...  pjall's (pjallzpaql.inc)
 
 The segments come from pas/tests/zpaql_segments, with the $3 the plugin's
 query gives for each: the decoder runs with exactly that H (it measures its
@@ -23,7 +24,9 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 args = sys.argv[1:]
 # --pjax: the segments are the pjax codec's, every file through its decoder
 pjax = args[:1] == ['--pjax']
-if pjax:
+# --pjall: lossless JPEGs, through the pjall codec's decoder
+pjall = args[:1] == ['--pjall']
+if pjax or pjall:
     args = args[1:]
 segdir, jpegs = args[0], args[1:]
 
@@ -36,6 +39,8 @@ def config(name):
 cfgs = {False: config('pjazpaql.inc'), True: config('pjalszpaql.inc')}
 if pjax:
     cfgs = {False: config('pjaxzpaql.inc'), True: config('pjaxzpaql.inc')}
+if pjall:
+    cfgs = {False: config('pjallzpaql.inc'), True: config('pjallzpaql.inc')}
 fails = 0
 for j in jpegs:
     want = open(j, 'rb').read()

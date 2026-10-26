@@ -479,6 +479,10 @@ def parseheaders():
             readdac(first, last)
         elif PJAX and m == 220:
             pass                # pjax: a DNL, its height read with the frame
+        elif PJALL and m == 195:
+            lsof(first)         # pjall: a lossless frame and its samples
+        elif PJALL and m == 220:
+            pass                # pjall: a DNL, its height read with the frame
         elif m == 195 or m == 197 or m == 198 or m == 199 or m == 203 or m == 205 or m == 206 or m == 207 or m == 220 or m == 222 or m == 223 or m == 247:
             error()
         elif m == 218:

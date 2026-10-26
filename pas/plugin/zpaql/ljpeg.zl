@@ -1,0 +1,201 @@
+"""The pjall codec's decoder: lossless JPEG (SOF3, Huffman) in a stream of
+version 5. Its headers as pja's (pjadec.zl, which hands the frame to lsof),
+its samples from JPEG-LS's samples model (jls.zl's samplesband, on the
+samples as pjacodec.LosslessView shows them: P - Pt bits, every component
+whole), and its scans again (pjajpeg.EncodeScanLossless)."""
+
+lossless = 0
+lprec = 0
+
+def dnlheight(p):
+    """the height of the DNL after the frame (pjax.zl's: no FF DC can be
+    inside the entropy-coded data, which is not in raw anyway)"""
+    q = p
+    while q + 6 <= rawlen:
+        if rb(q) == 255 and rb(q + 1) == 220 and u16(q + 2) == 4:
+            h = u16(q + 4)
+            if h == 0:
+                error()
+            return h
+        q += 1
+    error()
+    return 0
+
+def lsof(p):
+    """pjajpeg.ReadSof for SOF3: 2 to 16 bits, no component subsampled"""
+    global ncomp, lossless, lprec, jw, jh, jnc
+    if lossless or mcusx:
+        error()
+    lossless = 1
+    lprec = rb(p)
+    if lprec < 2 or lprec > 16:
+        error()
+    jh = u16(p + 1)
+    if jh == 0:
+        jh = dnlheight(p)
+    jw = u16(p + 3)
+    jnc = rb(p + 5)
+    if jw == 0 or jnc < 1 or jnc > 4:
+        error()
+    ncomp = jnc
+    for i in range(jnc):
+        CID[i] = rb(p + 6 + 3 * i)
+        if rb(p + 7 + 3 * i) != 17:
+            error()
+        JSAMP[i] = alloc(jw * jh)
+
+def sar1(v):
+    """v div 2, rounding down (Pascal's SarLongint(v, 1))"""
+    if slt(v, 0):
+        return ~((~v) >> 1)
+    return v >> 1
+
+def lpredict(psv, ra, rbv, rc):
+    """H.1.2.1, as libjpeg computes it"""
+    if psv == 1:
+        return ra
+    if psv == 2:
+        return rbv
+    if psv == 3:
+        return rc
+    if psv == 4:
+        return ra + rbv - rc
+    if psv == 5:
+        return ra + sar1(rbv - rc)
+    if psv == 6:
+        return rbv + sar1(ra - rc)
+    return (ra + rbv) >> 1
+
+# a scan's bits: n <= 16 at a time, the oldest first; FF is followed by 00
+lacc = 0
+lbn = 0
+
+def lputbits(v, n):
+    global lacc, lbn
+    lacc = (lacc << n) | (v & ((1 << n) - 1))
+    lbn += n
+    while lbn >= 8:
+        lbn -= 8
+        b = (lacc >> lbn) & 255
+        putbyte(b)
+        if b == 255:
+            putbyte(0)
+    lacc = lacc & ((1 << lbn) - 1)
+
+def lalign(padbit):
+    if lbn & 7:
+        if padbit:
+            lputbits(255, 8 - (lbn & 7))
+        else:
+            lputbits(0, 8 - (lbn & 7))
+
+def lencodescan(s):
+    global lacc, lbn
+    lacc = 0
+    lbn = 0
+    w = jw
+    rows = 0
+    if SRI[s] > 0:
+        rows = SRI[s] // w
+    rst = 0
+    y0 = 0
+    n = SNC[s]
+    psv = SSS[s]
+    for y in range(jh):
+        if rows > 0 and y > 0 and y % rows == 0:
+            lalign(SPAD[s])
+            putbyte(255)
+            putbyte(208 + (rst & 7))
+            rst += 1
+            y0 = y
+        for x in range(w):
+            for i in range(n):
+                at = JSAMP[SCOMP[4 * s + i]] + y * w + x
+                if y == y0:
+                    if x == 0:
+                        pr = 1 << (jbits - 1)
+                    else:
+                        pr = H[at - 1]
+                elif x == 0:
+                    pr = H[at - w]
+                else:
+                    pr = lpredict(psv, H[at - 1], H[at - w], H[at - w - 1])
+                d = (H[at] - pr) & 65535
+                # jclhuff.c: the magnitude modulo 2^16, 32768 alone in category 16
+                if d & 32768:
+                    mag = (-d) & 32767
+                    if mag == 0:
+                        mag = 32768
+                        bits = 0
+                    else:
+                        bits = ~mag
+                else:
+                    mag = d
+                    bits = mag
+                t = bitlen(mag)
+                dct = SDC[4 * s + i]
+                if H[dct + 256 + t] == 0:
+                    error()
+                lputbits(H[dct + t], H[dct + 256 + t])
+                if t > 0 and t < 16:
+                    lputbits(bits, t)
+    lalign(SPAD[s])
+
+def lmain():
+    global origsize, hp, jbits
+    hp = base(HEAP)
+    probeh()
+    tables()
+    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+    if M[SEG] != 5 or M[SEG + 1] != 0:
+        error()
+    hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
+    dinit(SEG + 6, SEG + 6 + hlen)
+    coderaw(origsize)
+    parseheaders()
+    scanbits()
+    # pjajpeg.ReadSos's checks: a predictor 1 to 7, Se and Ah 0, one point
+    # transform below the precision, restarts at the start of a line
+    if lossless == 0 or mcusx:
+        error()
+    al = SAL[0]
+    if al >= lprec:
+        error()
+    for s in range(nscans):
+        if SSS[s] < 1 or SSS[s] > 7 or SSE[s] != 0 or SAH[s] != 0 or SAL[s] != al:
+            error()
+        if SRI[s] % jw != 0:
+            error()
+        for i in range(SNC[s]):
+            if SDC[4 * s + i] == 0:
+                error()
+    jbits = lprec - al
+    # the samples, band by band
+    p = SEG + 6 + hlen
+    end = inlen()
+    nb = jlsbandcount()
+    for b in range(nb):
+        if b < nb - 1:
+            ln = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+            p += 4
+        else:
+            ln = end - p
+        if p + ln > end:
+            error()
+        dinit(p, p + ln)
+        samplesband(b, nb)
+        p += ln
+    # the file again: raw bytes and scans (pjajpeg.Recompose)
+    q = 0
+    for s in range(nscans):
+        while q < SCUT[s]:
+            putbyte(rb(q))
+            q += 1
+        lencodescan(s)
+    while q < rawlen:
+        putbyte(rb(q))
+        q += 1
+    if outn != origsize:
+        error()
+    # the next segment of the block, if any, starts from scratch
+    reset(hp)

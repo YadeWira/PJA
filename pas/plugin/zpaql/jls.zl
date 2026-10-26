@@ -1257,60 +1257,63 @@ def symrunend(c, i, ln):
 
 def main():
     global origsize, hp, jmode, runbase, runpos, runmax
-    hp = base(HEAP)
-    probeh()
-    tables()
-    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
-    if M[SEG] != 5 or M[SEG + 1] != 0:
-        error()
-    hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
-    dinit(SEG + 6, SEG + 6 + hlen)
-    coderaw(origsize)
-    parsejls()
-    symbols = direct(1)
-    linebuffers()
-    p = SEG + 6 + hlen
-    end = inlen()
-    if symbols:
-        dinit(p, end)
-        symnew()
-        jmode = 1
-        for s in range(jnscans):
-            symbeginscan(s)
-            runbase = hp
-            runpos = 0
-            scanlines(s)
-            LSRUNS[s] = runbase
-            LSNRUNS[s] = runpos
+    if PJALL:
+        lmain()
     else:
-        coderuns()
-        nb = jlsbandcount()
-        for b in range(nb):
-            if b < nb - 1:
-                ln = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
-                p += 4
-            else:
-                ln = end - p
-            dinit(p, p + ln)
-            samplesband(b, nb)
-            p += ln
-    # the file again: raw bytes and scans (pjajls.RecomposeJls)
-    jmode = 0
-    q = 0
-    for s in range(jnscans):
-        while q < LSCUT[s]:
+        hp = base(HEAP)
+        probeh()
+        tables()
+        origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+        if M[SEG] != 5 or M[SEG + 1] != 0:
+            error()
+        hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
+        dinit(SEG + 6, SEG + 6 + hlen)
+        coderaw(origsize)
+        parsejls()
+        symbols = direct(1)
+        linebuffers()
+        p = SEG + 6 + hlen
+        end = inlen()
+        if symbols:
+            dinit(p, end)
+            symnew()
+            jmode = 1
+            for s in range(jnscans):
+                symbeginscan(s)
+                runbase = hp
+                runpos = 0
+                scanlines(s)
+                LSRUNS[s] = runbase
+                LSNRUNS[s] = runpos
+        else:
+            coderuns()
+            nb = jlsbandcount()
+            for b in range(nb):
+                if b < nb - 1:
+                    ln = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+                    p += 4
+                else:
+                    ln = end - p
+                dinit(p, p + ln)
+                samplesband(b, nb)
+                p += ln
+        # the file again: raw bytes and scans (pjajls.RecomposeJls)
+        jmode = 0
+        q = 0
+        for s in range(jnscans):
+            while q < LSCUT[s]:
+                putbyte(H[rawbase + q])
+                q += 1
+            runbase = LSRUNS[s]
+            runpos = 0
+            runmax = LSNRUNS[s]
+            scanlines(s)
+            if LSNEAR[s] > 0 and runpos != runmax:
+                error()
+        while q < rawlen:
             putbyte(H[rawbase + q])
             q += 1
-        runbase = LSRUNS[s]
-        runpos = 0
-        runmax = LSNRUNS[s]
-        scanlines(s)
-        if LSNEAR[s] > 0 and runpos != runmax:
+        if outn != origsize:
             error()
-    while q < rawlen:
-        putbyte(H[rawbase + q])
-        q += 1
-    if outn != origsize:
-        error()
-    # the next segment of the block, if any, starts from scratch
-    reset(hp)
+        # the next segment of the block, if any, starts from scratch
+        reset(hp)

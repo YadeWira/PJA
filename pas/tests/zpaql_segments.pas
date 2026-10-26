@@ -5,18 +5,20 @@
   JPEG-LS file, the same for the pjals codec's decoder.
 
     zpaql_segments <out dir> <jpeg> ...
-    zpaql_segments --pjax <out dir> <jpeg> ...   the pjax codec's streams }
+    zpaql_segments --pjax <out dir> <jpeg> ...   the pjax codec's streams
+    zpaql_segments --pjall <out dir> <jpeg> ...  the pjall codec's (lossless JPEG) }
 program zpaql_segments;
 
 {$mode objfpc}{$H+}
 
 uses {$ifdef unix}cthreads,{$endif} SysUtils, Classes, pjajls, pjacodec, pjazpaqlargs;
 
-var data, stream, seg: TBytes; f: TFileStream; i, first: Integer; name, outDir: string; t: Text; pjax: Boolean;
+var data, stream, seg: TBytes; f: TFileStream; i, first: Integer; name, outDir: string; t: Text; pjax, pjall: Boolean;
 begin
   pjax := ParamStr(1) = '--pjax';
+  pjall := ParamStr(1) = '--pjall';
   first := 2; outDir := ParamStr(1);
-  if pjax then begin first := 3; outDir := ParamStr(2); end;
+  if pjax or pjall then begin first := 3; outDir := ParamStr(2); end;
   for i := first to ParamCount do begin
     f := TFileStream.Create(ParamStr(i), fmOpenRead or fmShareDenyNone);
     try
@@ -37,6 +39,7 @@ begin
     Assign(t, IncludeTrailingPathDelimiter(outDir) + ChangeFileExt(name, '.args'));
     Rewrite(t);
     if pjax then WriteLn(t, ZpaqlPjaxArgs(stream))
+    else if pjall then WriteLn(t, ZpaqlLjpegArgs(stream))
     else if IsJls(data) then WriteLn(t, ZpaqlJlsArgs(stream)) else WriteLn(t, ZpaqlArgs(stream));
     Close(t);
   end;

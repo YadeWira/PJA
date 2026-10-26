@@ -95,11 +95,12 @@ at all. The 32-bit build's speed is not measured yet.
 as a codec for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s `-sat`
 (codecs for specific formats), on its plugin ABI 1: `pas/plugin/build.sh
 DIR` builds `pja.so`, `pja.dll` and, with `PPC386` and `RTL386`, the 32-bit
-`pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds three
+`pja.dll`, to go in zpaq-std's `codecs/` folder. The file holds four
 codecs, tried in this order: `pjax` for the JPEGs that need stream
 version 6 (12 bits; a DNL; a DRI with no restarts; 256 KiB or more of
 JPEGs after the EOI, as an MPO or an Ultra HDR file has them), `pja` for
-every other JPEG, EXIF thumbnails included, and `pjals` for JPEG-LS. Each detects its files by their bytes and leaves
+every other JPEG, EXIF thumbnails included, `pjall` for lossless JPEG,
+and `pjals` for JPEG-LS. Each detects its files by their bytes and leaves
 verification to zpaq-std, which decodes every block before writing it.
 Every block also carries the codec's decoder in ZPAQL, so that any zpaq
 reads the archive without the plugin, and several files may share a
@@ -107,8 +108,9 @@ block. The decoders are compiled from `pas/plugin/zpaql/` with
 `tools/zpaql/`: `pja`'s (62,294 bytes of ZPAQL) covers every JPEG PJA
 handles, Huffman or arithmetic, sequential or progressive; `pjals`'s
 (55,989 bytes) every JPEG-LS file, with either of its two models; `pjax`'s
-(57,709 bytes) the Huffman JPEGs of version 6. `pja` and `pjals` are frozen
-as v0.0.1 left them.
+(57,709 bytes) the Huffman JPEGs of version 6; `pjall`'s (30,508 bytes)
+lossless JPEG, 2 to 16 bits, through JPEG-LS's samples model. `pja` and
+`pjals` are frozen as v0.0.1 left them, `pjax` as v0.0.3 did.
 Its memory is sized for each block: the plugin tells zpaq-std how much
 the decoder will need for that file (2 MB for a small one, 16 MB for a
 photo of 200 KB, at most 256 MB).
