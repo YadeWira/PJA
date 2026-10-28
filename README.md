@@ -3,6 +3,11 @@
 Lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal with
 some x86-64 assembly, and nothing else: no C, no C++, no libraries.
 
+| Component | Status |
+|---|---|
+| CI | [![CI][ciBadge]][ciLink] |
+| Latest release | [![Release][relBadge]][relLink] |
+
 ```sh
 pja a photo.jpg          # -> photo.pja, about 25% smaller
 pja x photo.pja          # -> photo.jpg, the same file byte for byte
@@ -59,6 +64,24 @@ JPEGs it does not take: hierarchical JPEG, lossless
 JPEG with arithmetic coding (SOF11) or subsampled components, and JPEG-LS
 with a point transform or with subsampled components in sample
 interleave.
+
+## Platforms
+
+| OS | Architectures | State |
+|---|---|---|
+| Linux | x86-64 | built and tested in CI, the two full suites included; developed here |
+| Linux | AArch64 | built and tested in CI; streams byte-identical to x86-64 |
+| Linux | x86 (32-bit) | built and tested in CI; streams byte-identical to x86-64 |
+| macOS | arm64 (Apple silicon) | built and tested in CI; streams byte-identical to x86-64 |
+| Windows (7 and later) | x86-64 | built and tested in CI; also validated in Windows 10 and Windows 7 VMs |
+| Windows (7 and later) | x86 | built and tested in CI; also validated in Windows 10 and Windows 7 VMs |
+
+On every platform CI builds the command and the zpaq-std plugin, takes
+every sample of the repository through `pja a` and `pja x`, and compares
+the SHA-256 of the codec's streams across all six (`.github/test.sh`): a
+`.pja` made on one decodes on any other. The x86-64 builds use PJA's
+assembly routines, the others their Pascal versions, which the suite holds
+to the same streams.
 
 ## Building
 
@@ -193,3 +216,8 @@ The first two are in `pas/pja.inc`.
 
 MIT, see `LICENSE`. The arithmetic-coded JPEG support is based in part on the
 work of the Independent JPEG Group; see `NOTICE` for that and other credits.
+
+[ciBadge]: https://github.com/YadeWira/PJA/actions/workflows/ci.yml/badge.svg "Continuous Integration"
+[ciLink]: https://github.com/YadeWira/PJA/actions/workflows/ci.yml
+[relBadge]: https://img.shields.io/github/v/release/YadeWira/PJA "Latest release"
+[relLink]: https://github.com/YadeWira/PJA/releases/latest

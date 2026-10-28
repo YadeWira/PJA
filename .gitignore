@@ -4,3 +4,4 @@
 *.exe
 build/
 __pycache__/
+hash.txt
