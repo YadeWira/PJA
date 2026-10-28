@@ -1,0 +1,314 @@
+"""The pjalsx codec's decoder: JPEG-LS whose components are subsampled.
+jls.zl compiled with PJALSX = 1 calls these where the frame's size is not
+every component's: each component's own size (pjajls.Parse), the samples
+model's rows in its order (pjamodel.CodeJlsBand), a scan's lines and the
+groups of lines of a subsampled line-interleaved scan (pjajls.CodeLines,
+ScanRows), and the symbols model's context of the first component, which
+it takes only from one of the same size."""
+
+XH = array(4)             # [component] its sampling factors, its size
+XV = array(4)
+XW = array(4)
+XHT = array(4)
+XSW = array(4)            # [scan component] its width; the first's size or not
+XSAME = array(4)
+XFIRST = array(4)         # [component] a band's rows
+XLAST = array(4)
+xsub = 0                  # some component's size is not the frame's
+
+def xframe():
+    """pjajls.Parse: each component's size (T.87 A.2) and its samples"""
+    global xsub
+    hm = 1
+    vm = 1
+    for i in range(jnc):
+        if XH[i] < 1 or XH[i] > 4 or XV[i] < 1 or XV[i] > 4:
+            error()
+        hm = smax(hm, XH[i])
+        vm = smax(vm, XV[i])
+    xsub = 0
+    for i in range(jnc):
+        XW[i] = (jw * XH[i] + hm - 1) // hm
+        XHT[i] = (jh * XV[i] + vm - 1) // vm
+        if XW[i] != jw or XHT[i] != jh:
+            xsub = 1
+        JSAMP[i] = alloc(XW[i] * XHT[i])
+
+def xgrouped(s):
+    """pjajls.Grouped: a sampling factor other than 1 in the scan"""
+    for c in range(LSNC[s]):
+        k = LSCOMP[4 * s + c]
+        if XH[k] != 1 or XV[k] != 1:
+            return 1
+    return 0
+
+def xsoscheck(s):
+    """none in sample interleave, no restarts in line interleave, when
+    grouped"""
+    if xgrouped(s):
+        if LSILV[s] == 2 or (LSILV[s] == 1 and LSRI[s] > 0):
+            error()
+
+def xscanrows(s):
+    """pjajls.ScanRows"""
+    if LSILV[s] == 0:
+        return XHT[LSCOMP[4 * s]]
+    if xgrouped(s) == 0:
+        return jh
+    r = 0
+    for c in range(LSNC[s]):
+        k = LSCOMP[4 * s + c]
+        r = smax(r, (XHT[k] + XV[k] - 1) // XV[k])
+    return r
+
+def xsetup(s):
+    for c in range(LSNC[s]):
+        k = LSCOMP[4 * s + c]
+        k0 = LSCOMP[4 * s]
+        XSW[c] = XW[k]
+        XSAME[c] = 0
+        if XW[k] == XW[k0] and XHT[k] == XHT[k0]:
+            XSAME[c] = 1
+
+def xtotal():
+    t = 0
+    for i in range(jnc):
+        t = t + XW[i] * XHT[i]
+    return t
+
+def xcodelines(s, y0, y1):
+    """pjajls.CodeLines"""
+    global crunindex
+    n = LSNC[s]
+    if LSILV[s] == 1 and xgrouped(s):
+        # y counts groups: v lines of each component in turn, each line of
+        # a component following its own previous one
+        for y in range(y0, y1):
+            for c in range(n):
+                k = LSCOMP[4 * s + c]
+                for v in range(XV[k]):
+                    line = y * XV[k] + v
+                    if line >= XHT[k]:
+                        break
+                    t = PREV[c]
+                    PREV[c] = CUR[c]
+                    CUR[c] = t
+                    crunindex = RUNIDX[c]
+                    codeline(c, JSAMP[k], line * XSW[c])
+                    RUNIDX[c] = crunindex
+        return
+    for y in range(y0, y1):
+        for c in range(n):
+            t = PREV[c]
+            PREV[c] = CUR[c]
+            CUR[c] = t
+        if LSILV[s] == 2:
+            codelinesample(s, n, y * jw)
+        else:
+            for c in range(n):
+                crunindex = RUNIDX[c]
+                codeline(c, JSAMP[LSCOMP[4 * s + c]], y * XSW[c])
+                RUNIDX[c] = crunindex
+
+def xscanlines(s):
+    """scanlines with the scan's own rows"""
+    global wacc, wn, wff
+    jsetup(s)
+    clearlines(LSNC[s])
+    rows = xscanrows(s)
+    y0 = 0
+    rst = 0
+    wacc = 0
+    wn = 0
+    wff = 0
+    while y0 < rows:
+        y1 = rows
+        if LSRI[s] > 0:
+            y1 = smin(rows, y0 + LSRI[s])
+        if y0 > 0:
+            if jmode == 0:
+                wendscan()
+                putbyte(255)
+                putbyte(208 + (rst & 7))
+                rst += 1
+                wff = 0
+            jresetstate()
+            clearlines(LSNC[s])
+        xcodelines(s, y0, y1)
+        y0 = y1
+    if jmode == 0:
+        wendscan()
+
+def xsamplesband(band, nb):
+    """pjamodel.CodeJlsBand, decoding, each component of its own size:
+    subsampled, each component's rows of the band one component after the
+    other, and no context from the first component"""
+    maxv = (1 << jbits) - 1
+    rng = maxv + 1
+    half = (maxv + 1) // 2
+    defaultthresholds(maxv, 0)
+    t1 = dt1
+    t2 = dt2
+    t3 = dt3
+    # the model: bias (a, b, c, n) per class and context, counters, mixers
+    bias = alloc(2 * JLS_CTX * 4)
+    for k in range(2 * JLS_CTX):
+        H[bias + 4 * k] = 4
+        H[bias + 4 * k + 3] = 1
+    z1 = alloc(2 * JLS_ACT)
+    z2 = alloc(2 * JLS_CTX)
+    z3 = alloc(2 * JLS_NB * 4)
+    z4 = alloc(JLS_FIRST * JLS_ACT)
+    x1 = alloc(2 * JLS_ACT * JLS_MAX_EXP)
+    x2 = alloc(2 * JLS_CTX * JLS_MAX_EXP)
+    x3 = alloc(2 * JLS_NB * JLS_MAX_EXP)
+    x4 = alloc(JLS_FIRST * JLS_MAX_EXP)
+    m1 = alloc((JLS_MAX_EXP + 1) * JLS_ACT)
+    mm = alloc((JLS_MAX_EXP + 1) * JLS_MAX_EXP)
+    sg = alloc(2 * JLS_ACT * 9)
+    mxz = mxnew(5, 2 * JLS_ACT)
+    mxx = mxnew(5, 2 * JLS_MAX_EXP)
+    # [component] this row's residuals and the row above's; its rows
+    nr = 0
+    for ci in range(jnc):
+        RES[ci] = alloc(XW[ci])
+        RESUP[ci] = alloc(XW[ci])
+        XFIRST[ci] = XHT[ci] * band // nb
+        XLAST[ci] = XHT[ci] * (band + 1) // nb
+        nr = nr + XLAST[ci] - XFIRST[ci]
+    y0 = jh * band // nb
+    ci = 0
+    y = XFIRST[0]
+    for rr in range(nr):
+        if xsub:
+            while y >= XLAST[ci]:
+                ci += 1
+                y = XFIRST[ci]
+        else:
+            ci = rr % jnc
+            y = y0 + rr // jnc
+        w = XW[ci]
+        hup = 0
+        if y > XFIRST[ci]:
+            hup = 1
+        t = RES[ci]
+        RES[ci] = RESUP[ci]
+        RESUP[ci] = t
+        cls = 0
+        if ci > 0:
+            cls = 1
+        smp = JSAMP[ci]
+        base = y * w
+        r = RES[ci]
+        ru = RESUP[ci]
+        r0 = RES[0]
+        for i in range(w):
+            if hup:
+                b = H[smp + base - w + i]
+            elif i > 0:
+                b = H[smp + base + i - 1]
+            else:
+                b = half
+            if i > 0:
+                a = H[smp + base + i - 1]
+            else:
+                a = b
+            if hup and i > 0:
+                c = H[smp + base - w + i - 1]
+            else:
+                c = b
+            if hup and i + 1 < w:
+                d = H[smp + base - w + i + 1]
+            else:
+                d = b
+            ctx = (jquant(d - b, t1, t2, t3) * 9 + jquant(b - c, t1, t2, t3)) * 9 + jquant(c - a, t1, t2, t3)
+            if slt(ctx, 0):
+                sgn = -1
+                ctx = -ctx
+            else:
+                sgn = 1
+            bs = bias + 4 * (cls * JLS_CTX + ctx)
+            px = med(a, b, c) + sgn * H[bs + 2]
+            if slt(px, 0):
+                px = 0
+            elif sgt(px, maxv):
+                px = maxv
+            act = clip(finelog(sdiv(H[bs], H[bs + 3])), JLS_ACT - 1)
+            nbb = 0
+            if i > 0:
+                nbb = nbb + iabs(H[r + i - 1])
+            if hup:
+                nbb = nbb + iabs(H[ru + i])
+            nbb = clip(finelog(nbb), JLS_NB - 1)
+            if ci > 0 and xsub == 0:
+                first = clip(finelog(H[r0 + i]), JLS_FIRST - 2)
+            else:
+                first = JLS_FIRST - 1
+            bi = cls * JLS_ACT + act
+            e = 0
+            if codemix(mxz, bi, z1 + bi, z2 + cls * JLS_CTX + ctx, z3 + (cls * JLS_NB + nbb) * 4 + clip(act, 3),
+                       z4 + first * JLS_ACT + act):
+                k = 1
+                while k < JLS_MAX_EXP:
+                    if codemix(mxx, cls * JLS_MAX_EXP + k - 1, x1 + bi * JLS_MAX_EXP + k - 1,
+                               x2 + (cls * JLS_CTX + ctx) * JLS_MAX_EXP + k - 1,
+                               x3 + (cls * JLS_NB + nbb) * JLS_MAX_EXP + k - 1,
+                               x4 + first * JLS_MAX_EXP + k - 1) == 0:
+                        break
+                    k += 1
+                v = mantissa(m1, act, JLS_ACT, mm, JLS_MAX_EXP, k)
+                bit = 0
+                if i > 0:
+                    if slt(H[r + i - 1], 0):
+                        bit = 1
+                    elif sgt(H[r + i - 1], 0):
+                        bit = 2
+                if hup:
+                    if slt(H[ru + i], 0):
+                        bit = bit + 3
+                    elif sgt(H[ru + i], 0):
+                        bit = bit + 6
+                if code1(sg + bi * 9 + bit):
+                    e = -v
+                else:
+                    e = v
+            x = px + e * sgn
+            if slt(x, 0):
+                x = x + rng
+            elif sgt(x, maxv):
+                x = x - rng
+            if slt(x, 0) or sgt(x, maxv):
+                error()
+            H[smp + base + i] = x
+            H[r + i] = e
+            # LOCO's bias update (A.12, A.13), NEAR 0
+            ba = H[bs] + iabs(e)
+            bb = H[bs + 1] + e
+            bc = H[bs + 2]
+            bn = H[bs + 3]
+            if bn == 64:
+                ba = ba >> 1
+                if sge(bb, 0):
+                    bb = bb // 2
+                else:
+                    bb = -((-bb + 1) // 2)
+                bn = bn >> 1
+            bn += 1
+            if sle(bb + bn, 0):
+                bb = bb + bn
+                if sle(bb, -bn):
+                    bb = -bn + 1
+                if sgt(bc, -128):
+                    bc = bc - 1
+            elif sgt(bb, 0):
+                bb = bb - bn
+                if sgt(bb, 0):
+                    bb = 0
+                if slt(bc, 127):
+                    bc += 1
+            H[bs] = ba
+            H[bs + 1] = bb
+            H[bs + 2] = bc
+            H[bs + 3] = bn
+
+        y += 1

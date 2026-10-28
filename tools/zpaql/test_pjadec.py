@@ -7,6 +7,7 @@ block, as zpaq-std groups them.
     test_pjadec.py <segment dir> <jpeg> ...
     test_pjadec.py --pjax <segment dir> <jpeg> ...   pjax's (pjaxzpaql.inc)
     test_pjadec.py --pjall <segment dir> <jpeg> ...  pjall's (pjallzpaql.inc)
+    test_pjadec.py --pjalsx <segment dir> <jls> ...  pjalsx's (pjalsxzpaql.inc)
 
 The segments come from pas/tests/zpaql_segments, with the $3 the plugin's
 query gives for each: the decoder runs with exactly that H (it measures its
@@ -26,7 +27,9 @@ args = sys.argv[1:]
 pjax = args[:1] == ['--pjax']
 # --pjall: lossless JPEGs, through the pjall codec's decoder
 pjall = args[:1] == ['--pjall']
-if pjax or pjall:
+# --pjalsx: subsampled JPEG-LS, through the pjalsx codec's decoder
+pjalsx = args[:1] == ['--pjalsx']
+if pjax or pjall or pjalsx:
     args = args[1:]
 segdir, jpegs = args[0], args[1:]
 
@@ -41,6 +44,8 @@ if pjax:
     cfgs = {False: config('pjaxzpaql.inc'), True: config('pjaxzpaql.inc')}
 if pjall:
     cfgs = {False: config('pjallzpaql.inc'), True: config('pjallzpaql.inc')}
+if pjalsx:
+    cfgs = {False: config('pjalsxzpaql.inc'), True: config('pjalsxzpaql.inc')}
 fails = 0
 for j in jpegs:
     want = open(j, 'rb').read()

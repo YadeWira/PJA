@@ -11,7 +11,7 @@ build time only; nothing of them goes into PJA itself.
 | `zpaqlc.py` | compiles a small language (a subset of Python: 32-bit unsigned values, arrays in ZPAQL's H, functions without recursion, signed comparisons and shifts) to a ZPAQL PCOMP program |
 | `zpaqlvm.py` | runs a PCOMP program as libzpaq does, one instruction at a time, to test and debug it |
 | `test_zpaqlc.py` | random expressions against exact 32-bit arithmetic, and programs for control flow, calls, arrays, signed helpers, long jumps and variables spilled to H |
-| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`); `--check` only verifies all five are current |
+| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`) and `pas/plugin/pjalsxzpaql.inc` (pjalsx, subsampled JPEG-LS, with `jls.zl` and `jlsx.zl`); `--check` only verifies all six are current |
 | `test_pjadec.py` | those decoders run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG or JPEG-LS file back byte for byte |
 
 ```sh
@@ -29,9 +29,13 @@ their sources (the head stream, the coder, the mixers) and each pays only
 for what it uses.
 
 An `if` on a constant compiles only the branch taken (its test, too, is
-gone): the shared sources say `if PJAX:` or `if PJALL:` for what only
-pjax's or pjall's program has, and the frozen programs, compiled with both
-0, come out as they were, byte for byte. `fresh(A, B, ...)` puts every global back to its first
+gone): the shared sources say `if PJAX:`, `if PJALL:` or `if PJALSX:` for
+what only one program has, and the frozen programs, compiled with them 0,
+come out as they were, byte for byte. One thing to keep that way: a
+function's locals get their places in the order `ast.walk` meets their
+first assignment, level by level, so moving an assignment into such an
+`if` can swap two locals' places and change a frozen program. Leave the
+assignment where it was and let the branch overwrite it after. `fresh(A, B, ...)` puts every global back to its first
 value and every array but the tables, the heap and the ones named back to
 zeros, and goes on: pjax decodes several JPEGs in one segment with it.
 

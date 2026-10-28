@@ -112,7 +112,13 @@ def parsejls():
             jnc = rb(first + 5)
             for i in range(jnc):
                 JCID[i] = rb(first + 6 + 3 * i)
-                JSAMP[i] = alloc(jw * jh)
+                if PJALSX:
+                    XH[i] = rb(first + 7 + 3 * i) >> 4
+                    XV[i] = rb(first + 7 + 3 * i) & 15
+                else:
+                    JSAMP[i] = alloc(jw * jh)
+            if PJALSX:
+                xframe()        # pjalsx: each component's own size
         elif m == 248:
             t = rb(first)
             if t == 1:
@@ -163,6 +169,8 @@ def parsejls():
             LSRI[s] = ri
             LSCUT[s] = last
             jnscans = s + 1
+            if PJALSX:
+                xsoscheck(s)
         elif (m >= 192 and m <= 195) or (m >= 197 and m <= 203) or (m >= 205 and m <= 207):
             error()
         p = last
@@ -209,6 +217,8 @@ JLS_BAND_SAMPLES = 1048576
 
 def jlsbandcount():
     total = jw * jh * jnc
+    if PJALSX:
+        total = xtotal()    # pjalsx: each component of its own size
     nb = total // JLS_BAND_SAMPLES
     if nb > MAX_BANDS:
         nb = MAX_BANDS
@@ -451,6 +461,8 @@ def jsetup(s):
     ct2 = LST2[s]
     ct3 = LST3[s]
     jresetstate()
+    if PJALSX:
+        xsetup(s)
 
 def jresetstate():
     global crunindex
@@ -786,6 +798,8 @@ def codeline(c, smp, rowbase):
     """pjajls.CodeLine: one line of one component"""
     global symc, symi, crunindex
     w = jw
+    if PJALSX:
+        w = XSW[c]      # pjalsx: the component's own width
     p = PREV[c]
     cu = CUR[c]
     H[p + w + 1] = H[p + w]
@@ -972,30 +986,33 @@ def codelines(s, y0, y1):
 def scanlines(s):
     """a scan's lines with their restarts; mode 0 also writes the bits"""
     global wacc, wn, wff
-    jsetup(s)
-    clearlines(LSNC[s])
-    y0 = 0
-    rst = 0
-    wacc = 0
-    wn = 0
-    wff = 0
-    while y0 < jh:
-        y1 = jh
-        if LSRI[s] > 0:
-            y1 = smin(jh, y0 + LSRI[s])
-        if y0 > 0:
-            if jmode == 0:
-                wendscan()
-                putbyte(255)
-                putbyte(208 + (rst & 7))
-                rst += 1
-                wff = 0
-            jresetstate()
-            clearlines(LSNC[s])
-        codelines(s, y0, y1)
-        y0 = y1
-    if jmode == 0:
-        wendscan()
+    if PJALSX:
+        xscanlines(s)
+    else:
+        jsetup(s)
+        clearlines(LSNC[s])
+        y0 = 0
+        rst = 0
+        wacc = 0
+        wn = 0
+        wff = 0
+        while y0 < jh:
+            y1 = jh
+            if LSRI[s] > 0:
+                y1 = smin(jh, y0 + LSRI[s])
+            if y0 > 0:
+                if jmode == 0:
+                    wendscan()
+                    putbyte(255)
+                    putbyte(208 + (rst & 7))
+                    rst += 1
+                    wff = 0
+                jresetstate()
+                clearlines(LSNC[s])
+            codelines(s, y0, y1)
+            y0 = y1
+        if jmode == 0:
+            wendscan()
 
 def linebuffers():
     for c in range(4):
@@ -1110,6 +1127,10 @@ def symmapped(c, i, k, ctx, px, sgn, inv):
         x = clip(finelog(H[VALS[0] + i + 1]), SYM_X - 2)
     else:
         x = SYM_X - 1
+    if PJALSX:
+        # pjalsx: the first component's value only from one of its size
+        if XSAME[c] == 0:
+            x = SYM_X - 1
     q = 2 * smnear + 1
     l0 = LINES[c * 3]
     l1 = LINES[c * 3 + 1]
@@ -1295,7 +1316,10 @@ def main():
                 else:
                     ln = end - p
                 dinit(p, p + ln)
-                samplesband(b, nb)
+                if PJALSX:
+                    xsamplesband(b, nb)
+                else:
+                    samplesband(b, nb)
                 p += ln
         # the file again: raw bytes and scans (pjajls.RecomposeJls)
         jmode = 0

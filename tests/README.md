@@ -44,6 +44,13 @@ changed (CharLS has no subsampled JPEG-LS). The same rules decode
 T8SSE0's first component as the conformance set's non-subsampled image
 has it, sample for sample.
 
+`plasma33x17_none_sub.jls`: a 33x17 colour plasma (ImageMagick, `-seed
+73`, 8 bits) encoded with CharLS without interleave, its components then
+subsampled 2x2, 1x1, 1x1 (the first kept, the others every 2nd line and
+column) and written by PJA's own JPEG-LS encoder, as
+`color_line_subsampled.jls` was. Small enough for the pjalsx ZPAQL
+decoder's test in the Python interpreter.
+
 `plasma17x13_*.jls`: a 17x13 colour plasma (ImageMagick, `-seed 7`, 8
 bits) encoded with CharLS 2.4: NEAR 1 with sample interleave, and lossless
 with line interleave given a restart interval of 4 lines (CharLS 2.4

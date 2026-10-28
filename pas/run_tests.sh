@@ -52,3 +52,8 @@ rm -rf "$OUT/zpaqlll"; mkdir -p "$OUT/zpaqlll"
 ZL=("$PJA/tests/jpg/lossless_restart.jpg" "$PJA/tests/jpg/dnl_lossless.jpg")
 "$OUT/zpaql_segments" --pjall "$OUT/zpaqlll" "${ZL[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjall "$OUT/zpaqlll" "${ZL[@]}" | tail -1
+# pjalsx's: subsampled JPEG-LS, without interleave and in groups of lines
+rm -rf "$OUT/zpaqlsx"; mkdir -p "$OUT/zpaqlsx"
+ZSX=("$PJA/tests/jls/plasma33x17_none_sub.jls" "$PJA/tests/jls/color_line_subsampled.jls")
+"$OUT/zpaql_segments" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1

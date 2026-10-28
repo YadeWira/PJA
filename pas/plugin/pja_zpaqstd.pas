@@ -164,6 +164,40 @@ begin
   end;
 end;
 
+{ pjalsx: a JPEG-LS file with subsampled components, its version 5 stream
+  (the smaller of the two models), its ZPAQL's }
+function LsxCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var stream, d: TBytes;
+begin
+  if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
+  try
+    d := Bytes(src, n);
+    if not IsJls(d) then Exit(ZS_ERR_DATA);
+    { no verification here: zpaq-std decodes every block and compares }
+    if not Compress(d, stream, False, 1, False, False).Ok then Exit(ZS_ERR_DATA);
+    if ZpaqlJlsxArgs(stream) < 0 then Exit(ZS_ERR_DATA);
+    if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
+    if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
+    Result := Length(stream);
+  except
+    on EOutOfMemory do Result := ZS_ERR_MEMORY;
+    on Exception do Result := ZS_ERR_DATA;
+  end;
+end;
+
+function LsxQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := ZpaqlJlsxArgs(Bytes(src, n));
+  except
+    Result := -1;
+  end;
+end;
+
 { pjall: a lossless JPEG's version 5 stream, its ZPAQL's }
 function LlCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64; cdecl;
@@ -314,6 +348,14 @@ begin
          j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
          (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (Log2Words(ZpaqlLjpegWords(j)) <= ZPAQL_MAX_PH) then Result := 1;
+    end else if StrComp(codecName, 'pjalsx') = 0 then begin
+      { JPEG-LS with subsampled components, which pjals' frozen ZPAQL has
+        not; compress() keeps the smaller of the two models: either has to
+        fit }
+      d := Bytes(src, n);
+      if IsJls(d) and VerifyJls(d, jl).Ok and JlsSubsampled(jl) and (Length(jl.scans) <= ZPAQL_LS_MAX_SCANS) and
+         (Log2Words(ZpaqlJlsxWords(jl, False)) <= ZPAQL_MAX_PH) and
+         (Log2Words(ZpaqlJlsxWords(jl, True)) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjals') = 0 then begin
       d := Bytes(src, n);
       { compress() keeps the smaller of the two models: either has to fit }
@@ -356,6 +398,15 @@ const
     'commit=' + {$I %PJA_COMMIT%} + #10 +
     'format=PJA codec stream v5 of a lossless JPEG (SOF3, Huffman): its samples through the JPEG-LS samples model'#10 +
     'notes=lossless: the original rebuilt byte for byte; 2 to 16 bits, predictors 1 to 7, point transform, restarts, DNL'#10;
+  INFO_LSX: AnsiString =
+    'name=pjalsx'#10 +
+    'version=' + PJA_VERSION + ' (stream v5)'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    'format=PJA codec stream v5 of a JPEG-LS file with subsampled components (samples or symbols model)'#10 +
+    'notes=lossless: the original rebuilt byte for byte; what pjals takes, with components of other sizes than the frame (T.87 sampling factors)'#10;
   INFO_LS: AnsiString =
     'name=pjals'#10 +
     'version=' + PJA_VERSION + ' (stream v5)'#10 +
@@ -386,6 +437,11 @@ end;
 function XData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
   Result := DataOf(PJAX_ZPAQL, INFO_X, what, size);
+end;
+
+function LsxData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSX_ZPAQL, INFO_LSX, what, size);
 end;
 
 function LlData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
@@ -456,6 +512,19 @@ const
     data: @LlData
   );
 
+  ZsCodecLsx: TZsCodec = (
+    abi: ZS_CODEC_ABI;
+    name: 'pjalsx';
+    library_: 'pja stream v5 jpeg-ls subsampled (YadeWira/PJA)';
+    min_level: LEVEL_FULL;
+    max_level: LEVEL_FULL;
+    bound: @CodecBound;
+    compress_: @LsxCompress;
+    decompress_: @CodecDecompress;
+    query: @LsxQuery;
+    data: @LsxData
+  );
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -468,6 +537,7 @@ begin
     1: Result := @ZsCodecLs;
     2: Result := @ZsCodecX;
     3: Result := @ZsCodecLl;
+    4: Result := @ZsCodecLsx;
   else Result := nil;
   end;
 end;

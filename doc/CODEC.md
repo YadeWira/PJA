@@ -918,3 +918,45 @@ bytes with 0.0.4, 128,835,877 with pjall (-14.9%; its photos at 29 to 74%
 of their size), every block ZPAQL OK, zpaq 7.15 giving every file back.
 Windows 10, 64 and 32 bits: the same archive, every file back without
 the plugin.
+
+## The pjalsx codec, for zpaq-std (28/10/2026)
+
+The family's last codec: JPEG-LS whose components are subsampled (T.87's
+sampling factors, each component ceil(X h / hmax) by ceil(Y v / vmax)),
+which pjals' frozen ZPAQL has not. Stream version 5 as for any JPEG-LS
+file, the smaller of the two models. No other codec takes these files.
+
+Its decoder is pjals' with `if PJALSX:` where the frame's size was every
+component's, and jlsx.zl: each component's own size, the samples model's
+rows in CodeJlsBand's order (subsampled: each component's rows of the
+band one component after the other, no context from the first), the
+groups of lines of a subsampled line-interleaved scan (CodeLines,
+ScanRows), and the symbols model's context of the first component, taken
+only from one of the same size. 60,776 bytes of ZPAQL; the other four
+programs are byte for byte as before. On the way, a trap in zpaqlc: a
+local's place follows the order in which `ast.walk` meets its first
+assignment, so moving `total = ...` into an `if PJALSX:` swapped two
+locals of pjals; the shared sources now leave the assignment in place and
+let the branch overwrite it (tools/zpaql/README.md).
+
+Samples: CharLS (lossless; no interleave and line interleave) subsampled
+by PJA's own encoder with factors 2x4/2x1/1x2 (T8SSE0's), 4:2:0, 4:2:2 and
+4:1:1, on plasmas of odd sizes and 5 photos, some with restarts (none in
+a subsampled line-interleaved scan, which PJA does not take), and T.87's
+conformance images T8SSE0 and T8SSE3 (NEAR 3): 67 files.
+
+Checked with libzpaq (zpaq 7.15's engine): the 67 files back byte for
+byte, and each with either model forced (136 of 136); blocks of 6 and 4
+segments back; 300 damaged segments: 299 errors and one decoded to other
+bytes of the same size (the stream has no check of its own; zpaq's
+SHA-1 of each fragment catches it), none hanging or crashing. zpaq-std
+-sat in the family's order on them with zpaq-std's 79 files: 49,953,561
+bytes with 0.0.5, 49,375,481 with pjalsx (-1.16%), every block ZPAQL OK,
+zpaq 7.15 giving every file back; zpaq-std's own 001.jls (T8SSE0) is one
+of them, which 0.0.5 kept as -m. On the "photos" (JPEGs decoded and
+written as JPEG-LS, their 8x8 blocks still in them) zpaq's own -m often
+does better than JPEG-LS's models, and zpaq-std keeps -m for those: one
+group of 12 went to pjalsx (85.8%). Windows 10, 64 and 32 bits: that
+group through the ZPAQL, the same archive, every file back without the
+plugin. The suite runs pjalsx's ZPAQL in the Python interpreter on two
+small samples.
