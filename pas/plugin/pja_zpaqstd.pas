@@ -545,10 +545,20 @@ begin
   end;
 end;
 
+{ FPC 3.2.2 exports these names as written on Darwin too, where the C
+  symbol of dlsym("zpaqstd_codecs_v1") is "_zpaqstd_codecs_v1": the
+  underscore goes in by hand there. }
+{$ifdef darwin}
+exports
+  zpaqstd_codec_v1 name '_zpaqstd_codec_v1',
+  zpaqstd_codecs_v1 name '_zpaqstd_codecs_v1',
+  zpaqstd_detect_v1 name '_zpaqstd_detect_v1';
+{$else}
 exports
   zpaqstd_codec_v1 name 'zpaqstd_codec_v1',
   zpaqstd_codecs_v1 name 'zpaqstd_codecs_v1',
   zpaqstd_detect_v1 name 'zpaqstd_detect_v1';
+{$endif}
 
 begin
   IsMultiThread := True;
