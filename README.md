@@ -52,7 +52,9 @@ in 17.9 s and 8.2 s.
 What it handles: baseline, extended and progressive JPEG with Huffman or
 arithmetic coding, 8 and 12 bits, any subsampling, restart markers, and the
 oddities real encoders leave (extra restart markers, EOB runs cut by the
-table, data after the end, a DRI with no restart markers); the JPEGs inside a JPEG (thumbnails, the
+table, data after the end, a DRI with no restart markers, and refinement
+scans whose EOB runs end sooner than libjpeg's, as Photoshop's do); the
+JPEGs inside a JPEG (thumbnails, the
 further images of an MPO, Ultra HDR gain maps), each compressed as a JPEG
 of its own; lossless JPEG (SOF3) from 2 to 16 bits, every predictor, point
 transforms and restarts; the height given by a DNL segment; JPEG-LS from
@@ -130,7 +132,9 @@ codecs, tried in this order: `pjax` for the JPEGs that need stream
 version 6 (12 bits; a DNL; a DRI with no restarts; 256 KiB or more of
 JPEGs after the EOI, as an MPO or an Ultra HDR file has them), `pja` for
 every other JPEG, EXIF thumbnails included, `pjall` for lossless JPEG,
-`pjals` for JPEG-LS, and `pjalsx` for JPEG-LS with subsampled components. Each detects its files by their bytes and leaves
+`pjals` for JPEG-LS, and `pjalsx` for JPEG-LS with subsampled components
+(Photoshop's progressive JPEGs go through none of them: stream version 5
+has no room for where their runs end). Each detects its files by their bytes and leaves
 verification to zpaq-std, which decodes every block before writing it.
 Every block also carries the codec's decoder in ZPAQL, so that any zpaq
 reads the archive without the plugin, and several files may share a
