@@ -1,0 +1,128 @@
+# A release's binaries, built on each platform PJA supports: the pja command
+# and the zpaq-std plugin, checked first by .github/test.sh (every sample of
+# the repository back byte for byte), then packed and uploaded to the GitHub
+# release of the tag, which is made if it does not exist yet. SHA256SUMS is
+# written again from every file the release then holds (the vendor tarball
+# for zpaq-std included, which is uploaded by hand).
+#
+# A tag v* runs it; for a tag that already exists, run it by hand with the
+# tag's name.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'the tag to build, as v0.0.7'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04 }
+          - { platform: linux-x86, os: ubuntu-24.04 }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm }
+          - { platform: macos-arm64, os: macos-latest }
+          - { platform: windows-x64, os: windows-latest, fpc: fpc -Px86_64 }
+          - { platform: windows-x86, os: windows-latest, fpc: fpc -Pi386 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Install Free Pascal (Linux)
+        if: runner.os == 'Linux' && matrix.platform != 'linux-x86'
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Install the 32-bit Free Pascal (Linux x86)
+        if: matrix.platform == 'linux-x86'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y libc6:i386 gcc-multilib
+          scripts/fpc-i386.sh /tmp/fpc-i386
+      - name: Install Free Pascal (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fpc
+      - name: Install Free Pascal (win32 and win64)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = 'https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download'
+          curl.exe -L --fail --retry 3 -o "$env:TEMP\fpc-setup.exe" $url
+          Start-Process -Wait -FilePath "$env:TEMP\fpc-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+          $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
+          if (-not $fpc) { throw 'fpc.exe not found after the installer' }
+          Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Build and check
+        shell: bash
+        env:
+          FPC: ${{ matrix.platform == 'linux-x86' && '/tmp/fpc-i386/fpc' || matrix.fpc || 'fpc' }}
+          PJA_OUT: build/rel
+        run: |
+          export PJA_COMMIT=$(git rev-parse --short=7 HEAD)
+          sh .github/test.sh
+      - name: Pack
+        shell: bash
+        run: |
+          V=${TAG#v}; P=${{ matrix.platform }}
+          case $P in
+            windows-*) EXE=.exe; LIB=pja.dll ;;
+            macos-*) EXE=; LIB=pja.dylib ;;
+            *) EXE=; LIB=pja.so ;;
+          esac
+          CLI=pja-$V-$P; PLG=pja-$V-zpaqstd-plugin-$P
+          mkdir -p dist "$CLI" "$PLG"
+          cp build/rel/pja$EXE README.md LICENSE NOTICE doc/CLI.md "$CLI/"
+          cp build/rel/pja_plugin* "$PLG/$LIB"
+          cp LICENSE NOTICE "$PLG/"
+          case $P in
+            windows-*)
+              7z a -tzip -bso0 "dist/$CLI.zip" "$CLI"
+              7z a -tzip -bso0 "dist/$PLG.zip" "$PLG" ;;
+            macos-*)
+              tar --uid 0 --gid 0 -czf "dist/$CLI.tar.gz" "$CLI"
+              tar --uid 0 --gid 0 -czf "dist/$PLG.tar.gz" "$PLG" ;;
+            *)
+              tar --owner=0 --group=0 -czf "dist/$CLI.tar.gz" "$CLI"
+              tar --owner=0 --group=0 -czf "dist/$PLG.tar.gz" "$PLG" ;;
+          esac
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ matrix.platform }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+      - name: Upload to the release
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "PJA ${TAG#v}" --notes "PJA ${TAG#v}."
+          gh release upload "$TAG" dist/* --clobber
+          mkdir all
+          gh release download "$TAG" --dir all --pattern 'pja-*'
+          (cd all && sha256sum pja-* > SHA256SUMS && cat SHA256SUMS)
+          gh release upload "$TAG" all/SHA256SUMS --clobber

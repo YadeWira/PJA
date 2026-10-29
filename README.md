@@ -83,6 +83,13 @@ the SHA-256 of the codec's streams across all six (`.github/test.sh`): a
 assembly routines, the others their Pascal versions, which the suite holds
 to the same streams.
 
+Every [release][relLink] carries, for each of the six, the command
+(`pja-VERSION-PLATFORM`) and the plugin (`pja-VERSION-zpaqstd-plugin-PLATFORM`),
+built and checked by CI on that platform (`.github/workflows/release.yml`),
+with `SHA256SUMS`. The Linux builds need glibc 2.34 or later. The macOS
+ones are not signed: after unpacking, `xattr -d com.apple.quarantine pja`
+lets Gatekeeper run it.
+
 ## Building
 
 FreePascal 3.2:
