@@ -34,8 +34,8 @@ jobs:
           - { platform: linux-x86, os: ubuntu-24.04 }
           - { platform: linux-arm64, os: ubuntu-24.04-arm }
           - { platform: macos-arm64, os: macos-latest }
-          - { platform: windows-x64, os: windows-latest, fpc: fpc -Px86_64 }
-          - { platform: windows-x86, os: windows-latest, fpc: fpc -Pi386 }
+          - { platform: windows-x64, os: windows-latest, fpc: fpc -Px86_64, cc: /c/msys64/mingw64/bin/gcc, gcc: mingw-w64-x86_64-gcc }
+          - { platform: windows-x86, os: windows-latest, fpc: fpc -Pi386, cc: /c/msys64/mingw32/bin/gcc, gcc: mingw-w64-i686-gcc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,10 +64,15 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed ${{ matrix.gcc }}
       - name: Build and check
         shell: bash
         env:
           FPC: ${{ matrix.platform == 'linux-x86' && '/tmp/fpc-i386/fpc' || matrix.fpc || 'fpc' }}
+          CC: ${{ matrix.platform == 'linux-x86' && 'gcc -m32' || matrix.cc || 'cc' }}
           PJA_OUT: build/rel
         run: |
           export PJA_COMMIT=$(git rev-parse --short=7 HEAD)

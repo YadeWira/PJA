@@ -15,9 +15,11 @@ if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 2
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/pu" "$OUT/in" "$OUT/p" "$OUT/x" "$OUT/st"
 
 echo "== build"
-$FPC -O3 -dPJA_FAST -Fupas -Fipas -FU"$OUT/u" -o"$OUT/pja$EXE" pas/pjacli.pas > "$OUT/fpc.log" 2>&1 \
+# the C part (CC: the platform's C compiler)
+sh pas/build_c.sh "$OUT/c"
+$FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja$EXE" pas/pjacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-$FPC -O3 -dPJA_FAST -Fupas -Fipas -FU"$OUT/u" -o"$OUT/dump_streams$EXE" pas/tests/dump_streams.pas > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/dump_streams$EXE" pas/tests/dump_streams.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 # the plugin: a shared library (position-independent code where it is one)
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) PIC= ;; *) PIC=-Cg ;; esac
@@ -40,6 +42,10 @@ echo "$n samples back byte for byte"
 echo "== the streams"
 "$OUT/dump_streams$EXE" tests/jpg "$OUT/st"
 "$OUT/dump_streams$EXE" tests/jls "$OUT/st"
+# and version 7's, the C model: the same bytes on every platform too
+mkdir -p "$OUT/st7"
+PJA_TEST_V7=1 "$OUT/dump_streams$EXE" tests/jpg "$OUT/st7"
+for f in "$OUT"/st7/*; do mv "$f" "$OUT/st/v7_$(basename "$f")"; done
 (cd "$OUT/st" && $SHA * | sed 's/ [ *]/  /' | sort) > "$OUT/streams.txt"
 [ "$(wc -l < "$OUT/streams.txt")" -ge 30 ] || { echo "FAIL: too few streams"; exit 1; }
 $SHA "$OUT/streams.txt" | cut -c1-64 > hash.txt

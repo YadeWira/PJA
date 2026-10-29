@@ -47,9 +47,11 @@ type
   only show when extracting, where the hash catches it. The JPEG's own round
   trip (pjajpeg.VerifyRoundTrip) runs either way. ext: the original's
   extension without the dot, kept for the extracted name when the format
-  allows it (pjaformat.ValidExtension); any other is left out. }
+  allows it (pjaformat.ValidExtension); any other is left out. v7: a JPEG's
+  coefficients with stream version 7's model (pjacodec.Compress), which
+  needs pjav7 in the program. }
 function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fast: Boolean = False;
-              verify: Boolean = True; const ext: string = ''): TPackResult;
+              verify: Boolean = True; const ext: string = ''; v7: Boolean = False): TPackResult;
 
 { .pja -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch, `original` holds what was decoded and `expected` the hash
@@ -82,14 +84,14 @@ begin
 end;
 
 function Pack(const original: TBytes; out pja: TBytes; threads: Integer; fast: Boolean;
-              verify: Boolean; const ext: string): TPackResult;
+              verify: Boolean; const ext: string; v7: Boolean): TPackResult;
 var stream: TBytes; e: string;
 begin
   e := ext;
   if not ValidExtension(e) then e := '';
   pja := nil;
   Result := PackFail(ukOk);
-  Result.codec := Compress(original, stream, verify, threads, fast);
+  Result.codec := Compress(original, stream, verify, threads, fast, True, v7);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
   if Length(stream) >= Length(original) then
     Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True, e)

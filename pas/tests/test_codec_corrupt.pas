@@ -8,7 +8,7 @@
     test_codec_corrupt <directory> [max bytes per stream] }
 program test_codec_corrupt;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, corrupt_par;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, corrupt_par;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -19,7 +19,7 @@ var
   { the inputs: each original, its stream, its name; the last one may be the
     stream of a file cut in half, which went as bytes }
   orig, streams: array of TBytes; names: array of string; totals: array of Int64;
-  d, st: TBytes; r: TCodecResult; bytesDone, fast: Boolean; c: TVariantCounts;
+  d, st: TBytes; r: TCodecResult; bytesDone, fast, v7: Boolean; c: TVariantCounts;
 
 procedure AddInput(const o, s: TBytes; const name: string);
 var n: Integer;
@@ -62,11 +62,12 @@ begin
     repeat if (sr.Attr and faDirectory) = 0 then files.Add(ParamStr(1) + '/' + sr.Name); until FindNext(sr) <> 0;
     FindClose(sr);
   end;
-  { PJA_TEST_FAST=1: the streams of the fast model }
+  { PJA_TEST_FAST=1: the streams of the fast model; PJA_TEST_V7=1: version 7's }
   fast := GetEnvironmentVariable('PJA_TEST_FAST') = '1';
+  v7 := GetEnvironmentVariable('PJA_TEST_V7') = '1';
   for i := 0 to files.Count - 1 do begin
     d := ReadFile(files[i]);
-    if Compress(d, st, True, 1, fast).Ok then AddInput(d, st, ExtractFileName(files[i]));
+    if Compress(d, st, True, 1, fast, True, v7).Ok then AddInput(d, st, ExtractFileName(files[i]));
   end;
   { a file cut in half goes as bytes: that stream damaged the same way }
   bytesDone := False;

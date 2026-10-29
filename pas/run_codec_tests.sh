@@ -15,8 +15,11 @@ python3 "$PAS/collisions.py" "$PAS"
 python3 "$PAS/results.py" "$PAS"
 
 echo "== build"
+# the C part (stream version 7's model), and the same without SSE2
+"$PAS/build_c.sh" "$OUT/c"
+"$PAS/build_c.sh" "$OUT/cplain" -DPJA_V7_PLAIN
 for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt; do
-  $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
@@ -46,18 +49,28 @@ PJA_TEST_FAST=1 "$OUT/test_codec" "$PJA/tests/jpg" 11 | tail -2
 "$OUT/test_codec_corrupt" "$PJA/tests/jpg" 128 | tail -1
 "$OUT/test_codec_corrupt" "$PJA/tests/jls" 64 | tail -1
 PJA_TEST_FAST=1 "$OUT/test_codec_corrupt" "$PJA/tests/jpg" 128 | tail -1
+echo "-- stream version 7 (the C model)"
+PJA_TEST_V7=1 "$OUT/test_codec" "$PJA/tests/jpg" 11 | tail -2
+PJA_TEST_V7=1 "$OUT/test_codec_corrupt" "$PJA/tests/jpg" 128 | tail -1
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -2; done
+for d in "${dirs[@]}"; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
 
 echo "== the fast build (PJA_FAST, with and without asm) writes the same streams as the reference"
-FAST=$OUT/fast; mkdir -p "$FAST"
-$FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -FU"$FAST" -FE"$FAST" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
+FAST=$OUT/fast; PLAIN=$OUT/plain; mkdir -p "$FAST" "$PLAIN"
+$FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$FAST" -FE"$FAST" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-$FPC -O2 -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
+$FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "${dirs[@]}" "fast:$PJA/tests/jpg")
+# version 7 with the C part built without SSE2 (and so without its SSE4.1 copy)
+$FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/cplain" -FU"$PLAIN" -FE"$PLAIN" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
+  || { cat "$OUT/fpc.log"; exit 1; }
+SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "${dirs[@]}" "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
+for d in "${dirs[@]}"; do SRC_DIRS+=("v7:$d"); done
 for d in "${SRC_DIRS[@]}"; do
-  # fast:DIR = the same, with the fast model
-  if [ "${d#fast:}" != "$d" ]; then d=${d#fast:}; export PJA_TEST_FAST=1; tag=" (fast model)"; else unset PJA_TEST_FAST; tag=; fi
+  # fast:DIR = the same, with the fast model; v7:DIR, with stream version 7's
+  unset PJA_TEST_FAST PJA_TEST_V7; tag=
+  if [ "${d#fast:}" != "$d" ]; then d=${d#fast:}; export PJA_TEST_FAST=1; tag=" (fast model)"; fi
+  if [ "${d#v7:}" != "$d" ]; then d=${d#v7:}; export PJA_TEST_V7=1; tag=" (version 7)"; fi
   [ -d "$d" ] || continue
   R=$OUT/streams_ref; F1=$OUT/streams_fast; F2=$OUT/streams_fast_noasm; F3=$OUT/streams_fast_t4
   rm -rf "$R" "$F1" "$F2" "$F3"; mkdir -p "$R" "$F1" "$F2" "$F3"
@@ -69,5 +82,11 @@ for d in "${SRC_DIRS[@]}"; do
   [ "$n" -ge 1 ] || { echo "FAIL: no streams from $d"; exit 1; }
   diff -rq "$R" "$F1" > /dev/null && diff -rq "$R" "$F2" > /dev/null && diff -rq "$R" "$F3" > /dev/null \
     || { echo "FAIL: the builds differ on $d"; diff -rq "$R" "$F1" | head -3; exit 1; }
+  if [ -n "${PJA_TEST_V7:-}" ]; then
+    F4=$OUT/streams_plain; rm -rf "$F4"; mkdir -p "$F4"
+    "$PLAIN/dump_streams" "$d" "$F4"
+    diff -rq "$R" "$F4" > /dev/null || { echo "FAIL: C without SSE2 differs on $d"; diff -rq "$R" "$F4" | head -3; exit 1; }
+    tag="$tag, = C without SSE2"
+  fi
   echo "$n streams from $(basename "$d")$tag: reference = fast = fast without asm = fast with 4 threads"
 done

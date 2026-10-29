@@ -55,6 +55,7 @@ type
   end;
 
 type
+  PAdaptiveBit = ^TAdaptiveBit;
   TCostKind = (ckRaw, ckNz, ckZero, ckExpo, ckMant, ckSign, ckEZero, ckEExpo, ckEMant, ckESign, ckDc);
 var
   { Measurement only, in a build with -dPJA_COSTS (tests/bench_costs): with
@@ -78,11 +79,56 @@ const
   MAX_BANDS = 16;
 
 function BandCount(const j: TJpeg): Integer;
+
+type
+  { A JPEG's coefficient models: the full one and the fast one (stream
+    version 5), and version 7's (the full one with fewer decisions, in C:
+    pjav7) }
+  TModelKind = (mkFull, mkFast, mkV7);
+
 { The coefficients of one band (allocated by Decompose or ParseHeaders); its
   first block row has no neighbour above. False when decoding garbage
-  produces a value that does not fit. fast: the fast model (one or two
-  counters per decision, nothing mixed), a different stream. }
-function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean = False): Boolean;
+  produces a value that does not fit. model: which one; each is a different
+  stream. mkV7 needs pjav7 in the program (V7Code). }
+function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind = mkFull): Boolean;
+
+type
+  { What version 7's C code (pjav7c.c) reads: the counters and the mixers'
+    weights of one class of component, in its v7m_t order }
+  TV7Model = record
+    nz1, nz2, nz3, zero1, zero2, zero3, zero4, zero5, expo1, expo2, expo3, expo4,
+    mant1, mant, ezero1, ezero3, ezero4, ezero5, eexpo1, eexpo2, eexpo3, eexpo4, eexpo5,
+    emant1, esign, dcZero, dcExpo, dcSign, dcMant1, dcMant, dz2, dz3, dz4, dx2, dx3, dx4,
+    ec1, ec2, ec3, ez6, nzm1, nzm2: PAdaptiveBit;
+    wNz, wZero, wExpo, wEZero, wEExpo, wDcZero, wDcExpo, wECnt: PInteger;
+  end;
+  { this unit's tables, and two callbacks pjav7 sets (v7t_t) }
+  TV7Tables = record
+    sq: PWord; st: PSmallInt; rc: PInteger;
+    interior, interiorLeft, ibNa, ibNb, ibWa, ibWb, ibNone, ratioOf: PByte;
+    unzig, zzTable, nzTable, remTable, kBucket: PByte;
+    w3, e3, kerLeft, kerTop, kerRight, kerBottom: PInt64;
+    interiorZz, edgeZz: QWord;
+    sse41: LongInt;          { the SSE4.1 copy of the loop may run: UseSse41 }
+    put, get: Pointer;
+  end;
+  { a component's scratch, zeroed (v7work_t) }
+  TV7Work = record
+    rowC: Pointer;
+    dcr, rcnt, ccnt: PByte;
+  end;
+  { one component of a band, either way: coder is the TArithEncoder or the
+    TArithDecoder of cd }
+  TV7Code = function(encoding: Boolean; coder: Pointer; var m: TV7Model; coef: PSmallInt; bw, bh: SizeInt;
+                     qt: PWord; lumaNz: PByte; lumaW, sx, sy, y0, y1: SizeInt; nzc: PByte;
+                     var wk: TV7Work): Boolean;
+
+var
+  { set by pjav7's initialization: a program without pjav7 (the zpaq-std
+    plugin) has no C and does not code version 7 }
+  V7Code: TV7Code = nil;
+
+procedure V7FillTables(out t: TV7Tables);
 
 const
   { JPEG-LS: one band per JLS_BAND_SAMPLES samples, at most MAX_BANDS, at
@@ -603,6 +649,11 @@ type
     dcZero, dcExpo, dcSign, dcMant1, dcMant: TBits;
     dz2, dz3, dz4, dx2, dx3, dx4: TBits;
     mxDcZero, mxDcExpo: TMixer;
+    { version 7: each edge's count of nonzeros (3-bit trees) and its flags
+      given it; the interior count's bits below its bit length }
+    ec1, ec2, ec3, ez6, nzm1, nzm2: TBits;
+    mxECnt: TMixer;
+    v7: Boolean;
     mxNz, mxZero, mxExpo, mxEZero, mxEExpo: TMixer;
     { the fast model: no mixer; each decision codes with one counter in a
       joint context (the pair of contexts that measured best for a static
@@ -612,11 +663,15 @@ type
     fz, fx, fez, fex, fdz, fdx: TBits;
     { only the tables the chosen model uses }
     procedure Init(isFast, isChroma: Boolean);
+    { version 7's: the full model's tables and its own. Apart from Init,
+      whose tables tools/zpaql/gen_pjadec.py reads for the plugin's frozen
+      ZPAQL decoders }
+    procedure InitV7(isChroma: Boolean);
   end;
 
 procedure TCoefModel.Init(isFast, isChroma: Boolean);
 begin
-  fast := isFast; chroma := isChroma;
+  fast := isFast; chroma := isChroma; v7 := False;
   { both models }
   NewBits(nz2, NZ_BUCKETS * NZ_BUCKETS * 64);
   NewBits(nz3, (NZ_BUCKETS + 1) * NZ_BUCKETS * 64);
@@ -672,6 +727,16 @@ begin
   mxExpo.Init(5, MAX_EXP_AC * K_BUCKETS);
   mxEZero.Init(6, EDGE_POS);
   mxEExpo.Init(6, MAX_EXP_AC * EDGE_POS);
+end;
+
+procedure TCoefModel.InitV7(isChroma: Boolean);
+begin
+  Init(False, isChroma);
+  v7 := True;
+  NewBits(ec1, 2 * NZ_BUCKETS * 9 * 8); NewBits(ec2, 2 * 9 * 9 * 8); NewBits(ec3, 2 * 9 * PRED_BUCKETS * 8);
+  NewBits(ez6, EDGE_POS * 8 * 8 * 4);
+  NewBits(nzm1, NZ_BUCKETS * 8 * 8); NewBits(nzm2, (NZ_BUCKETS + 1) * 8 * 8);
+  mxECnt.Init(5, 2 * 8);
 end;
 
 function NzBucketOf(n: Integer): Integer;
@@ -1163,14 +1228,64 @@ threadvar
     zeroing megabytes per band }
   PoolLuma, PoolChroma: TCoefModel;
 
-function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; fast: Boolean): Boolean;
+procedure V7FillTables(out t: TV7Tables);
+begin
+  t := Default(TV7Tables);
+  t.sq := @SQUASH_T[0]; t.st := @STRETCH_T[0]; t.rc := @RECIPROCAL[0];
+  t.interior := @INTERIOR[0]; t.interiorLeft := @INTERIOR_LEFT[0];
+  t.ibNa := @IB_NA[0]; t.ibNb := @IB_NB[0]; t.ibWa := @IB_WA[0]; t.ibWb := @IB_WB[0];
+  t.ibNone := PByte(@IB_NONE[0]); t.ratioOf := @RATIO_OF[1, 0];
+  t.unzig := @UNZIG[0]; t.zzTable := @ZIGZAG[0]; t.nzTable := @NZ_BUCKET_T[0]; t.remTable := @REM_BUCKET_T[0];
+  t.kBucket := @K_BUCKET_OF[0];
+  t.w3 := @W3[0]; t.e3 := @E3[0];
+  t.kerLeft := @KER_LEFT[0, 0]; t.kerTop := @KER_TOP[0, 0]; t.kerRight := @KER_RIGHT[0, 0]; t.kerBottom := @KER_BOTTOM[0, 0];
+  t.interiorZz := INTERIOR_ZZ; t.edgeZz := EDGE_ZZ;
+  t.sse41 := Ord(UseSse41);
+end;
+
+{ Version 7's component: the same arguments as CodeComponent, the work in
+  pjav7c.c through V7Code. }
+function V7Component(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
+                     const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
+                     out nzOut: TByteArr): Boolean;
+var v: TV7Model; wk: TV7Work; qq: array[0..63] of Word; k: Integer; lz, coder: Pointer;
+    rowC: array of TEdgeCache; dcr, rcnt, ccnt: TByteArr;
+begin
+  nzOut := nil;
+  if (V7Code = nil) or (cp.bw <= 0) or (cp.bh <= 0) then Exit(False);
+  for k := 0 to 63 do if k < Length(qt) then qq[k] := qt[k] else qq[k] := 0;
+  v.nz1 := @m.nz1[0]; v.nz2 := @m.nz2[0]; v.nz3 := @m.nz3[0];
+  v.zero1 := @m.zero1[0]; v.zero2 := @m.zero2[0]; v.zero3 := @m.zero3[0]; v.zero4 := @m.zero4[0]; v.zero5 := @m.zero5[0];
+  v.expo1 := @m.expo1[0]; v.expo2 := @m.expo2[0]; v.expo3 := @m.expo3[0]; v.expo4 := @m.expo4[0];
+  v.mant1 := @m.mant1[0]; v.mant := @m.mant[0];
+  v.ezero1 := @m.ezero1[0]; v.ezero3 := @m.ezero3[0]; v.ezero4 := @m.ezero4[0]; v.ezero5 := @m.ezero5[0];
+  v.eexpo1 := @m.eexpo1[0]; v.eexpo2 := @m.eexpo2[0]; v.eexpo3 := @m.eexpo3[0]; v.eexpo4 := @m.eexpo4[0];
+  v.eexpo5 := @m.eexpo5[0]; v.emant1 := @m.emant1[0]; v.esign := @m.esign[0];
+  v.dcZero := @m.dcZero[0]; v.dcExpo := @m.dcExpo[0]; v.dcSign := @m.dcSign[0]; v.dcMant1 := @m.dcMant1[0];
+  v.dcMant := @m.dcMant[0]; v.dz2 := @m.dz2[0]; v.dz3 := @m.dz3[0]; v.dz4 := @m.dz4[0];
+  v.dx2 := @m.dx2[0]; v.dx3 := @m.dx3[0]; v.dx4 := @m.dx4[0];
+  v.ec1 := @m.ec1[0]; v.ec2 := @m.ec2[0]; v.ec3 := @m.ec3[0]; v.ez6 := @m.ez6[0]; v.nzm1 := @m.nzm1[0]; v.nzm2 := @m.nzm2[0];
+  v.wNz := @m.mxNz.w[0]; v.wZero := @m.mxZero.w[0]; v.wExpo := @m.mxExpo.w[0]; v.wEZero := @m.mxEZero.w[0];
+  v.wEExpo := @m.mxEExpo.w[0]; v.wDcZero := @m.mxDcZero.w[0]; v.wDcExpo := @m.mxDcExpo.w[0]; v.wECnt := @m.mxECnt.w[0];
+  rowC := nil; SetLength(rowC, cp.bw);
+  dcr := nil; SetLength(dcr, cp.bw * cp.bh); rcnt := nil; SetLength(rcnt, cp.bw * cp.bh);
+  ccnt := nil; SetLength(ccnt, cp.bw * cp.bh); SetLength(nzOut, cp.bw * cp.bh);
+  wk.rowC := @rowC[0]; wk.dcr := @dcr[0]; wk.rcnt := @rcnt[0]; wk.ccnt := @ccnt[0];
+  if Length(lumaNz) > 0 then lz := @lumaNz[0] else lz := nil;
+  if cd.encoding then coder := @cd.enc else coder := @cd.dec;
+  Result := V7Code(cd.encoding, coder, v, @cp.coef[0], cp.bw, cp.bh, @qq[0], lz, lumaW, sx, sy, y0, y1,
+                   @nzOut[0], wk);
+end;
+
+function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind): Boolean;
 var c, nb: Integer; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
   { the variant compiled for the model and the direction }
   function CC(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
               const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
               out nzOut: TByteArr): Boolean;
   begin
-    if not m.fast then Result := CodeComponent(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
+    if m.v7 then Result := V7Component(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
+    else if not m.fast then Result := CodeComponent(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
     else if cd.encoding then Result := CodeComponentFast(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
     else Result := CodeComponentFastDec(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut);
   end;
@@ -1178,7 +1293,8 @@ begin
   nb := BandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
   m0 := SizeInt(j.mcusy) * band div nb; m1 := SizeInt(j.mcusy) * (band + 1) div nb;
-  PoolLuma.Init(fast, False); PoolChroma.Init(fast, True);
+  if model = mkV7 then begin PoolLuma.InitV7(False); PoolChroma.InitV7(True); end
+  else begin PoolLuma.Init(model = mkFast, False); PoolChroma.Init(model = mkFast, True); end;
   lumaNz := nil;
   for c := 0 to High(j.comp) do begin
     if c = 0 then

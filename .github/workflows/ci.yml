@@ -1,4 +1,5 @@
-# Every platform PJA supports builds the pja command and the zpaq-std
+# Every platform PJA supports builds the pja command (Pascal, and the C of
+# stream version 7's model: CC, the platform's C compiler) and the zpaq-std
 # plugin, compresses and extracts every sample of the repository, and
 # records the SHA-256 of the codec's streams (.github/test.sh); the last job
 # checks that they are the same bytes everywhere. Linux x86-64 also runs the
@@ -83,6 +84,7 @@ jobs:
       - name: Test
         env:
           FPC: /tmp/fpc-i386/fpc
+          CC: gcc -m32
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -115,10 +117,14 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
       - name: Test
         shell: bash
         env:
           FPC: fpc -Px86_64
+          CC: /c/msys64/mingw64/bin/gcc
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -138,10 +144,14 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-i686-gcc
       - name: Test
         shell: bash
         env:
           FPC: fpc -Pi386
+          CC: /c/msys64/mingw32/bin/gcc
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:

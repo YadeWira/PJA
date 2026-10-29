@@ -1,7 +1,8 @@
 # PJA
 
-Lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal with
-some x86-64 assembly, and nothing else: no C, no C++, no libraries.
+Lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal,
+with the coefficient model's core in C and some x86-64 assembly; no
+libraries.
 
 | Component | Status |
 |---|---|
@@ -86,12 +87,13 @@ the file format in [doc/FORMAT.md](doc/FORMAT.md).
 
 ## Building
 
-FreePascal 3.2:
+FreePascal 3.2 and a C compiler (gcc or clang):
 
 ```sh
 cd pas
-fpc -O3 -dPJA_FAST pjacli.pas -opja       # the command
-cd .. && ./run_tests.sh                    # every test
+./build_c.sh build/c                               # the C part
+fpc -O3 -dPJA_FAST -Fobuild/c pjacli.pas -opja     # the command
+cd .. && ./run_tests.sh                            # every test
 ```
 
 ## License

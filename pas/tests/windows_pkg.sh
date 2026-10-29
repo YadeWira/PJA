@@ -9,21 +9,26 @@
 #
 # With PPC386 (an i386-win32 cross compiler) and RTL386 (its units), the
 # package also carries pja32.exe and pja32_ref.exe: the Pascal path, no asm.
+# The C part (stream version 7) with MinGW-w64's cross compilers: CC64
+# (x86_64-w64-mingw32-gcc) and CC32 (i686-w64-mingw32-gcc).
 set -euo pipefail
 FPC=${FPC:-fpc}
 PAS=$(cd "$(dirname "$0")/.." && pwd); PJA=$(dirname "$PAS"); OUT=${1:?usage: windows_pkg.sh <out dir>}
 mkdir -p "$OUT"; OUT=$(realpath "$OUT"); B=$OUT/build; K=$OUT/pkg
 rm -rf "$K"; mkdir -p "$B/lin" "$B/win" "$B/winref" "$K/in" "$K/lin_full" "$K/lin_fast"
-$FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -FU"$B/lin" -o"$B/pja" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 || { cat "$B/fpc.log"; exit 1; }
-$FPC -Twin64 -Px86_64 -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -FU"$B/win" -o"$K/pja.exe" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 \
+"$PAS/build_c.sh" "$B/clin"
+CC=${CC64:-x86_64-w64-mingw32-gcc} "$PAS/build_c.sh" "$B/c64"
+$FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$B/clin" -FU"$B/lin" -o"$B/pja" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 || { cat "$B/fpc.log"; exit 1; }
+$FPC -Twin64 -Px86_64 -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$B/c64" -FU"$B/win" -o"$K/pja.exe" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 \
   || { cat "$B/fpc.log"; exit 1; }
-$FPC -Twin64 -Px86_64 -O2 -Fu"$PAS" -Fi"$PAS" -FU"$B/winref" -o"$K/pja_ref.exe" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 \
+$FPC -Twin64 -Px86_64 -O2 -Fu"$PAS" -Fi"$PAS" -Fo"$B/c64" -FU"$B/winref" -o"$K/pja_ref.exe" "$PAS/pjacli.pas" > "$B/fpc.log" 2>&1 \
   || { cat "$B/fpc.log"; exit 1; }
 if [ -n "${PPC386:-}" ]; then
+  CC=${CC32:-i686-w64-mingw32-gcc} "$PAS/build_c.sh" "$B/c32"
   mkdir -p "$B/w32" "$B/w32ref"
-  "$PPC386" -n -Twin32 -O3 -dPJA_FAST -Fu"$RTL386" -Fu"$PAS" -Fi"$PAS" -FU"$B/w32" -o"$K/pja32.exe" "$PAS/pjacli.pas" \
+  "$PPC386" -n -Twin32 -O3 -dPJA_FAST -Fu"$RTL386" -Fu"$PAS" -Fi"$PAS" -Fo"$B/c32" -FU"$B/w32" -o"$K/pja32.exe" "$PAS/pjacli.pas" \
     > "$B/fpc.log" 2>&1 || { cat "$B/fpc.log"; exit 1; }
-  "$PPC386" -n -Twin32 -O2 -Fu"$RTL386" -Fu"$PAS" -Fi"$PAS" -FU"$B/w32ref" -o"$K/pja32_ref.exe" "$PAS/pjacli.pas" \
+  "$PPC386" -n -Twin32 -O2 -Fu"$RTL386" -Fu"$PAS" -Fi"$PAS" -Fo"$B/c32" -FU"$B/w32ref" -o"$K/pja32_ref.exe" "$PAS/pjacli.pas" \
     > "$B/fpc.log" 2>&1 || { cat "$B/fpc.log"; exit 1; }
 fi
 cp "$PJA"/tests/jpg/* "$PJA"/tests/jls/* "$K/in/"

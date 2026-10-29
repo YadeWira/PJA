@@ -1035,3 +1035,61 @@ and one as fast as Aqueous would be Aqueous's ratio. PJA's place is the
 ratio; for speed it has threads (8 threads: the 151 photos in 9.9 s
 `--fast`). The probe and the coder are in the author's lab
 (`/mnt/IA_LAB/agentes/pja/rans/`).
+
+## Stream version 7: the full model's size at the fast model's speed (29/10/2026)
+
+The full model was 1.7% smaller than the fast one and took 1.8 times its
+time. Version 7 is the full model (its contexts, mixers, counters and
+predictions) with fewer decisions, its coefficient loop in C
+(`pas/pjav7c.c`, `pas/pjav7c_loop.h`, through `pas/pjav7.pas`). `pja a`
+writes it; versions 5 and 6 are still read, and the zpaq-std plugin, which
+does not use pjav7, has no C in it and writes what it wrote.
+
+Where the time went (callgrind, `pja x` of 3 photos; perf is not allowed on
+the machine): the mixed decisions, about 380 instructions each, 41% of the
+instructions and 70% of the L1 misses, the loop around them 33%, the
+arithmetic decoder 9%, the edge and DC predictions only 6.5%. On 30 photos
+the full model took 122 million binary decisions for the coefficients.
+
+Fewer decisions (30 photos, every file back):
+
+| change | decisions | cost |
+|---|---|---|
+| each edge's count of nonzeros first (3-bit trees, mixed), then its flags while some are left | edge flags 30.2 M -> 18.7 M | +2.8 KB |
+| the interior's signs as direct bits (0.998 bits each modeled) | -8.5 M modeled | +1.7 KB |
+| the interior count as its bit length in unary (mixed) and the bits below (two counters) | 12.9 M -> 6.75 M | +0.1 KB |
+| (not kept) the mantissa below its first bit as direct bits | | +16 KB (0.18%) |
+
+Then the loop in C, a copy of `pjacoef.inc`'s arithmetic, one text compiled
+once per direction. A first step, only the mixed decision's kernel in C
+called from the Pascal loop, gave 6%: the cost was not the arithmetic but
+the counters' cache misses and the calls. The whole loop in C, with the
+arithmetic coder without branches both ways, the prediction kernels in 32
+bits (half the cache) and an SSE2 nonzero mask, was bit for bit what the
+Pascal version of the same model wrote (Pascal encoding and C decoding, and
+the other way round). It is compiled with -O3 and once more for SSE4.1,
+chosen by pjamodel's cpuid check (`PJA_NOASM=1` turns it off): 4.62 against
+5.73 G instructions with -O2.
+
+The 30 photos, one thread, three alternating rounds (compress without
+verify / decompress, `pja`):
+
+| | size | compress | decompress |
+|---|---|---|---|
+| full model (version 5) | 9,029,356 | 11.15 s | 9.22 s |
+| fast model (version 5) | 9,187,750 (+1.75%) | 6.74 s | 5.29 s |
+| version 7 | 9,033,933 (+0.05%) | 6.80 s | 5.40 s |
+
+Every set, 8 threads, against the full model, every file back: photos
++0.13%, the corpus of 78 +0.20%, MPOs +0.24%, arithmetic-coded +0.10%,
+generated +0.11%. `--fast` still parses and changes nothing.
+
+The C part takes no memory and calls no library (pjamodel hands it the
+tables, the counters and the scratch; two callbacks carry the encoder's
+bytes out and a live stream's bytes in), so it links with FreePascal alone
+on every platform: `pas/build_c.sh` builds the object without a stack
+protector, without loops turned into memset and, on 32-bit x86, without
+PIC and without libgcc's 64-bit division. The suite checks version 7's
+streams in the reference, fast, no-asm and 4-thread builds and with the C
+part built without SSE2, and damages them as the other streams (166,465
+variants, no failure); CI compares their hash across the six platforms.

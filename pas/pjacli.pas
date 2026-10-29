@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -142,8 +142,8 @@ begin
   Writeln('                       files at once, and what is left to each file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
-  Writeln('  --fast               a: a JPEG in the fast model: about 1.5x faster to extract,');
-  Writeln('                       about 1.7% larger (x needs no switch)');
+  Writeln('  --fast               a: accepted for older scripts; it changes nothing, the');
+  Writeln('                       default model is as fast since 0.1.0 (x needs no switch)');
   Writeln('  --no-verify          a: do not decompress the stream to check it before writing:');
   Writeln('                       about twice as fast, but a codec bug would only show when');
   Writeln('                       extracting (the hash catches it then). The JPEG''s own check');
@@ -345,7 +345,7 @@ begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
   { the extension, as it is written, for x to give it back }
-  r := Pack(d, pja, bandThreads, fastModel, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt));
+  r := Pack(d, pja, bandThreads, False, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt), True);
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) and not quiet then

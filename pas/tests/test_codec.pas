@@ -5,10 +5,11 @@
 
     test_codec <directory> [minimum round trips] [reference sizes file] [-v]
 
-  With PJA_TEST_FAST=1 in the environment, the JPEGs go with the fast model. }
+  With PJA_TEST_FAST=1 in the environment, the JPEGs go with the fast model;
+  with PJA_TEST_V7=1, with stream version 7's. }
 program test_codec;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, pjajpeg, pjacodec;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, pjajpeg, pjacodec, pjav7;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -16,12 +17,13 @@ begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := n
 
 var
   dir, name, refFile: string; files, reasons, ref: TStringList; sr: TSearchRec;
-  i, k, minimum, ok, failures: Integer; verbose, fast: Boolean;
+  i, k, minimum, ok, failures: Integer; verbose, fast, v7: Boolean;
   d, st, st4, back: TBytes; r, r2: TCodecResult; key: string;
   sumIn, sumOut, sumRefIn, sumRefOut, refSize: Int64; t0: TDateTime; ms: Int64;
 begin
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1); refFile := ParamStr(3);
   fast := GetEnvironmentVariable('PJA_TEST_FAST') = '1';
+  v7 := GetEnvironmentVariable('PJA_TEST_V7') = '1';
   verbose := (ParamStr(4) = '-v') or (ParamStr(3) = '-v');
   if refFile = '-v' then refFile := '';
   files := TStringList.Create; files.Sorted := True;
@@ -37,10 +39,10 @@ begin
   for i := 0 to files.Count - 1 do begin
     d := ReadFile(files[i]); name := ExtractFileName(files[i]);
     try
-      r := Compress(d, st, True, 1, fast);
+      r := Compress(d, st, True, 1, fast, True, v7);
       if r.Ok then begin
         { 4 threads: the same stream, and the same JPEG back }
-        r2 := Compress(d, st4, True, 4, fast);
+        r2 := Compress(d, st4, True, 4, fast, True, v7);
         if not r2.Ok or (Length(st4) <> Length(st)) or not CompareMem(@st4[0], @st[0], Length(st)) then begin
           Inc(failures); Writeln('  FAIL the stream depends on the thread count  ', name);
         end;
