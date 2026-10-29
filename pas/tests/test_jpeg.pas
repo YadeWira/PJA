@@ -6,7 +6,7 @@
     test_jpeg <directory> [minimum round trips] [-v] }
 program test_jpeg;
 {$I ../pja.inc}
-uses SysUtils, Classes, pjajpeg;
+uses SysUtils, Classes, pjajpeg, pjav7;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);

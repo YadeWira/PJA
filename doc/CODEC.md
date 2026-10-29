@@ -1093,3 +1093,505 @@ PIC and without libgcc's 64-bit division. The suite checks version 7's
 streams in the reference, fast, no-asm and 4-thread builds and with the C
 part built without SSE2, and damages them as the other streams (166,465
 variants, no failure); CI compares their hash across the six platforms.
+
+### Version 7's contexts (29/10/2026)
+
+What paq8px has that PJA did not, one context at a time, measured on the 30
+photos (`pja a`, 8 threads, every file back) with a cost per decision kind
+first: an encoder build that adds up -log2(p) of every bit by kind
+(interior zero flag 1.30 MB, interior exponent 1.26 MB, interior sign 1.03
+MB, edge exponent 0.99 MB, edge mantissa 0.86 MB, interior mantissa 0.78
+MB, edge sign 0.59 MB, edge counts 0.56 MB of which 0.21 MB chroma, the
+DCs 0.68 MB). The time is callgrind's estimate on 3 photos, one thread
+(instructions + 15 x mispredicted branches + 10 x L1 read misses), enc and
+dec. A mixer input costs about 1.5% of that in the interior's decisions,
+so one stays only where it pays at least what the full model paid over
+the fast one, about 1.5 KB per 1% of time.
+
+Kept, in the order they went in (photos30, cumulative):
+
+| change | photos30 |
+|---|---|
+| version 7 as it was | 9,033,933 |
+| chroma: the luma block's coefficient at the same position (finelog), an input of the interior zero flag and exponent, the edge zero flag and exponent | -58.4 KB |
+| chroma: the interior sign by the luma's and (Cr) the Cb's sign there; luma's stays a direct bit | -20.7 KB |
+| Cr: the Cb block's coefficient at the same position, in the same four decisions; the edge signs by the luma's and the Cb's | -63.0 KB |
+| the edge counts by the luma's and the Cb's counts on the same edge | -18.2 KB |
+| the first mantissa bit with a second counter by the neighbourhood; the interior count by the blocks above left and above right and the Cb's count | -14.8 KB |
+| the expo by the nonzeros so far on the coefficient's row and column of the block | -6.5 KB |
+| luma: in the interior inputs that are the luma's or the Cb's for chroma (constant for luma), the sum of the magnitudes coded so far in the block, and how far back the last nonzero was | -15.7 KB |
+| the mantissa's bits below the first by the position's bucket (edge: the position), the bit length and the bit | -4.6 KB |
+| out: interior zero inputs (k, lz, rem) and (k, rem, neighbours); edge zero inputs but the remaining-count one, the neighbours' and the luma's; the edge count's input repeated with the row count; the count's first counter | -1.2 KB, 9 inputs fewer |
+| the interior exponent's (bucket, in-block neighbour) input replaced by (position, neighbourhood) | -9.1 KB |
+| luma: the edge count by the interior's nonzeros on the row (column) next to the edge and the count's bucket; Cb the same in the Cb's slot | -5.7 KB |
+| the edge mantissa's bits by where the edge's prediction falls against the two halves left (five cases, the fifth without a prediction) | -13.2 KB |
+| luma: the edge sign by the neighbours' signs along and across the edge | -1.5 KB |
+| the DC zero flag and exponent by the Cb's (Cr) or the luma's (Cb) DC residual size, the sign by its sign | -4.2 KB |
+| out: the interior exponent's (bucket, neighbours) and (neighbourhood) inputs, 7 -> 5 | +4.4 KB, time -2.8% / -3.5% |
+| out: the interior zero flag's ratio input, 5 -> 4 | +2.3 KB, time -3.0% / -3.5% |
+| the interior's first mantissa bit's second counter also by the component context (16) | -2.1 KB |
+| luma: the edge zero and exponent by the interior's sum, and by the neighbour across the edge | -4.4 KB |
+
+Measured and not kept (photos30, against the state they were tried on):
+the luma's magnitude summed over the 2x2 luma blocks of a 4:2:0 chroma
+block -0.2 KB, its count averaged -0.7 KB; the luma's sign with its
+magnitude -0.3 KB worse; luma's interior sign by the above and left
+blocks' signs at the same position -0.8 KB; the interior's zero flag by
+its row and column counts, worse once the inputs were full; the mixers'
+weight sets also by the remaining count (+2.8 KB), the neighbourhood
+(+0.6 KB), the exponent's by the neighbourhood (+2.0 KB); the mantissa
+bits below the first with the value's two bits above (-1.9 KB) or with a
+second counter (-7.2 KB, a counter more per bit); for the luma's spare
+slots: row and column counts -2.1 KB, the above and left blocks' sizes
+-0.6 KB, the last nonzero's size -4.2 KB (all instead of the sum, -13.2
+KB); for the interior zero flag, once the two weak inputs were out, the
+sum with the neighbourhood -0.2 KB, (position, two neighbourhoods) +0.6
+KB, the count so far -0.4 KB, the last nonzero's distance and size -0.8
+KB; in place of the zero flag's two remaining neighbourhood inputs one
+joint context, (position, both neighbourhoods) +3.3 KB, (position,
+neighbourhood, remaining) +6.3 KB; the edge mantissa's prediction counter
+next to the old one -2.2 KB more for a counter per bit; luma's DC sign by
+the neighbours' residual signs +1.3 KB, the DC by the block above right's
+residual size 0; the luma's interior exponent by the sum and the
+neighbourhood or the remaining count, worse; luma's edge count by the
+interior count of the same row +0.75 KB worse, by the neighbour along the
+edge +1.5 KB worse; the count's luma slot by the DC residuals around +0.2
+KB, by the block two to the left -0.5 KB (not worth the code); the first
+mantissa bits with one counter, interior +5.8 KB, edge +1.5 KB.
+
+The tables these take are named in `TCoefModel` (`InitV7`) and sized to
+their contexts, about 450 KB a model. They see the components coded before
+them in the band: pjamodel hands the C the luma's coefficients and DC
+residuals and the previous component's when it has the same size (Cr after
+Cb). The DC residuals keep their sign above their size.
+
+The luma's coefficients go to a chroma component only when its vertical
+sampling divides the luma's (`CodeBand`): with luma 1x3 and chroma 1x2, both
+legal, a chroma row maps to luma rows of the band before, which a decoder of
+this band need not have yet (bands decode in parallel). The first version
+read them anyway: the encoder has every row, so it round-tripped by luck of
+the timing and failed when the bands were decoded last first. The suite now
+decodes generated multi-band JPEGs (1x3/1x2 and 4:2:0) last band first
+(`PJA_BANDS_REVERSE=1`, one thread), which fails on any band reading what
+an earlier band decodes. The fix moves no byte on the sets measured here.
+
+
+## Version 7's counters and mixers (29/10/2026)
+
+Measured on the 30 photos (sizes; time as callgrind's estimate, `pja a`
+and `pja x` of 3 photos, one thread). The mixers were the lever, not the
+counters, and mostly by taking away.
+
+Kept, in the order they went in (30 photos, from 9,033,933):
+
+| change | 30 photos |
+|---|---|
+| the constant input at 384 instead of stretch(0.625), about 131 | -5,935 |
+| the edge zero flag's weights by position, nonzeros left and positions left (896 sets) | -2,456 |
+| four inputs out: zero1 (interior zero flag), ezero1 (edge zero flag), dcZero (DC), ec1 at cb (edge count) | -1,118, 4.5% fewer instructions |
+| learning rate per decision: 4 for both zero flags, 10 for the edge exponent, 6 the rest | -1,528 |
+| weights start at 4/3 of an equal share, the constant's at zero | -2,784 |
+| the edge exponent's weights also by how many nonzeros are left after this one (0..3+) | -13,125 |
+| the interior exponent's also by the ratio of nonzeros left to positions left (in eighths), the edge count's by the interior count's | -8,870 |
+
+Together 8,998,117 (-0.40%, now 0.35% under the full model of version 5),
+the corpus of 78 23,753,540 (-0.26%), the 244 arithmetic-coded 5,092,954
+(-0.49%), every file back. Time -4.5% compressing, -5.6% decompressing
+(callgrind's estimate: the four inputs and the constant that is no longer a table read; the
+bigger weight tables take back a little in cache misses).
+
+Measured and left out:
+
+- Mixing in two weight sets chosen by different contexts, their outputs
+  averaged in the logistic domain (paq's several selectors): -8,518 at the
+  four biggest decisions, but +20% of time (+11% once `restrict` let the
+  compiler vectorize the two updates); at the interior zero flag alone
+  -2,700 for +4%. A learned final mixer instead of the mean: the same.
+- An APM after both exponents (33 interpolated counters by exponent and
+  neighbour magnitude, the nearer one learning, a quarter mix): -1,507
+  more for +5% of instructions.
+- The counters in more precision: 24-bit probability -419; 22-bit with
+  a 10-bit count, limit 255/511/1023: -423/-1,541/-99 (every `learn`
+  costs more). Only for the counters coded alone: +50 to +3,089; a limit
+  of 127 for them +1,248. Version 5's limit of 255 stays.
+- A count-based confidence (the stretch scaled down for young counters):
+  +273 to +8,109. The squash in 16 bits (interpolated): -8. A learning
+  rate that starts high and decays (per weight set, counted in an unused
+  lane): -946 at best, not worth a division. The weight clamp at 2^18 and
+  more: never reached.
+- Other selectors: the interior zero flag by remaining count (+2,615, or
+  +211 in three classes) or by neighbour magnitude (+606); the edge zero
+  flag by prediction (+3,110); the nonzero count by the neighbours' (+1,127);
+  the DC's (-6, -62, +39); the edge exponent's by prediction class or by
+  the count instead of what is left (+1,899, -10,960 against -13,125);
+  the interior exponent's by the remaining count's bucket (-1,269; the
+  ratio instead, 6,581 less again), by the ratio in sixteenths, sixths or
+  quarters or without the coefficient's class (all 750-1,800 behind).
+- Dropping any other input: from +432 (the nonzero count's first) to
+  +55,528. And what is left on the edge as a counter context of the edge
+  exponent instead of the mixer's: +4,983.
+
+The ratio selector is defined as 16 (its ninth weight set) when every
+position left is nonzero: RATIO_OF has no column for that case, and the
+first version read one byte past the table there, for a block with all 49
+interior coefficients nonzero (the integration, below).
+
+
+## Stream version 7: the predictions, a second pass (29/10/2026)
+
+Version 7 is not released, so its stream could change. Where the bits went
+(30 photos, the ideal cost of each kind of decision, a debugging build of
+`pjav7c.c` with `PJA_V7_STATS`, which calls the C library; left out of the
+merged source): interior zero flags 1311 KB, bit lengths 1285 KB, signs 1060 KB
+(direct bits), mantissas 788 KB, counts 442 KB; edge bit lengths 1019 KB,
+mantissas 861 KB, signs 632 KB (0.86 bits each), counts 583 KB, zero flags
+321 KB; DC 678 KB, its sign 0.99 bits.
+
+Each change measured alone, in order, on the 30 photos (`v7bench.sh`, every
+file back), kept when smaller:
+
+| change | photos30 |
+|---|---|
+| version 7 as released to the branch | 9,033,933 |
+| the edge sign also by the coded magnitude against the prediction's (`rel`, 9 steps) | -20,118 |
+| the edge prediction also in quarters of a quantum (`pbq`) for the edge zero flag, bit length and first mantissa bit; both roundings from one truncated division in eighths, exact | -1,079 |
+| the DC prediction in eighths: the eighths left over (`frac`) as a context of the DC sign | -2,855 |
+| ... and of the DC zero flag | -803 |
+| the DC from the middle ten of the 16 estimates (the middle eight before; six of 8 on one side) | -322 |
+| the DC sign averaged with a second counter by the above and left residuals' signs | -1,793 |
+| the edge sign averaged with a second counter by the position, the prediction and whether this edge's last sign agreed with its prediction | -5,855 |
+| the first sign counter on `pbq` | -906 |
+| the second also by the same coefficient's sign in the block along the edge, and in the block across it | -3,732 |
+| the 14 edge predictions first (they need the interior and the block across only): how many are big (1.5 quanta) plus how many very big (10) as a context of each edge's count | -6,890 |
+| the DC spread between the 4th smallest and the 4th largest estimate (both already at hand) instead of the whole range | -8,234 |
+| that spread in quarters of a quantum | -679 |
+| `pbq` from 4/8 of the prediction instead of 5/8 (where the half-octave buckets fall) | -1,670 |
+| the second sign counter on 3 steps of the prediction (22 before), the first on 13 (26) | -4,731 |
+| the DC sign's first counter on half the spread's steps | -61 |
+| the edge mantissa's bits below the first by where 5/8 of the prediction falls in the interval still open (below, lower half, upper half, above) | -717 |
+
+Tried and dropped: the sign's `rel` over 13 steps (+822); the sign from
+the quarter prediction's sign (+48); the DC exponent by `frac` (+150);
+each side's trimmed mean weighted by the other side's spread (+8,740) or
+not weighted (+5,310): the trim over all 16 is better; trimming 2, 5 or 6
+of 16 at each end instead of 3 or 4 (+550 to +2,800); the middle four
+counted twice (+520); the neighbours' residual signs inside the DC sign's
+context (+7,650: nine times the contexts) instead of a second counter; the
+DC sign mixed from three counters (-550 more, for a mixed decision per
+nonzero residual: not worth its time); the agreement inside the edge
+sign's context (+2,312) instead of a second counter; the edge bit length's
+mixer selected by the prediction's bit length against the one being coded
+(+2,500); the number of big predictions left on the edge in place of the
+positions left (redundant with the position) (+311); the edge count with
+five inputs (+251); no integer prediction, everything from the quarter one
+(+1,975); the sign's `rel` centered elsewhere (+30, +340); the previous
+edge coefficient's sign in the second sign counter (+2,163); the first
+sign counter per position (+2,301); the spread between the 2nd, 4th or 5th
+smallest and largest (+800 to +4,800).
+
+The time: the edge sign is now two counters, and the 14 predictions are
+computed for every block (before, only up to the last nonzero of each edge).
+Their interior sums are one pass over the interior's nonzeros, and "big" is
+an integer comparison of the numerator with a threshold per component
+(exact: 2|n| >= (2 PTH - 1) 181 q), the division done only where a
+coefficient is coded. Every set, the C part built plainly
+(`PJA_V7_PLAIN`), with `PJA_NOASM=1` and with one thread give the same
+bytes.
+
+All of it (`v7bench.sh`, 8 threads, every file back; callgrind on 3
+photos, one thread, est = Ir + 15 mispredictions + 10 L1 read misses):
+
+| | photos30 | corpus (78) | arithmetic (244) | encode est | decode est |
+|---|---|---|---|---|---|
+| version 7 before | 9,033,933 | 23,815,570 | 5,118,141 | 5.949 G | 5.285 G |
+| version 7 now | 8,973,488 | 23,706,569 | 5,076,390 | 6.203 G | 5.481 G |
+| | -0.67% | -0.46% | -0.82% | +4.3% | +3.7% |
+
+0.6% smaller than the full model of version 5 on the photos (9,029,356),
+for about 4% more time than version 7 had: some 0.16% of size per 1% of
+time, seven times the rate at which the full model bought its size over the
+fast one.
+
+
+## Version 7: signs, mantissas and the component before (29/10/2026)
+
+Signs and mantissas were about 35% of version 7's output, coded at 0.86 to
+1.0 bits per decision. Shadow models first (a counter per candidate
+context, run beside the coder without touching the stream, its ideal cost
+added up; 30 photos, one thread), then each change in the coder, measured
+with the deterministic harness (sizes of `pja a` on the 30 photos; est =
+callgrind's instructions + 15 x mispredictions + 10 x L1 misses on 3 of
+them, one thread). Before: 9,033,933 bytes, est 5.949 G to compress and
+5.285 G to decompress.
+
+What the shadows said, on the 30 photos:
+
+- the interior's signs (1,060 KB as direct bits): the neighbours' signs at
+  the same place, the signs above and left in the block, and votes from the
+  block's rank-1 structure (F(u,v) F(u',v') ~ F(u,v') F(u',v), each known
+  (u',v') voting sgn F(u,v') F(u',v) F(u',v')) give at best 0.7 to 1.0%
+  (7 to 10 KB);
+- an edge's sign: how its magnitude compares with the prediction's (half
+  octaves of |v| minus the prediction's bucket) takes 20 KB of 632; finer
+  buckets, the edge position, the rank-1 vote in the same context dilute;
+- the DC residual's sign (147 KB): on which side of the prediction the DCs
+  left and above are takes 13.6 KB (finer sides, the sides against |res|,
+  a diagonal: no better);
+- the first mantissa bit: the interior with the neighbours' magnitude sum
+  (mbS) 4.4 KB, the edges with their position 7 KB; the second bit with the
+  frequency bucket 2.8 KB (interior) and the prediction and first bit 3 KB
+  (edges); the bits below: nothing;
+- the component before: in a band Y, Cb and Cr are coded in turn, so when
+  Cr is coded the Cb of the same rows is known both ways (Cb's own partner
+  is Y in 4:4:4). The sign of the partner's coefficient at the same place
+  takes a third of the chroma signs: interior 109 -> 72 KB, edges 114 ->
+  76 KB, DC 54 -> 48.5 KB (the partner's DC moving up or down from its
+  left and above neighbours).
+
+In the coder, 30 photos (bytes; est against the step before):
+
+| change | photos30 | compress est | decompress est | kept |
+|---|---|---|---|---|
+| edge sign + magnitude against prediction (esign2) | -20,118 | +0.46% | +0.21% | yes |
+| edge 1st mantissa bit + edge position (emant1b) | -7,342 | 0 | 0 | yes |
+| interior 2nd mantissa bit, own counters by frequency bucket (mant2i) | -3,215 | +0.19% | +0.25% | yes |
+| edge 2nd mantissa bit by prediction and 1st bit (mant2e) | -3,170 | -0.03% | -0.20% | yes |
+| interior 1st mantissa bit by mbS (mant1s) | -4,703 | +0.21% | +0.08% | yes |
+| the same, averaged with a second counter by mbI | -6,360 | +0.93% | +0.72% | no |
+| interior signs with a counter by the rank-1 vote (bit masks, popcounts) | -7,374 | +2.9% | +3.0% | no |
+| edge signs mixing esign2 with the rank-1 vote | -13,938 | +3.0% | +3.3% | no |
+| DC sign by the sides of the DCs left and above (dcSign2) | -14,090 | +0.21% | +0.22% | yes |
+| chroma signs by the partner's (isignp, esignp, dcSign2) | -81,876 | +0.41% | +0.54% | yes |
+| chroma 1st mantissa bit by the partner's magnitude | -3,148 | +0.50% | +0.45% | no |
+| chroma zero flag and exponent (interior) with the partner's magnitude in one input | -26,363 | +0.17% | +0.42% | yes |
+| the same on the edges | -27,281 | +0.48% | +0.61% | yes |
+| chroma interior count with the partner's in place of the luma's | -2,419 | +0.74% | -0.07% | no |
+| chroma edge counts with the partner's | -14,845 | +0.62% | 0 | yes |
+| chroma DC zero and exponent with how much the partner's DC moves | -1,220 | +0.08% | +0.10% | no |
+
+The partner is the component just before when it has the same sampling
+and grid (`CodeBand`; `TV7Work.partner`, `partKind` 0 for the luma, 1 for
+a chroma); its tables have a bucket for "no partner", so the luma and a
+4:2:0 Cb index the same tables without a branch. Small changes of the big
+C loop move gcc's register allocation and layout: the cost of several rows
+above is that, not their work (the edge partner tables chosen by a branch
+cost 0.3% more than the same model without it).
+
+All of it together, 8 threads, every file back: photos 9,033,933 ->
+8,830,930 (-2.25%), the corpus of 78 23,815,570 -> 23,583,298 (-0.98%),
+arithmetic-coded 5,118,141 -> 5,085,560 (-0.64%); est to compress 5.949 ->
+6.102 G (+2.6%), to decompress 5.285 -> 5.405 G (+2.3%).
+
+
+## Stream version 7: the C core, faster (29/10/2026)
+
+The same streams, byte for byte (30 photos 9,033,933 bytes before and
+after; every stream compared with the old one's), in less work. Measured
+with callgrind (`pja a --no-verify` and `pja x` of 3 photos, one thread),
+as est = instructions + 15 x mispredicted branches + 10 x L1 read misses;
+each line on the one before it (some on a state that still had a dropped
+change: the numbers are each run's own).
+
+| change | encode est | decode est | kept |
+|---|---|---|---|
+| (start) | 5.949 G | 5.285 G | |
+| a counter's step as an unsigned 32-bit product toward its target (65535 - p or p - 1, times rc[n] < 2^32), not a signed 64-bit one truncated | -4.8% | -5.9% | yes |
+| the coder without its clamp (p is always in [1, 65535] here), the interval by selects | -3.0% | -2.6% | yes |
+| the mixer in SSE4.1 intrinsics (4-lane dot product and update; the lanes past n are 0 and stay 0) | -4.9% | -4.4% | yes |
+| the four prediction kernels in one pass, in uint32 lanes (pjamodel only uses their sums modulo 2^32), the edge caches in 32 bits | -7.3% | -8.7% | yes |
+| the counter's update with masks, no select | +4.9% | +4.7% | no: 207 M more instructions |
+| NeighbourMag set up once a block (a block of zeros for a missing neighbour, the division as an exact multiply) | -0.9% | -0.5% | yes |
+| the 16 DC estimates sorted as a bitonic network in four lanes (only min, max and the middle 8's sum: their order inside a set is not needed) | -3.0% | -3.7% | yes |
+| the interval with xor masks, no branch | +0.3% | +0.5% | no: 1.5 M fewer mispredictions, 43 M more instructions |
+| the counter as one 32-bit word (one load, one store) | +2.8% | +4.5% | no: 178 M more instructions |
+| stretch, squash and reciprocals copied into static C arrays | +0.8% | +0.9% | no: position-independent code needs an address for each |
+| ladders and mantissas in rows of 16 counters (a cache line), every table on a line | -0.6% | -0.4% | yes (the L1 misses did not move: they are capacity misses) |
+| the encoder's bytes in a 4 KB buffer, out by the block | -1.0% | 0 | yes |
+| the weights of each mixer selector on one cache line | -0.7% | -1.0% | yes (mostly the static arrays' revert; this alone about -0.1%) |
+| the counters learned in two loops, the bit a constant in each | -0.4% | -0.6% | yes |
+| a third copy of the loop for AVX2 (cpuid, OSXSAVE and XCR0; `PJA_NOAVX2=1` turns it off): the mixer's 8 lanes and the kernels' 32 in 256-bit vectors | -3.7% | -4.1% | yes |
+| (end) | 4.39 G (-26%) | 3.84 G (-27%) | |
+
+What did not help says where the time is: in this one big function the
+compiler's register allocation decides more than the instruction count
+of a helper, so a change that looks shorter can be longer (the word-sized
+counter, the static tables), and a branch it makes of a select is cheaper
+than the masks that avoid it. The L1 misses (about 41 M on the 3 photos)
+are mostly the counters, scattered over tables much larger than L1, with
+stretch, squash and the kernels (24 KB) taking most of it: aligning the
+rows did not lower them. Software prefetch was not tried: callgrind does
+not model it, so this measure could not see it.
+
+The suite also checks the SSE4.1 copy where the AVX2 one would run
+(`PJA_NOAVX2=1`), against the reference without asm and the C without
+SSE2.
+
+
+## Around the model, in C (29/10/2026)
+
+With version 7's loop in C, what is not the model was a fifth of
+compressing: the JPEG's own Huffman decoding and re-encoding (the round
+trip that allows storing it), BLAKE3, the search for embedded JPEGs. None
+of it changes a byte of any stream (the suite: every stream of every
+model the same in every build, and the JPEG layer's verdicts on 538,351
+damaged variants the same with the C and with the Pascal).
+
+`pas/pjasysc.c`, built by `pas/build_c.sh` beside `pjav7c.c` and taken by
+`pjav7.pas`, which installs it at start-up in units that stay Pascal
+(`pjablake3.Blake3Chunks`, `pjajpeg.HuffEncodeScan` and
+`HuffDecodeScan`): the zpaq-std plugin, which does not use pjav7, has no
+C in it and runs the Pascal; so does `PJA_NOASM=1` for the Huffman scans,
+which the suite compares with the C (`test_jpeg`, and a sum of the
+verdicts of `test_jpeg_corrupt`). Like `pjav7c.c` it takes no memory and
+calls no library.
+
+- **The Huffman scans both ways**, sequential and progressive. The writer
+  gives the same bytes whatever its drain policy; on a symbol a table
+  lacks it answers "not written" and `EncodeScan` writes the scan itself,
+  for its own error and position. The reader takes the path a well-formed
+  scan takes, with every check the Pascal makes (data that runs out, a
+  code the table lacks, a coefficient out of range, the padding, the
+  restart markers); on anything else it hands back the state at the start
+  of that unit (the reader, the predictions, the EOB runs and the bounds
+  of the correction bits) and `DecodeScan` goes on from there in Pascal.
+  What the C wrote of that unit is written again the same way (values put
+  where they were, bits or-ed in again); an AC refinement block, whose new
+  coefficients would change how it is read, is only written once read.
+  Every block is checked inside its component before the C runs, and
+  `THuff` is taken as it is (its layout checked at start-up). The AC
+  reader has a second 9-bit table that gives the coefficient itself when
+  its code and its extra bits fit; the writer one word per symbol, code
+  and length.
+- **BLAKE3**: every whole chunk but the input's last, four at a time in
+  SSE2 lanes (one chunk per lane); the plain path one at a time.
+  `test_blake3` checks both against the official vectors.
+- **The host of embedded JPEGs** (a camera photo's EXIF thumbnail, zeroed
+  in the host to see whether storing it apart pays) was decoded and
+  re-encoded whole a second time. `VerifyRoundTripFrom` takes each scan
+  from the file's own round trip when its header, its tables, its place
+  and its bytes through the marker that stops the reader are the same,
+  and the frame too: then decoding it would give the same coefficients
+  and the same padding, and the rebuild would be the host itself, since
+  `VerifyRoundTrip` saw each scan's bytes come out exactly where they were
+  (`TScan.dataStart`, `dataEnd`, `TJpeg.scansExact`). All the scans or
+  none: otherwise the whole work, as before.
+- Small: the search for embedded JPEGs jumps from FF to FF (`IndexByte`)
+  instead of comparing every byte; version 7's encoder puts its bytes
+  without a range-check call each.
+
+Callgrind as the bench measures it (Ir + 15 mispredictions + 10 L1 read
+misses), one thread, 3 photos (`pja a --no-verify` / `pja x`):
+
+| step | compress | decompress |
+|---|---|---|
+| version 7 as it was | 5,949 M | 5,285 M |
+| embedded-JPEG search by FF | 5,893 M (-0.95%) | = |
+| BLAKE3 four chunks at once | 5,831 M (-1.0%) | 5,238 M (-0.9%) |
+| sequential scans written in C | 5,653 M (-3.1%) | 5,063 M (-3.3%) |
+| sequential scans read in C | 5,285 M (-6.5%) | = |
+| the v7 encoder's bytes without range checks | 5,259 M (-0.5%) | = |
+| one word per symbol (writer) | 5,258 M | 5,057 M |
+| the coefficient from the AC table (reader) | 5,230 M (-0.5%) | = |
+| progressive in C, state handed back per unit | 5,234 M (+0.08%) | 5,055 M |
+| the C's tables in the caller's record | **5,217 M (-12.3%)** | **5,044 M (-4.6%)** |
+
+The same sizes everywhere (30 photos 9,033,933, the corpus of 78
+23,815,570, the 244 arithmetic-coded 5,118,141), every file back.
+
+On files the 3 photos do not have (the same measure): three photos with
+an EXIF thumbnail, one of them progressive, compress in 7,491 M against
+9,153 M (-18%: the host's scans taken from the file); three progressive
+photos compress in 3,253 M against 3,948 M (-18%) and decompress in
+2,804 M against 3,206 M (-13%).
+
+Tried and dropped: version 7's encoder writing its bytes into the
+encoder's array from C, calling Pascal only when full (+10 M
+instructions: the check inlined into every coded bit costs more than the
+1.08 M calls it saves); in the reader, keeping only the reader's four
+words and, sequential, not the EOB state at the start of each unit (+2.7 M,
+the copy of the whole state is cheaper as the compiler lays it out). The C
+keeps its tables (8 KB a scan each way) in the caller's record, not on its
+stack: a frame over a page calls a stack probe on Windows, which is
+libgcc's.
+
+## Version 7, the six lenses together (29/10/2026)
+
+The six sections above were measured each alone on 089218b. Then each was
+applied on top of the others, best value first (size, then speed), the
+verifiers' fixes with them, and measured again with `v7bench.sh quick`
+(photos30, callgrind on 3 photos), so that a gain counted twice would show:
+
+| step | photos30 | enc.est | dec.est |
+|---|---|---|---|
+| 089218b | 9,033,933 | 5.949 G | 5.285 G |
+| + contexts, with the fractional-sampling fix | 8,797,262 (-2.62%) | 6.528 G | 5.850 G |
+| + predictions | 8,753,598 (-43,664) | 6.742 G | 6.075 G |
+| + signs and mantissas: the DC sign by the DCs around against the prediction | 8,746,266 (-7,332) | 6.748 G | 6.070 G |
+| + counters and mixers | 8,724,840 (-21,426) | 6.794 G | 6.100 G |
+| the ratio selector at 16 when every position left is nonzero | 8,724,800 (-40) | 6.793 G | 6.103 G |
+| + the C core, faster (no table layout) | 8,724,800 | 5.164 G | 4.528 G |
+| + its table layout, redone for the merged tables | 8,724,800 | 5.136 G | 4.495 G |
+| + around the model, in C | 8,724,800 | 4.429 G | 4.270 G |
+
+Against 089218b: 3.42% smaller on the photos, and 25.5% less estimated
+time to compress, 19.2% less to decompress. The full harness on the
+result, every file back: photos30 8,724,800, the corpus of 78 23,209,553
+(-2.55%), the 244 arithmetic-coded 4,985,273 (-2.60%), enc.est 4.429 G,
+dec.est 4.270 G. Version 7's streams are the same byte for byte with the C
+built without SSE2, the SSE4.1 copy (`PJA_NOAVX2=1`), no asm, the -O2
+reference build and 8 threads, on all three sets. The version 5 full model writes
+9,029,356: version 7 is now 3.37% smaller than it.
+
+How the lenses met:
+
+- **Contexts and signs-and-mantissas overlap.** Both read the component
+  coded before (contexts: the luma block over a chroma block and the Cb
+  block at Cr's place; signs and mantissas: the "partner", the previous
+  component when it has the same sampling, which in 4:4:4 is also the luma).
+  Its partner signs, partner magnitudes in the zero flags and exponents,
+  partner edge counts, interior first mantissa bit by mbS and second edge
+  mantissa bit all have a contexts counterpart (`iSign`, `eSgn`, `zLum`,
+  `zCb`, `xLum`, `xCb`, `ecX`, `mFirst`, `eMant`), so they were not
+  merged. Of what has none, the DC sign's first counter by which side of
+  the prediction the DCs left and above are (E7) stacked (-7,332, 1,134
+  counters); the edge first mantissa counter by position (E2) did not
+  (+1,391, dropped). Its first-sign context d is the predictions' rel.
+- **Predictions on top of contexts.** The edge sign became one average of
+  two counters: predictions' first (`esr`: the prediction's sign and
+  quarter-size against the size coded, rel) and a second (`eSgn`) by
+  position, agreement of the last sign with its prediction, the
+  prediction's sign and size, and the two signs contexts chose (luma: the
+  same coefficient left and above, as predictions' ns/ns2; chroma: the luma
+  and the Cb sign here). The edge count got pcn as a fifth input next to
+  contexts' `ecX`. The DC sign is the average of `dsf` (spread, eighths of
+  the prediction, and E7's sides) and `dsX` (the neighbours' residual
+  signs, the eighths, the other component's residual sign); contexts'
+  `dzX` and `dxX` follow the finer spread (`ACT2_BUCKETS`). The DC residual
+  bytes keep predictions' sign coding (bits 4-5: 0 zero, 1 positive, 2
+  negative), which contexts reads as is. The edge mantissa stayed contexts'
+  (13.2 KB against predictions' 0.7 KB), its first counter on the quarter
+  prediction; predictions' `emq` was not merged. 72% of predictions' gain
+  survived (-43,664 of -60,445) for +3.3% / +3.8% est.
+- **Counters and mixers on top.** Its constant input of 384, rates by
+  decision, starting weights and selectors carried over to the larger
+  mixers (now 3 to 7 inputs); its dropped inputs had already been dropped
+  or replaced by contexts. 60% of its gain survived (-21,466).
+- **The C core's mixer, generalized.** Its SSE4.1 and AVX2 mixer took 3 to
+  5 inputs with the constant in a fixed lane; the merged one takes 3 to 7
+  (lanes 0..n-1 the counters, n the constant 384, the rest 0) and the rate
+  as an argument. Its bitonic DC network returns what predictions' middle
+  ten needs (the fourth smallest and the fourth largest, not the extremes);
+  its table layout was redone for the merged tables (every table version 7
+  reads starts on a cache line, every exponent ladder and the DC's
+  mantissas in rows of 16). Bytes identical at each step.
+- **Around the model** went in unchanged but for `pjav7.Put`, where the C
+  core's buffered encoder already writes a block with one `Move`.
+
+The verifiers' fixes, all in: the ratio selector reads RATIO_OF only when
+positions left exceed the nonzeros left (it read one byte past the table
+for a block with 49 nonzero interior coefficients, a value that depends on
+the linker; 16, the selector's otherwise unused ninth set, now); the
+luma's coefficients only when the vertical sampling divides (above); PTH
+and PTH2 are enum constants, not build flags; the per-coefficient
+reciprocals `rq[]` and `divround` that predictions left unused are gone,
+and the `PJA_V7_STATS` debugging block (C library calls) was not merged.

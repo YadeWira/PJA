@@ -18,6 +18,7 @@ uses SysUtils;
 
 type
   THash16 = array[0..15] of Byte;
+  TCvWords = array[0..7] of LongWord;
 
   { Incremental: Init, Update as many times as needed, Final. }
   TBlake3 = record
@@ -30,11 +31,21 @@ type
     stack: array[0..53] of array[0..7] of LongWord;   { 2^54 chunks are 2^64 bytes }
     depth: Integer;
     procedure FinishChunk;
+    procedure PushCv(const c: TCvWords);
   public
     procedure Init;
     procedure Update(const data; len: SizeInt);
     function Final: THash16;
   end;
+
+type
+  { n full chunks at input, the first numbered counter, none of them the
+    last of the input: their chaining values, 8 words each, into cv }
+  TBlake3Chunks = procedure(input: PByte; n: SizeInt; counter: QWord; cv: PLongWord); cdecl;
+var
+  { set by pjav7 (pjasysc.c, several chunks at once); nil: this unit's own
+    compression function, chunk by chunk. The same hash either way }
+  Blake3Chunks: TBlake3Chunks = nil;
 
 function Blake3_128(const a: TBytes): THash16;
 { The hash of a[aFirst..aFirst+aLen) followed by b[bFirst..bFirst+bLen). }
@@ -242,33 +253,52 @@ end;
 { The current chunk is full and more input follows: its chaining value goes
   into the tree, merging every pair of subtrees that is now complete. }
 procedure TBlake3.FinishChunk;
-var c: TCv; flags: LongWord; total: QWord; b: TWords16; i: Integer;
+var c: TCv; flags: LongWord; i: Integer;
 begin
   for i := 0 to 7 do c[i] := cv[i];
   flags := CHUNK_END;
   if blocksDone = 0 then flags := flags or CHUNK_START;
   CompressCv(c, block, chunk, blockLen, flags);
-  Inc(chunk);
-  total := chunk;
-  while total and 1 = 0 do begin
-    Dec(depth);
-    ParentBlock(TCv(stack[depth]), c, b);
-    for i := 0 to 7 do c[i] := IV[i];
-    CompressCv(c, b, 0, 64, PARENT);
-    total := total shr 1;
-  end;
-  for i := 0 to 7 do stack[depth][i] := c[i];
-  Inc(depth);
+  PushCv(TCvWords(c));
   for i := 0 to 7 do cv[i] := IV[i];
   FillChar(block, SizeOf(block), 0);
   blockLen := 0; blocksDone := 0;
 end;
 
+{ A finished chunk's chaining value into the tree, merging every pair of
+  subtrees that is now complete. }
+procedure TBlake3.PushCv(const c: TCvWords);
+var x: TCv; total: QWord; b: TWords16; i: Integer;
+begin
+  for i := 0 to 7 do x[i] := c[i];
+  Inc(chunk);
+  total := chunk;
+  while total and 1 = 0 do begin
+    Dec(depth);
+    ParentBlock(TCv(stack[depth]), x, b);
+    for i := 0 to 7 do x[i] := IV[i];
+    CompressCv(x, b, 0, 64, PARENT);
+    total := total shr 1;
+  end;
+  for i := 0 to 7 do stack[depth][i] := x[i];
+  Inc(depth);
+end;
+
 procedure TBlake3.Update(const data; len: SizeInt);
-var p: PByte; take: SizeInt; flags: LongWord;
+var p: PByte; take, k, i: SizeInt; flags: LongWord; cvs: array[0..15] of TCvWords;
 begin
   p := @data;
   while len > 0 do begin
+    { at a chunk's start with more than a chunk to come: whole chunks at
+      once through Blake3Chunks, all but the input's last one }
+    if (blockLen = 0) and (blocksDone = 0) and (len > CHUNK_LEN) and Assigned(Blake3Chunks) then begin
+      k := (len - 1) div CHUNK_LEN;
+      if k > Length(cvs) then k := Length(cvs);
+      Blake3Chunks(p, k, chunk, @cvs[0][0]);
+      for i := 0 to k - 1 do PushCv(cvs[i]);
+      Inc(p, k * CHUNK_LEN); Dec(len, k * CHUNK_LEN);
+      Continue;
+    end;
     { a full block is only compressed when more input follows: the last
       block of the last chunk has to wait for its CHUNK_END and ROOT }
     if blockLen = 64 then begin

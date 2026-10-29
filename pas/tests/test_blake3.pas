@@ -1,10 +1,11 @@
 { pjablake3 against the vectors of the official implementation (kat.txt, the
   "b3" lines): every size there, whole, split into two ranges, and fed in
-  pieces of several sizes, which have to give the same hash. A range outside
-  the buffer has to be refused. }
+  pieces of several sizes, which have to give the same hash. Twice: with
+  pjav7's chunks at once (pjasysc.c) and with this unit's own compression
+  alone. A range outside the buffer has to be refused. }
 program test_blake3;
 {$I ../pja.inc}
-uses SysUtils, Classes, pjablake3;
+uses SysUtils, Classes, pjablake3, pjav7;
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
 begin Inc(cells); if ok then Writeln('  ', what:58, '  ok') else begin Inc(failures); Writeln('  ', what:58, '  FAIL'); end; end;
@@ -33,12 +34,17 @@ begin
   Result := h.Final;
 end;
 
-var kat: TStringList; l: string; fields: TStringArray; n, nb3, cut, s: Integer;
-    d, x: TBytes; h: THash16; raised, same: Boolean;
+var kat: TStringList; l, how: string; fields: TStringArray; n, nb3, cut, s, pass: Integer;
+    d, x: TBytes; h: THash16; raised, same: Boolean; chunks: TBlake3Chunks;
 const STEPS: array[0..5] of Integer = (1, 7, 63, 64, 65, 1024);
 begin
   cells := 0; failures := 0; nb3 := 0;
   kat := TStringList.Create; kat.LoadFromFile(ParamStr(1));
+  chunks := Blake3Chunks;
+  Check(Assigned(chunks), 'pjav7 installs its chunks at once');
+  for pass := 0 to 1 do begin
+  if pass = 0 then begin Blake3Chunks := chunks; how := ' (C)'; end
+  else begin Blake3Chunks := nil; how := ' (Pascal)'; end;
   for l in kat do begin
     if (l = '') or (l[1] = '#') then Continue;
     fields := l.Split(' ');
@@ -46,7 +52,7 @@ begin
     Inc(nb3);
     n := StrToInt(fields[1]);
     d := Pattern(n, $1234567 xor LongWord(n));
-    Check(Hex(Blake3_128(d)) = fields[2], Format('BLAKE3-128 of %d B = the official one', [n]));
+    Check(Hex(Blake3_128(d)) = fields[2], Format('BLAKE3-128 of %d B = the official one', [n]) + how);
     if n > 1 then begin
       cut := n div 3;
       Check(Hex(Blake3_128(d, 0, cut, d, cut, n - cut)) = fields[2], Format('  split into two ranges at %d', [cut]));
@@ -57,8 +63,10 @@ begin
         if Hex(InPieces(d, s)) <> fields[2] then same := False;
     Check(same, '  fed in pieces of 1, 7, 63, 64, 65, 1024 B');
   end;
+  end;
+  Blake3Chunks := chunks;
   kat.Free;
-  Check(nb3 >= 12, Format('vectors read: %d', [nb3]));
+  Check(nb3 >= 24, Format('vectors read: %d', [nb3]));
 
   x := nil;
   h := Blake3_128(x, 0, 0, nil, 0, 0);
@@ -71,5 +79,5 @@ begin
   Check(raised, 'a negative start is refused');
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 30) then Halt(1);
+  if (failures > 0) or (cells < 60) then Halt(1);
 end.

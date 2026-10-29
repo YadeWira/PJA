@@ -25,8 +25,13 @@ done
 
 echo "== layer 1: JPEG <-> coefficients"
 "$OUT/test_jpeg" "$PJA/tests/jpg" 11 | tail -1
-# every bit of the first 2 KB and every truncation: no exception
-"$OUT/test_jpeg_corrupt" "$PJA/tests/jpg" 2048 | tail -1
+# every bit of the first 2 KB and every truncation: no exception; the same
+# verdicts with the Huffman scans in C (pjasysc.c) and in Pascal
+"$OUT/test_jpeg" "$PJA/tests/jpg" 11 > "$OUT/jpeg_c.txt"; PJA_NOASM=1 "$OUT/test_jpeg" "$PJA/tests/jpg" 11 > "$OUT/jpeg_pas.txt"
+cmp -s "$OUT/jpeg_c.txt" "$OUT/jpeg_pas.txt" || { echo "FAIL: test_jpeg differs with PJA_NOASM=1"; exit 1; }
+"$OUT/test_jpeg_corrupt" "$PJA/tests/jpg" 2048 | tail -1 | tee "$OUT/corrupt_c.txt"
+PJA_NOASM=1 "$OUT/test_jpeg_corrupt" "$PJA/tests/jpg" 2048 | tail -1 > "$OUT/corrupt_pas.txt"
+cmp -s "$OUT/corrupt_c.txt" "$OUT/corrupt_pas.txt" || { echo "FAIL: other verdicts with PJA_NOASM=1"; cat "$OUT/corrupt_pas.txt"; exit 1; }
 # what libjpeg does not do but other encoders do: extra RSTs, EOB runs cut by the table
 "$OUT/test_tolerances" "$PJA/tests/jpg" | tail -1
 echo "== layer 1, JPEG-LS: samples"
@@ -52,6 +57,14 @@ PJA_TEST_FAST=1 "$OUT/test_codec_corrupt" "$PJA/tests/jpg" 128 | tail -1
 echo "-- stream version 7 (the C model)"
 PJA_TEST_V7=1 "$OUT/test_codec" "$PJA/tests/jpg" 11 | tail -2
 PJA_TEST_V7=1 "$OUT/test_codec_corrupt" "$PJA/tests/jpg" 128 | tail -1
+# bands decoded last first (PJA_BANDS_REVERSE=1, one thread): no band reads
+# what an earlier one decodes. Several bands each, one with a fractional
+# vertical sampling (luma 1x3, chroma 1x2: a chroma row maps to the luma of
+# the band before), one 4:2:0
+SAMP=$OUT/sampling; rm -rf "$SAMP"; mkdir -p "$SAMP"
+python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y13c12.jpg" 100 200 13,12,12 1 > /dev/null
+python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y22c11.jpg" 150 200 22,11,11 2 > /dev/null
+PJA_BANDS_REVERSE=1 PJA_TEST_V7=1 "$OUT/test_codec" "$SAMP" 2 | tail -2
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -2; done
 for d in "${dirs[@]}"; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
 
@@ -86,7 +99,11 @@ for d in "${SRC_DIRS[@]}"; do
     F4=$OUT/streams_plain; rm -rf "$F4"; mkdir -p "$F4"
     "$PLAIN/dump_streams" "$d" "$F4"
     diff -rq "$R" "$F4" > /dev/null || { echo "FAIL: C without SSE2 differs on $d"; diff -rq "$R" "$F4" | head -3; exit 1; }
-    tag="$tag, = C without SSE2"
+    # the SSE4.1 copy of the C loop, where the AVX2 one would run
+    F5=$OUT/streams_noavx2; rm -rf "$F5"; mkdir -p "$F5"
+    PJA_NOAVX2=1 "$FAST/dump_streams" "$d" "$F5"
+    diff -rq "$R" "$F5" > /dev/null || { echo "FAIL: the SSE4.1 copy differs on $d"; diff -rq "$R" "$F5" | head -3; exit 1; }
+    tag="$tag, = C without SSE2 = SSE4.1 copy"
   fi
   echo "$n streams from $(basename "$d")$tag: reference = fast = fast without asm = fast with 4 threads"
 done

@@ -99,7 +99,9 @@ type
     nz1, nz2, nz3, zero1, zero2, zero3, zero4, zero5, expo1, expo2, expo3, expo4,
     mant1, mant, ezero1, ezero3, ezero4, ezero5, eexpo1, eexpo2, eexpo3, eexpo4, eexpo5,
     emant1, esign, dcZero, dcExpo, dcSign, dcMant1, dcMant, dz2, dz3, dz4, dx2, dx3, dx4,
-    ec1, ec2, ec3, ez6, nzm1, nzm2: PAdaptiveBit;
+    ec1, ec2, ec3, ez6, nzm1, nzm2,
+    nz4, zLum, zCb, xPos, xRow, xLum, xCb, mFirst, mRest, iSign, ecX, ezLum, exLum, exCb, eMant,
+    eSgn, dzX, dxX, dsX, esr, dsf, dzf, ecp: PAdaptiveBit;
     wNz, wZero, wExpo, wEZero, wEExpo, wDcZero, wDcExpo, wECnt: PInteger;
   end;
   { this unit's tables, and two callbacks pjav7 sets (v7t_t) }
@@ -110,12 +112,19 @@ type
     w3, e3, kerLeft, kerTop, kerRight, kerBottom: PInt64;
     interiorZz, edgeZz: QWord;
     sse41: LongInt;          { the SSE4.1 copy of the loop may run: UseSse41 }
+    avx2: LongInt;           { the AVX2 copy may run: UseAvx2 }
     put, get: Pointer;
+  end;
+  { a block's edge caches in pjav7c.c (ecache_t): TEdgeCache's values modulo 2^32 }
+  TV7EdgeCache = record
+    eg, px: array[0..7] of Cardinal;
   end;
   { a component's scratch, zeroed (v7work_t) }
   TV7Work = record
     rowC: Pointer;
     dcr, rcnt, ccnt: PByte;
+    lumaC, prevC: PSmallInt;
+    lumaD, prevD: PByte;  { what the band's earlier components left (pjav7c.c) }
   end;
   { one component of a band, either way: coder is the TArithEncoder or the
     TArithDecoder of cd }
@@ -328,6 +337,8 @@ var
   { Set at start-up from cpuid; PJA_NOASM=1 forces the Pascal path. Either
     path gives the same streams: only the speed changes. }
   UseSse41: Boolean = False;
+  { the same for version 7's AVX2 copy of its loop (pjav7c.c) }
+  UseAvx2: Boolean = False;
 
 {$ifdef CPUX86_64}
 {$asmmode intel}
@@ -342,6 +353,39 @@ begin
     pop rbx
   end ['rax', 'rcx', 'rdx'];
   Result := (c and (1 shl 19)) <> 0;
+end;
+
+{ AVX2, and the system saving the 256-bit registers (OSXSAVE, then XCR0's
+  SSE and AVX bits) }
+function CpuHasAvx2: Boolean;
+var top, c1, b7, xcr: LongWord;
+begin
+  asm
+    push rbx
+    xor eax, eax
+    cpuid
+    mov top, eax
+    pop rbx
+  end ['rax', 'rcx', 'rdx'];
+  if top < 7 then Exit(False);
+  asm
+    push rbx
+    mov eax, 1
+    cpuid
+    mov c1, ecx
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    mov b7, ebx
+    pop rbx
+  end ['rax', 'rcx', 'rdx'];
+  if (c1 and (1 shl 27) = 0) or (c1 and (1 shl 28) = 0) then Exit(False);
+  asm
+    xor ecx, ecx
+    xgetbv
+    mov xcr, eax
+  end ['rax', 'rcx', 'rdx'];
+  Result := (xcr and 6 = 6) and (b7 and (1 shl 5) <> 0);
 end;
 
 { sum of st[i] * w[i] over the 8 lanes }
@@ -614,8 +658,12 @@ const
   ACT_BUCKETS = 24;    { DC: spread of the estimates, in half octaves; 23 = no neighbours }
   NO_NEIGHBOUR = MAG_BUCKETS - 1;
   PRED_BUCKETS = 22;   { |5/8 of the edge prediction| in half octaves; 21 = no prediction }
+  PQ_BUCKETS = 26;     { version 7: the same in quarters of a quantum, 4x finer; 25 = no prediction }
+  ACT2_BUCKETS = 28;   { version 7: ACT_BUCKETS from a quarter of a quantum; 27 = no neighbours }
   NO_PRED = PRED_BUCKETS - 1;
   EDGE_POS = 14;       { row 0 (v = 1..7) and column 0 (u = 1..7) }
+  V7_ROW = 16;         { version 7: a ladder's or a mantissa's row of counters, one cache line (pjav7c.c's ROW) }
+  V7_ALIGN = 16;       { version 7: the counters a table has more, to start it on a cache line }
 
   { bucket of a zigzag position }
   K_BUCKET_OF: array[0..63] of Byte = (
@@ -652,6 +700,14 @@ type
     { version 7: each edge's count of nonzeros (3-bit trees) and its flags
       given it; the interior count's bits below its bit length }
     ec1, ec2, ec3, ez6, nzm1, nzm2: TBits;
+    { and the contexts from the luma and the Cb blocks at the same place, the
+      sum so far in the block, the prediction against the mantissa (pjav7c.c) }
+    nz4, zLum, zCb, xPos, xRow, xLum, xCb, mFirst, mRest, iSign, ecX, ezLum, exLum, exCb, eMant,
+    eSgn, dzX, dxX, dsX: TBits;
+    { the edge sign by the size coded against the prediction, the DC sign and
+      zero flag by the prediction's eighths, the edge counts by the big edge
+      predictions (pjav7c.c) }
+    esr, dsf, dzf, ecp: TBits;
     mxECnt: TMixer;
     v7: Boolean;
     mxNz, mxZero, mxExpo, mxEZero, mxEExpo: TMixer;
@@ -729,14 +785,87 @@ begin
   mxEExpo.Init(6, MAX_EXP_AC * EDGE_POS);
 end;
 
+{ Version 7's start for a mixer's weights: each counter at 4/3 of an equal
+  share, the constant input at zero (measured: 0.03% smaller than TMixer's
+  equal shares) }
+procedure V7Weights(var mx: TMixer);
+var i: SizeInt;
+begin
+  for i := 0 to High(mx.w) do
+    if (i mod LANES) < mx.n - 1 then mx.w[i] := 65536 * 4 div (3 * mx.n) else mx.w[i] := 0;
+end;
+
+{ a version 7 table's first counter (or a mixer's first weight) on a cache
+  line: InitV7 gave each table V7_ALIGN counters more, and put the weights there }
+function V7Line(p: Pointer): Pointer; inline;
+begin
+  Result := Pointer((PtrUInt(p) + 63) and not PtrUInt(63));
+end;
+
 procedure TCoefModel.InitV7(isChroma: Boolean);
+  { the weights moved to a cache line, each selector's 8 then on one line }
+  procedure AlignW(var mx: TMixer);
+  var old: array of Integer;
+  begin
+    old := Copy(mx.w);
+    mx.w := nil; SetLength(mx.w, Length(old) + 16);
+    Move(old[0], V7Line(@mx.w[0])^, Length(old) * SizeOf(Integer));
+  end;
+  { a table of n counters (and V7_ALIGN more, which V7Component's pointer
+    skips to the next cache line) }
+  procedure NB(var b: TBits; n: SizeInt);
+  begin
+    NewBits(b, n + V7_ALIGN);
+  end;
 begin
   Init(False, isChroma);
   v7 := True;
-  NewBits(ec1, 2 * NZ_BUCKETS * 9 * 8); NewBits(ec2, 2 * 9 * 9 * 8); NewBits(ec3, 2 * 9 * PRED_BUCKETS * 8);
-  NewBits(ez6, EDGE_POS * 8 * 8 * 4);
-  NewBits(nzm1, NZ_BUCKETS * 8 * 8); NewBits(nzm2, (NZ_BUCKETS + 1) * 8 * 8);
-  mxECnt.Init(5, 2 * 8);
+  { every table version 7 reads, each starting on a cache line; the exponent
+    ladders and the DC's mantissas in rows of V7_ROW counters (one cache line
+    each), not MAX_EXP_AC or MAX_EXP_DC. The full model's tables version 7
+    does not read stay as Init left them. }
+  NB(nz2, NZ_BUCKETS * NZ_BUCKETS * 64); NB(nz3, (NZ_BUCKETS + 1) * NZ_BUCKETS * 64);
+  NB(nz4, (NZ_BUCKETS + 1) * 12 * 8);
+  NB(nzm1, NZ_BUCKETS * 8 * 8); NB(nzm2, (NZ_BUCKETS + 1) * 8 * 8);
+  NB(zero2, 64 * MAG_BUCKETS * 4); NB(zero4, K_BUCKETS * MAG_BUCKETS * REM_BUCKETS);
+  NB(zLum, 64 * 28 * REM_BUCKETS); NB(zCb, 64 * 28 * REM_BUCKETS);
+  NB(expo3, K_BUCKETS * REM_BUCKETS * V7_ROW);
+  NB(xPos, 64 * MAG_BUCKETS * V7_ROW); NB(xRow, K_BUCKETS * 16 * V7_ROW);
+  NB(xLum, K_BUCKETS * 28 * V7_ROW); NB(xCb, K_BUCKETS * 28 * V7_ROW);
+  NB(mant1, (MAX_EXP_AC + 1) * K_BUCKETS);
+  NB(mFirst, (MAX_EXP_AC + 1) * MAG_BUCKETS * 16); NB(mRest, K_BUCKETS * 256);
+  NB(iSign, 64 * 9);
+  NB(ec1, 2 * NZ_BUCKETS * 9 * 8); NB(ec2, 2 * 9 * 9 * 8); NB(ec3, 2 * 9 * PRED_BUCKETS * 8);
+  NB(ecX, 2048 + 2 * 9 * 18 * 8); NB(ecp, 2 * 16 * NZ_BUCKETS * 8);
+  NB(ez6, EDGE_POS * 8 * 8 * 4); NB(ezero4, EDGE_POS * MAG_BUCKETS); NB(ezLum, EDGE_POS * 26 * 4);
+  { the edge prediction in quarters (PQ_BUCKETS) }
+  NB(eexpo1, EDGE_POS * PQ_BUCKETS * V7_ROW); NB(eexpo2, EDGE_POS * MAG_BUCKETS * V7_ROW);
+  NB(eexpo3, PQ_BUCKETS * 8 * V7_ROW); NB(eexpo4, EDGE_POS * NZ_BUCKETS * V7_ROW);
+  NB(eexpo5, EDGE_POS * 12 * V7_ROW);
+  NB(exLum, EDGE_POS * 26 * V7_ROW); NB(exCb, EDGE_POS * 26 * V7_ROW);
+  NB(emant1, (MAX_EXP_AC + 1) * PQ_BUCKETS); NB(eMant, EDGE_POS * 1280);
+  NB(esr, 2 * 3 * PQ_BUCKETS * 9); NB(eSgn, EDGE_POS * 3 * 3 * 3 * 3 * 3);
+  { the DC's spread an eighth of an octave finer (ACT2_BUCKETS) }
+  NB(dcZero, ACT2_BUCKETS); NB(dzf, 20 * 5); NB(dz3, NZ_BUCKETS * 8); NB(dz4, ACT2_BUCKETS * 3);
+  NB(dzX, ACT2_BUCKETS * 17);
+  NB(dcExpo, ACT2_BUCKETS * V7_ROW); NB(dx2, 20 * V7_ROW); NB(dx3, NZ_BUCKETS * 8 * V7_ROW);
+  NB(dx4, ACT2_BUCKETS * 3 * V7_ROW); NB(dxX, 8 * 17 * V7_ROW);
+  NB(dcMant1, (MAX_EXP_DC + 1) * ACT2_BUCKETS); NB(dcMant, (MAX_EXP_DC + 1) * V7_ROW);
+  NB(dsf, (ACT2_BUCKETS div 2) * 9 * 3 * 3); NB(dsX, 9 * 9 * 3);
+  { the mixers whose inputs are not the full model's (inputs + 1: the
+    constant). Some choose their weights by more than version 5's: the edge
+    zero flag by how many nonzeros are left and positions left on the edge
+    (version 7 knows the count first), the edge exponent by how many are
+    left after this one (0..3+), the interior exponent by the ratio of
+    nonzeros left to positions left (in eighths, halved), the edge count by
+    the interior count's bucket }
+  mxZero.Init(5, 64); mxEZero.Init(4, EDGE_POS * 64); mxExpo.Init(6, MAX_EXP_AC * K_BUCKETS * 9);
+  mxEExpo.Init(8, MAX_EXP_AC * EDGE_POS * 4); mxDcZero.Init(6, ACT2_BUCKETS); mxDcExpo.Init(6, MAX_EXP_DC);
+  mxECnt.Init(6, 2 * 8 * NZ_BUCKETS);
+  V7Weights(mxNz); V7Weights(mxZero); V7Weights(mxExpo); V7Weights(mxEZero);
+  V7Weights(mxEExpo); V7Weights(mxDcZero); V7Weights(mxDcExpo); V7Weights(mxECnt);
+  AlignW(mxNz); AlignW(mxZero); AlignW(mxExpo); AlignW(mxEZero); AlignW(mxEExpo);
+  AlignW(mxDcZero); AlignW(mxDcExpo); AlignW(mxECnt);
 end;
 
 function NzBucketOf(n: Integer): Integer;
@@ -1240,37 +1369,50 @@ begin
   t.w3 := @W3[0]; t.e3 := @E3[0];
   t.kerLeft := @KER_LEFT[0, 0]; t.kerTop := @KER_TOP[0, 0]; t.kerRight := @KER_RIGHT[0, 0]; t.kerBottom := @KER_BOTTOM[0, 0];
   t.interiorZz := INTERIOR_ZZ; t.edgeZz := EDGE_ZZ;
-  t.sse41 := Ord(UseSse41);
+  t.sse41 := Ord(UseSse41); t.avx2 := Ord(UseAvx2);
 end;
+
 
 { Version 7's component: the same arguments as CodeComponent, the work in
   pjav7c.c through V7Code. }
 function V7Component(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
                      const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
-                     out nzOut: TByteArr): Boolean;
+                     out nzOut: TByteArr; lumaCoef, prevCoef: PSmallInt;
+                     lumaDcr, prevDcr: PByte; out dcr: TByteArr): Boolean;
 var v: TV7Model; wk: TV7Work; qq: array[0..63] of Word; k: Integer; lz, coder: Pointer;
-    rowC: array of TEdgeCache; dcr, rcnt, ccnt: TByteArr;
+    rowC: array of TV7EdgeCache; rcnt, ccnt: TByteArr;
 begin
-  nzOut := nil;
+  nzOut := nil; dcr := nil;
   if (V7Code = nil) or (cp.bw <= 0) or (cp.bh <= 0) then Exit(False);
   for k := 0 to 63 do if k < Length(qt) then qq[k] := qt[k] else qq[k] := 0;
-  v.nz1 := @m.nz1[0]; v.nz2 := @m.nz2[0]; v.nz3 := @m.nz3[0];
-  v.zero1 := @m.zero1[0]; v.zero2 := @m.zero2[0]; v.zero3 := @m.zero3[0]; v.zero4 := @m.zero4[0]; v.zero5 := @m.zero5[0];
-  v.expo1 := @m.expo1[0]; v.expo2 := @m.expo2[0]; v.expo3 := @m.expo3[0]; v.expo4 := @m.expo4[0];
-  v.mant1 := @m.mant1[0]; v.mant := @m.mant[0];
-  v.ezero1 := @m.ezero1[0]; v.ezero3 := @m.ezero3[0]; v.ezero4 := @m.ezero4[0]; v.ezero5 := @m.ezero5[0];
-  v.eexpo1 := @m.eexpo1[0]; v.eexpo2 := @m.eexpo2[0]; v.eexpo3 := @m.eexpo3[0]; v.eexpo4 := @m.eexpo4[0];
-  v.eexpo5 := @m.eexpo5[0]; v.emant1 := @m.emant1[0]; v.esign := @m.esign[0];
-  v.dcZero := @m.dcZero[0]; v.dcExpo := @m.dcExpo[0]; v.dcSign := @m.dcSign[0]; v.dcMant1 := @m.dcMant1[0];
-  v.dcMant := @m.dcMant[0]; v.dz2 := @m.dz2[0]; v.dz3 := @m.dz3[0]; v.dz4 := @m.dz4[0];
-  v.dx2 := @m.dx2[0]; v.dx3 := @m.dx3[0]; v.dx4 := @m.dx4[0];
-  v.ec1 := @m.ec1[0]; v.ec2 := @m.ec2[0]; v.ec3 := @m.ec3[0]; v.ez6 := @m.ez6[0]; v.nzm1 := @m.nzm1[0]; v.nzm2 := @m.nzm2[0];
-  v.wNz := @m.mxNz.w[0]; v.wZero := @m.mxZero.w[0]; v.wExpo := @m.mxExpo.w[0]; v.wEZero := @m.mxEZero.w[0];
-  v.wEExpo := @m.mxEExpo.w[0]; v.wDcZero := @m.mxDcZero.w[0]; v.wDcExpo := @m.mxDcExpo.w[0]; v.wECnt := @m.mxECnt.w[0];
+  { version 7 reads every table from its first cache line (InitV7); the
+    full model's tables it does not read keep their plain pointers }
+  v.nz1 := @m.nz1[0]; v.nz2 := V7Line(@m.nz2[0]); v.nz3 := V7Line(@m.nz3[0]);
+  v.zero1 := @m.zero1[0]; v.zero2 := V7Line(@m.zero2[0]); v.zero3 := @m.zero3[0]; v.zero4 := V7Line(@m.zero4[0]); v.zero5 := @m.zero5[0];
+  v.expo1 := @m.expo1[0]; v.expo2 := @m.expo2[0]; v.expo3 := V7Line(@m.expo3[0]); v.expo4 := @m.expo4[0];
+  v.mant1 := V7Line(@m.mant1[0]); v.mant := @m.mant[0];
+  v.ezero1 := @m.ezero1[0]; v.ezero3 := @m.ezero3[0]; v.ezero4 := V7Line(@m.ezero4[0]); v.ezero5 := @m.ezero5[0];
+  v.eexpo1 := V7Line(@m.eexpo1[0]); v.eexpo2 := V7Line(@m.eexpo2[0]); v.eexpo3 := V7Line(@m.eexpo3[0]); v.eexpo4 := V7Line(@m.eexpo4[0]);
+  v.eexpo5 := V7Line(@m.eexpo5[0]); v.emant1 := V7Line(@m.emant1[0]); v.esign := @m.esign[0];
+  v.dcZero := V7Line(@m.dcZero[0]); v.dcExpo := V7Line(@m.dcExpo[0]); v.dcSign := @m.dcSign[0]; v.dcMant1 := V7Line(@m.dcMant1[0]);
+  v.dcMant := V7Line(@m.dcMant[0]); v.dz2 := @m.dz2[0]; v.dz3 := V7Line(@m.dz3[0]); v.dz4 := V7Line(@m.dz4[0]);
+  v.dx2 := V7Line(@m.dx2[0]); v.dx3 := V7Line(@m.dx3[0]); v.dx4 := V7Line(@m.dx4[0]);
+  v.ec1 := V7Line(@m.ec1[0]); v.ec2 := V7Line(@m.ec2[0]); v.ec3 := V7Line(@m.ec3[0]); v.ez6 := V7Line(@m.ez6[0]); v.nzm1 := V7Line(@m.nzm1[0]); v.nzm2 := V7Line(@m.nzm2[0]);
+  v.nz4 := V7Line(@m.nz4[0]); v.zLum := V7Line(@m.zLum[0]); v.zCb := V7Line(@m.zCb[0]); v.xPos := V7Line(@m.xPos[0]); v.xRow := V7Line(@m.xRow[0]);
+  v.xLum := V7Line(@m.xLum[0]); v.xCb := V7Line(@m.xCb[0]); v.mFirst := V7Line(@m.mFirst[0]); v.mRest := V7Line(@m.mRest[0]); v.iSign := V7Line(@m.iSign[0]);
+  v.ecX := V7Line(@m.ecX[0]); v.ezLum := V7Line(@m.ezLum[0]); v.exLum := V7Line(@m.exLum[0]); v.exCb := V7Line(@m.exCb[0]); v.eMant := V7Line(@m.eMant[0]);
+  v.eSgn := V7Line(@m.eSgn[0]); v.dzX := V7Line(@m.dzX[0]); v.dxX := V7Line(@m.dxX[0]); v.dsX := V7Line(@m.dsX[0]);
+  v.esr := V7Line(@m.esr[0]); v.dsf := V7Line(@m.dsf[0]); v.dzf := V7Line(@m.dzf[0]); v.ecp := V7Line(@m.ecp[0]);
+  v.wNz := V7Line(@m.mxNz.w[0]); v.wZero := V7Line(@m.mxZero.w[0]); v.wExpo := V7Line(@m.mxExpo.w[0]); v.wEZero := V7Line(@m.mxEZero.w[0]);
+  v.wEExpo := V7Line(@m.mxEExpo.w[0]); v.wDcZero := V7Line(@m.mxDcZero.w[0]); v.wDcExpo := V7Line(@m.mxDcExpo.w[0]); v.wECnt := V7Line(@m.mxECnt.w[0]);
   rowC := nil; SetLength(rowC, cp.bw);
   dcr := nil; SetLength(dcr, cp.bw * cp.bh); rcnt := nil; SetLength(rcnt, cp.bw * cp.bh);
   ccnt := nil; SetLength(ccnt, cp.bw * cp.bh); SetLength(nzOut, cp.bw * cp.bh);
   wk.rowC := @rowC[0]; wk.dcr := @dcr[0]; wk.rcnt := @rcnt[0]; wk.ccnt := @ccnt[0];
+  if Length(lumaNz) > 0 then wk.lumaC := lumaCoef else wk.lumaC := nil;
+  wk.prevC := prevCoef;
+  if Length(lumaNz) > 0 then wk.lumaD := lumaDcr else wk.lumaD := nil;
+  wk.prevD := prevDcr;
   if Length(lumaNz) > 0 then lz := @lumaNz[0] else lz := nil;
   if cd.encoding then coder := @cd.enc else coder := @cd.dec;
   Result := V7Code(cd.encoding, coder, v, @cp.coef[0], cp.bw, cp.bh, @qq[0], lz, lumaW, sx, sy, y0, y1,
@@ -1278,13 +1420,23 @@ begin
 end;
 
 function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind): Boolean;
-var c, nb: Integer; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt;
+var c, nb: Integer; ok: Boolean; lumaNz, other: TByteArr; sx, sy, m0, m1: SizeInt; pc: PSmallInt;
+    dcrs: array of TByteArr; pd: PByte;
   { the variant compiled for the model and the direction }
   function CC(var cd: TCoder; var cp: TComponent; const qt: array of Word; var m: TCoefModel;
               const lumaNz: array of Byte; lumaW, sx, sy: SizeInt; y0, y1: SizeInt;
               out nzOut: TByteArr): Boolean;
+  var ld: PByte; lc: PSmallInt;
   begin
-    if m.v7 then Result := V7Component(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
+    if Length(dcrs[0]) > 0 then ld := @dcrs[0][0] else ld := nil;
+    { the luma's coefficients only when every chroma row of the band maps
+      inside the band's luma rows: with a fractional vertical ratio (luma
+      v=3, chroma v=2) a chroma row would read the previous band's luma,
+      which a decoder of this band may not have yet }
+    lc := nil;
+    if (c > 0) and (j.comp[0].v mod j.comp[c].v = 0) then lc := @j.comp[0].coef[0];
+    if m.v7 then Result := V7Component(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut, lc, pc,
+                                       ld, pd, dcrs[c])
     else if not m.fast then Result := CodeComponent(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
     else if cd.encoding then Result := CodeComponentFast(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut)
     else Result := CodeComponentFastDec(cd, cp, qt, m, lumaNz, lumaW, sx, sy, y0, y1, nzOut);
@@ -1295,8 +1447,13 @@ begin
   m0 := SizeInt(j.mcusy) * band div nb; m1 := SizeInt(j.mcusy) * (band + 1) div nb;
   if model = mkV7 then begin PoolLuma.InitV7(False); PoolChroma.InitV7(True); end
   else begin PoolLuma.Init(model = mkFast, False); PoolChroma.Init(model = mkFast, True); end;
-  lumaNz := nil;
+  lumaNz := nil; dcrs := nil; SetLength(dcrs, Length(j.comp));
   for c := 0 to High(j.comp) do begin
+    pc := nil; pd := nil;
+    if (c >= 2) and (j.comp[c - 1].bw = j.comp[c].bw) and (j.comp[c - 1].bh = j.comp[c].bh) then begin
+      pc := @j.comp[c - 1].coef[0];
+      if Length(dcrs[c - 1]) > 0 then pd := @dcrs[c - 1][0];
+    end;
     if c = 0 then
       ok := CC(cd, j.comp[c], j.qt[j.comp[c].tq], PoolLuma, [], 0, 0, 0,
                           m0 * j.comp[c].v, m1 * j.comp[c].v, lumaNz)
@@ -1861,6 +2018,7 @@ end;
 initialization
   {$ifdef CPUX86_64}
   UseSse41 := CpuHasSse41 and (GetEnvironmentVariable('PJA_NOASM') <> '1');
+  UseAvx2 := UseSse41 and CpuHasAvx2 and (GetEnvironmentVariable('PJA_NOAVX2') <> '1');
   {$endif}
   InitTables;
   InitUnzig;

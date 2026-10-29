@@ -9,13 +9,20 @@
    its bit length in unary and the bits below it. The coefficient loop is
    pjav7c_loop.h, compiled here twice: once decoding, once encoding.
 
+   Its contexts go past the full model's (doc/CODEC.md, "Version 7's
+   contexts"): a chroma block sees the luma block over it and Cr the Cb
+   block at the same place (coefficients, counts, signs, DC residuals); a
+   luma block uses those inputs for the sum coded so far in the block and
+   its neighbours; the edge mantissa is coded against the edge prediction.
+
    Determinism: integer arithmetic, but for DivRoundR's reciprocal, which a
    comparison each way makes exact (as pjamodel's). The SSE2 nonzero mask
    has a plain path (PJA_V7_PLAIN) that gives the same bits. On x86 the
-   loop is compiled a second time for SSE4.1, taken when pjamodel's cpuid
-   says so (UseSse41, which PJA_NOASM=1 turns off): the compiler's own
-   vectorization, the same arithmetic. Build with -O3 -fwrapv
-   -ffp-contract=off (pas/build_c.sh). */
+   loop is compiled a second time for SSE4.1 and a third for AVX2, taken
+   when pjamodel's cpuid says so (UseSse41, UseAvx2; PJA_NOASM=1 turns both
+   off, PJA_NOAVX2=1 the second): the mixer, the prediction kernels and the
+   DC's estimates in intrinsics there, every lane the plain path's 32-bit
+   arithmetic. Build with -O3 -fwrapv -ffp-contract=off (pas/build_c.sh). */
 #include <stdint.h>
 #if defined(__SSE2__) && !defined(PJA_V7_PLAIN)
 #include <emmintrin.h>
@@ -25,15 +32,24 @@
 /* pjaarith's TAdaptiveBit and TArithDecoder, as FreePascal lays them out */
 typedef struct { uint16_t p; uint8_t n, pad; } abit_t;
 typedef struct { uint32_t x1, x2, x; const uint8_t *d; intptr_t p; void *live; } adec_t;
-/* the encoder's state; its bytes go out through the put callback */
-typedef struct { uint32_t x1, x2; void *ctx; } aenc_t;
+/* the encoder's state; its bytes gather in buf and go out through the put
+   callback when it is full and when the component ends (pjav7.TV7Encoder) */
+#define EBUF 4096
+typedef struct { uint32_t x1, x2; void *ctx; intptr_t n; uint8_t buf[EBUF]; } aenc_t;
 
 /* the counters and the mixers' weights of one class of component (pjav7.TV7Model) */
 typedef struct {
   abit_t *nz1, *nz2, *nz3, *zero1, *zero2, *zero3, *zero4, *zero5, *expo1, *expo2, *expo3, *expo4,
     *mant1, *mant, *ezero1, *ezero3, *ezero4, *ezero5, *eexpo1, *eexpo2, *eexpo3, *eexpo4, *eexpo5,
     *emant1, *esign, *dcZero, *dcExpo, *dcSign, *dcMant1, *dcMant, *dz2, *dz3, *dz4, *dx2, *dx3, *dx4,
-    *ec1, *ec2, *ec3, *ez6, *nzm1, *nzm2;
+    *ec1, *ec2, *ec3, *ez6, *nzm1, *nzm2,
+    /* contexts of version 7 alone (pjamodel.InitV7 sizes them) */
+    *nz4, *zLum, *zCb, *xPos, *xRow, *xLum, *xCb, *mFirst, *mRest, *iSign, *ecX, *ezLum, *exLum, *exCb, *eMant,
+    *eSgn, *dzX, *dxX, *dsX,
+    /* the edge sign by the size coded against the prediction, the DC sign and
+       zero flag by the prediction's eighths, the edge counts by how many edge
+       predictions are big */
+    *esr, *dsf, *dzf, *ecp;
   int32_t *wNz, *wZero, *wExpo, *wEZero, *wEExpo, *wDcZero, *wDcExpo, *wECnt;
 } v7m_t;
 
@@ -45,33 +61,60 @@ typedef struct {
   const int64_t *w3, *e3, *kerLeft, *kerTop, *kerRight, *kerBottom;
   uint64_t interiorZz, edgeZz;
   int32_t sse41;                                /* the SSE4.1 copy of the loop may run */
-  void (*put)(void *ctx, uint32_t b);           /* one byte of the encoder's output */
+  int32_t avx2;                                 /* the AVX2 copy may run */
+  void (*put)(void *ctx, const uint8_t *b, intptr_t n);   /* n bytes of the encoder's output */
   uint32_t (*get)(void *live, intptr_t p);      /* byte p of a stream still being written */
 } v7t_t;
 
-/* a block's edges, for the blocks right of it and below it (pjamodel.TEdgeCache) */
-typedef struct { int64_t eg[8], px[8]; } ecache_t;
-/* what the caller allocates, zeroed: rowC[bw]; dcr, rcnt, ccnt[bw * bh] */
-typedef struct { ecache_t *rowC; uint8_t *dcr, *rcnt, *ccnt; } v7work_t;
+/* a block's edges, for the blocks right of it and below it (pjamodel.TV7EdgeCache):
+   pjamodel.TEdgeCache's values, which pjamodel only ever uses modulo 2^32
+   (W32 before any division, comparison or logarithm), so kept in 32 bits */
+typedef struct { uint32_t eg[8], px[8]; } ecache_t;
+/* what the caller allocates, zeroed: rowC[bw]; dcr, rcnt, ccnt[bw * bh]. Then
+   what the components coded before this one in the band left: the luma's
+   coefficients and DC residuals (a chroma component, lumaNz set), the
+   previous component's (Cr after Cb, same size); nil where there are none */
+typedef struct {
+  ecache_t *rowC; uint8_t *dcr, *rcnt, *ccnt;
+  const int16_t *lumaC, *prevC; const uint8_t *lumaD, *prevD;
+} v7work_t;
 
 static v7t_t T;
-/* the prediction kernels in 32 bits (each below 2^15.5): half the cache */
-static int32_t KL[512], KT[512], KR[512], KB[512];
+/* The prediction kernels. Every sum of their products is only used modulo
+   2^32 (above), so they are summed in uint32_t, where wrapping is defined.
+   K4[pos]: what the coefficient at pos adds per unit to the 8 values of each
+   kernel, left and top (the DC's estimates), right and bottom (the edge
+   caches), side by side so one pass serves the four, 16-byte aligned. */
+static uint32_t K4[64][32] __attribute__((aligned(32)));
+static uint32_t E3U[8];
+/* the zigzag indices of row 0 and of column 0, the DC left out */
+static uint64_t ROW0ZZ, COL0ZZ;
 
 void pjav7_tables(const v7t_t *t) {
   T = *t;
-  for (int i = 0; i < 512; i++) {
-    KL[i] = (int32_t)t->kerLeft[i]; KT[i] = (int32_t)t->kerTop[i];
-    KR[i] = (int32_t)t->kerRight[i]; KB[i] = (int32_t)t->kerBottom[i];
-  }
+  for (int pos = 0; pos < 64; pos++)
+    for (int y = 0; y < 8; y++) {
+      K4[pos][y] = (uint32_t)t->kerLeft[pos * 8 + y]; K4[pos][8 + y] = (uint32_t)t->kerTop[pos * 8 + y];
+      K4[pos][16 + y] = (uint32_t)t->kerRight[pos * 8 + y]; K4[pos][24 + y] = (uint32_t)t->kerBottom[pos * 8 + y];
+    }
+  for (int i = 0; i < 8; i++) E3U[i] = (uint32_t)t->e3[i];
+  ROW0ZZ = COL0ZZ = 0;
+  for (int i = 1; i < 8; i++) { ROW0ZZ |= 1ull << t->unzig[i]; COL0ZZ |= 1ull << t->unzig[i * 8]; }
 }
 
 enum { NZ_BUCKETS = 11, REM_BUCKETS = 9, MAG_BUCKETS = 20, K_BUCKETS = 11, RATIO_BUCKETS = 17,
        MAX_EXP_AC = 15, MAX_EXP_DC = 17, ACT_BUCKETS = 24, NO_NEIGHBOUR = 19, PRED_BUCKETS = 22,
-       NO_PRED = 21, EDGE_POS = 14, LANES = 8, MIX_LR = 6, MAX_W = 1 << 17, LIMIT = 255 };
+       ACT2 = 28, NO_PRED = 21, PQ_BUCKETS = 26, NO_PQ = 25, EDGE_POS = 14, LANES = 8,
+       /* the mixers' learning rates (zero flags, edge exponent, the rest) and their constant input */
+       MIX_LR = 6, LR_ZERO = 4, LR_EEXPO = 10, BIAS = 384,
+       MAX_W = 1 << 17, LIMIT = 255,
+       /* an edge prediction is big (the edge counts' context) from PTH quarters of a
+          quantum, very big from PTH2: part of the format, so constants, not build flags */
+       PTH = 6, PTH2 = 40,
+       /* the rows of the exponent ladders and of the mantissas: 16 counters,
+          64 bytes, one cache line (pjamodel's InitV7 lays them out so) */
+       ROW = 16 };
 #define MAX_DEQUANT (1 << 15)
-#define COL_INTERIOR 0x0101010101010100ull
-#define ROW_INTERIOR 0xFEull
 
 /* ---------- 64-bit division without libgcc on 32-bit targets ---------- */
 #if UINTPTR_MAX > 0xFFFFFFFFu
@@ -94,14 +137,14 @@ static int64_t sdiv(int64_t a, int64_t b) {
 #endif
 
 /* ---------- the arithmetic coder, both ways (pjaarith's), and the counters ---------- */
-static inline uint32_t clampp(uint32_t p16) { return p16 < 1 ? 1 : p16 > 65535 ? 65535 : p16; }
+/* p16 is always in [1, 65535] (pjaarith's clamp never acts here): a
+   counter's p stays there, a squashed probability is in [16, 65520] */
 
 static inline int dbit(adec_t *dc, uint32_t p16) {
-  uint32_t xm = dc->x1 + (uint32_t)(((uint64_t)(dc->x2 - dc->x1) * clampp(p16)) >> 16);
+  uint32_t xm = dc->x1 + (uint32_t)(((uint64_t)(dc->x2 - dc->x1) * p16) >> 16);
   int bit = dc->x <= xm;
-  uint32_t m = 0u - (uint32_t)bit;
-  dc->x2 = (xm & m) | (dc->x2 & ~m);
-  dc->x1 = ((xm + 1) & ~m) | (dc->x1 & m);
+  /* both stores, selects rather than a branch on the bit */
+  dc->x2 = bit ? xm : dc->x2; dc->x1 = bit ? dc->x1 : xm + 1;
   while (((dc->x1 ^ dc->x2) & 0xFF000000u) == 0) {
     uint32_t b;
     dc->x1 <<= 8; dc->x2 = (dc->x2 << 8) | 255;
@@ -117,22 +160,24 @@ static inline int dbit(adec_t *dc, uint32_t p16) {
   return bit;
 }
 static inline int ebit(aenc_t *e, uint32_t p16, int bit) {
-  uint32_t xm = e->x1 + (uint32_t)(((uint64_t)(e->x2 - e->x1) * clampp(p16)) >> 16);
-  uint32_t m = 0u - (uint32_t)(bit != 0);
-  e->x2 = (xm & m) | (e->x2 & ~m);
-  e->x1 = ((xm + 1) & ~m) | (e->x1 & m);
+  uint32_t xm = e->x1 + (uint32_t)(((uint64_t)(e->x2 - e->x1) * p16) >> 16);
+  e->x2 = bit ? xm : e->x2; e->x1 = bit ? e->x1 : xm + 1;
   while (((e->x1 ^ e->x2) & 0xFF000000u) == 0) {
-    T.put(e->ctx, e->x2 >> 24);
+    e->buf[e->n++] = (uint8_t)(e->x2 >> 24);
+    if (e->n == EBUF) { T.put(e->ctx, e->buf, EBUF); e->n = 0; }
     e->x1 <<= 8; e->x2 = (e->x2 << 8) | 255;
   }
   return bit != 0;
 }
-static inline void learn(abit_t *c, int bit) {
-  int32_t target = bit ? 65535 : 1;
-  int64_t q = (int64_t)(target - (int32_t)c->p) * T.rc[c->n];
-  q = (q + ((q >> 63) & 0xFFFF)) >> 16;
-  c->p = (uint16_t)(c->p + q);
-  c->n += c->n < LIMIT;
+/* pjaarith's Update: p += (target - p) * rc[n] / 65536, truncated toward
+   zero. Toward the target the distance (65535 - p, or p - 1) times rc[n]
+   (at most 43691) stays below 2^32, so the step is an unsigned 32-bit
+   product, floored, added or taken away: the same p, no 64-bit multiply. */
+static inline __attribute__((always_inline)) void learn(abit_t *c, int bit) {
+  uint32_t p = c->p, n = c->n, d = bit ? 65535 - p : p - 1;
+  uint32_t step = (d * (uint32_t)T.rc[n]) >> 16;
+  c->p = (uint16_t)(bit ? p + step : p - step);
+  c->n = (uint8_t)(n + (n < LIMIT));
 }
 static inline int32_t truncshr(int32_t x, int n) { return (x + ((x >> 31) & ((1 << n) - 1))) >> n; }
 static inline int32_t clampi(int32_t x, int32_t lo, int32_t hi) { x = x < lo ? lo : x; return x > hi ? hi : x; }
@@ -156,7 +201,6 @@ static inline int ones64(uint64_t x) {
 static inline int clip(int v, int hi) { return v > hi ? hi : v; }
 static inline int sgn3(int64_t v) { return (v > 0) - (v < 0) + 1; }
 static inline int64_t w32(int64_t x) { return (int32_t)x; }
-static inline int64_t divround(int64_t a, int64_t b) { return a >= 0 ? sdiv(a + b / 2, b) : -sdiv(-a + b / 2, b); }
 /* DivRound(a, 8) with a shift: no division, on 32-bit targets either */
 static inline int64_t div8round(int64_t a) { return a >= 0 ? (a + 4) >> 3 : -((-a + 4) >> 3); }
 static inline int64_t divroundr(int64_t a, int64_t b, double rb) {
@@ -166,6 +210,22 @@ static inline int64_t divroundr(int64_t a, int64_t b, double rb) {
     if (q * b > n) q--; else if ((q + 1) * b <= n) q++;
   } else q = sdiv(n, b);
   return (q ^ sg) - sg;
+}
+/* floor(a / b) for 0 <= a, by the reciprocal rb = 1 / b, exact by correction */
+static inline int64_t divfloorr(int64_t a, int64_t b, double rb) {
+  int64_t t;
+  if (a < ((int64_t)1 << 50)) {
+    t = (int64_t)((double)a * rb);
+    if (t * b > a) t--; else if ((t + 1) * b <= a) t++;
+  } else t = sdiv(a, b);
+  return t;
+}
+/* the edge prediction n / (724 b) rounded to an integer (*pf) and to quarters (*pq),
+   both from one truncated division in eighths, so each is exact; b4 = 181 b, rb4 = 1 / b4 */
+static inline void edgepred(int64_t n, int64_t b4, double rb4, int64_t *pf, int64_t *pq) {
+  int64_t sg = n >> 63, t = divfloorr(2 * ((n ^ sg) - sg), b4, rb4);
+  int64_t f = (t + 4) >> 3, qq = (t + 1) >> 1;
+  *pf = (f ^ sg) - sg; *pq = (qq ^ sg) - sg;
 }
 static inline int64_t dequant(int c, int q) {
   int64_t r = (int64_t)c * q;
@@ -193,29 +253,10 @@ static void split8(int64_t *e) {
 }
 #undef CS
 
-/* acc[y] += k[pos][y] * fb[pos] for every pos set in mask */
-static inline void sumkernels(const int64_t *fb, uint64_t mask, const int32_t *k, int64_t *acc) {
-  while (mask) {
-    int pos = __builtin_ctzll(mask); mask &= mask - 1;
-    const int32_t *kp = k + pos * 8; int64_t f = fb[pos];
-    for (int y = 0; y < 8; y++) acc[y] += kp[y] * f;
-  }
-}
-static void fillcaches(const int64_t *fb, uint64_t mask, ecache_t *right, ecache_t *bottom) {
-  uint64_t m0 = mask;
-  for (int y = 0; y < 8; y++) right->eg[y] = bottom->eg[y] = right->px[y] = bottom->px[y] = 0;
-  while (mask) {
-    int pos = __builtin_ctzll(mask); mask &= mask - 1;
-    int64_t f = fb[pos]; int u = pos >> 3, v = pos & 7;
-    right->eg[u] += T.e3[v] * f; bottom->eg[v] += T.e3[u] * f;
-  }
-  sumkernels(fb, m0, KR, right->px);
-  sumkernels(fb, m0, KB, bottom->px);
-  for (int y = 0; y < 8; y++) {
-    right->eg[y] = w32(right->eg[y]); bottom->eg[y] = w32(bottom->eg[y]);
-    right->px[y] = w32(right->px[y]); bottom->px[y] = w32(bottom->px[y]);
-  }
-}
+/* W32 of a 32-bit sum: as int32_t (the conversion every compiler PJA
+   builds with defines as modular) */
+static inline int64_t s32(uint32_t x) { return (int32_t)x; }
+
 /* a bit per coefficient of the block (zigzag), set where it is not zero */
 static inline uint64_t nzmask(const int16_t *b) {
   uint64_t m = 0;
@@ -234,27 +275,35 @@ static inline uint64_t nzmask(const int16_t *b) {
 static inline int nzb(int n) { return T.nzTable[n]; }
 static inline int remb(int n) { return T.remTable[n]; }
 
-/* pjamodel's NeighbourMag: the magnitude expected at k from the blocks around */
-static int neighbourmag(const int16_t *coef, intptr_t base, intptr_t bw, intptr_t bx, intptr_t by, int k) {
-  int sum = 0, wsum = 0;
-  if (by > 0) {
-    sum += 2 * iabs(coef[base - bw * 64 + k]); wsum += 2;
-    if (bx > 0) { sum += iabs(coef[base - bw * 64 - 64 + k]); wsum++; }
-    if (bx + 1 < bw) { sum += iabs(coef[base - bw * 64 + 64 + k]); wsum++; }
-  }
-  if (bx > 0) { sum += 2 * iabs(coef[base - 64 + k]); wsum += 2; }
-  switch (wsum) {
-    case 0: return -1;
-    case 2: return (int)((uint32_t)(sum * 2 + 1) / 2);
-    case 3: return (int)((uint32_t)(sum * 2 + 1) / 3);
-    case 4: return (int)((uint32_t)(sum * 2 + 2) / 4);
-    case 5: return (int)((uint32_t)(sum * 2 + 2) / 5);
-    default: return (int)((uint32_t)(sum * 2 + 3) / 6);
-  }
+/* pjamodel's NeighbourMag, the magnitude expected at k from the blocks
+   around, set up once per block: the four neighbours (a block of zeros
+   where there is none, so it adds nothing), the weights' sum ws and the
+   rounding division by it as a multiply, exact for every sum (below 2^20):
+   x * (floor(2^32 / ws) + 1) >> 32 is floor(x / ws) while x * ws < 2^32. */
+static const int16_t ZEROBLOCK[64];
+/* floor(2^32 / ws) + 1, without a 64-bit division on 32-bit targets */
+static const uint64_t NBRMUL[7] = {0, 4294967297u, 2147483649u, 1431655766u, 1073741825u, 858993460u, 715827883u};
+typedef struct { const int16_t *a, *al, *ar, *l; uint32_t half; uint64_t mul; int none; } nbr_t;
+static inline void nbrsetup(nbr_t *nb, const int16_t *coef, intptr_t base, intptr_t bw, intptr_t bx, int haveA) {
+  int haveL = bx > 0, haveAL = haveA && haveL, haveAR = haveA && bx + 1 < bw;
+  uint32_t ws = (haveA ? 2 : 0) + haveAL + haveAR + (haveL ? 2 : 0);
+  nb->a = haveA ? coef + base - bw * 64 : ZEROBLOCK;
+  nb->al = haveAL ? coef + base - bw * 64 - 64 : ZEROBLOCK;
+  nb->ar = haveAR ? coef + base - bw * 64 + 64 : ZEROBLOCK;
+  nb->l = haveL ? coef + base - 64 : ZEROBLOCK;
+  nb->none = ws == 0;
+  nb->half = ws / 2;
+  nb->mul = NBRMUL[ws];
+}
+static inline int nbrmag(const nbr_t *nb, int k) {
+  uint32_t sum = 2 * iabs(nb->a[k]) + iabs(nb->al[k]) + iabs(nb->ar[k]) + 2 * iabs(nb->l[k]);
+  return (int)(((uint64_t)(sum * 2 + nb->half) * nb->mul) >> 32);
 }
 
 #define TARGET
 #define SUFFIX
+#define IN_SSE41 0
+#define IN_AVX2 0
 #define ENC 0
 #include "pjav7c_loop.h"
 #undef ENC
@@ -265,9 +314,28 @@ static int neighbourmag(const int16_t *coef, intptr_t base, intptr_t bw, intptr_
 #undef SUFFIX
 
 #if (defined(__x86_64__) || defined(__i386__)) && !defined(PJA_V7_PLAIN)
+#include <smmintrin.h>
 #define V7_SSE41 1
+#undef IN_SSE41
+#define IN_SSE41 1
 #define TARGET __attribute__((target("sse4.1")))
 #define SUFFIX _sse41
+#define ENC 0
+#include "pjav7c_loop.h"
+#undef ENC
+#define ENC 1
+#include "pjav7c_loop.h"
+#undef ENC
+#undef TARGET
+#undef SUFFIX
+/* and once more for AVX2 (pjamodel's cpuid check, UseAvx2): the mixer's 8
+   lanes and the kernels' 32 in 256-bit vectors, the same arithmetic */
+#include <immintrin.h>
+#define V7_AVX2 1
+#undef IN_AVX2
+#define IN_AVX2 1
+#define TARGET __attribute__((target("avx2")))
+#define SUFFIX _avx2
 #define ENC 0
 #include "pjav7c_loop.h"
 #undef ENC
@@ -293,6 +361,9 @@ int pjav7_component_d(adec_t *dc, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t
 #ifdef V7_SSE41
   if (T.sse41) f = component_d_sse41;
 #endif
+#ifdef V7_AVX2
+  if (T.avx2) f = component_d_avx2;
+#endif
   return f(dc, m, coef, bw, bh, qt, lumaNz, lumaW, sx, sy, y0, y1, nzc, wk);
 }
 int pjav7_component_e(aenc_t *e, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t bh, const uint16_t *qt,
@@ -302,5 +373,10 @@ int pjav7_component_e(aenc_t *e, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t 
 #ifdef V7_SSE41
   if (T.sse41) f = component_e_sse41;
 #endif
-  return f(e, m, coef, bw, bh, qt, lumaNz, lumaW, sx, sy, y0, y1, nzc, wk);
+#ifdef V7_AVX2
+  if (T.avx2) f = component_e_avx2;
+#endif
+  int ok = f(e, m, coef, bw, bh, qt, lumaNz, lumaW, sx, sy, y0, y1, nzc, wk);
+  if (e->n > 0) { T.put(e->ctx, e->buf, e->n); e->n = 0; }
+  return ok;
 }

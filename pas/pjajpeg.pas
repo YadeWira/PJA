@@ -125,6 +125,8 @@ type
       ParseHeaders cannot tell it from the raw bytes: the caller says it }
     ignoreRi: Boolean;
     cut: SizeInt;                    { where in TJpeg.raw its data goes }
+    { Decompose only: its entropy-coded bytes in the file, [dataStart, dataEnd) }
+    dataStart, dataEnd: SizeInt;
   end;
 
   TJpeg = record
@@ -148,7 +150,77 @@ type
     { Decompose only: where in the file the image ends, just past its EOI
       (the file's length when it has none); what follows is kept in raw }
     eoi: SizeInt;
+    { VerifyRoundTrip only: Recompose wrote each scan's entropy-coded bytes
+      exactly where they were, [dataStart, dataEnd) (for VerifyRoundTripFrom) }
+    scansExact: Boolean;
   end;
+
+  { A sequential Huffman scan for HuffEncodeScan (pjasysc.c's hencscan_t,
+    field for field): each component of the scan (slot) with its grid and
+    tables, the writer's output, and the state kept between calls }
+  THuffEncSlot = record
+    coef: PSmallInt;
+    bw, h, v: SizeInt;
+    dcCode, acCode: PWord;
+    dcLen, acLen: PByte;
+    predIdx: SizeInt;
+  end;
+  THuffEncScan = record
+    acc: QWord;
+    slot: array[0..3] of THuffEncSlot;
+    nslot, unitsX, total, ri, padbit: SizeInt;
+    outp: PByte;
+    n, cap: SizeInt;
+    u, ux, uy, rst: SizeInt;
+    pred: array[0..3] of SizeInt;
+    nacc: SizeInt;
+    { a progressive scan: its band and bits, then TProgState's EOB run and
+      correction bits }
+    progressive, ss, se, ah, al, maxEob, maxBe: SizeInt;
+    eobrun, be: SizeInt;
+    bebuf: array[0..MAX_BE_LIMIT + 63] of Byte;
+    { scratch for the C side (its tables: not on its own stack) }
+    encTab: array[0..3, 0..1, 0..255] of LongWord;
+  end;
+  { 0: written; 1: not (a symbol the table lacks: EncodeScan writes it
+    again itself); 2: out needs more room, call again }
+  THuffEncodeScanFn = function(var hs: THuffEncScan): SizeInt; cdecl;
+
+  { The same for HuffDecodeScan (pjasysc.c's hdecscan_t): the tables as
+    they are (THuff), the data, and padbit and last back }
+  THuffDecSlot = record
+    coef: PSmallInt;
+    bw, h, v: SizeInt;
+    dcHuff, acHuff: ^THuff;
+    predIdx: SizeInt;
+  end;
+  THuffDecScan = record
+    acc: QWord;
+    d: PByte;
+    len, first: SizeInt;
+    slot: array[0..3] of THuffDecSlot;
+    nslot, unitsX, total, ri, precision: SizeInt;
+    progressive, ss, se, ah, al, maxEob: SizeInt;
+    padbit, last: SizeInt;
+    { not read to the end: where DecodeScan goes on, the start of unit u
+      (the reader: acc, pos, nbits, stopped) }
+    u, ux, uy, rst: SizeInt;
+    pred: array[0..3] of SizeInt;
+    pos, nbits, stopped: SizeInt;
+    { TProgState's decoder part; beLow and beHigh also when read }
+    eobrun, runBe, runLen, prevEnded, prevBe, prevLen, beLow, beHigh: SizeInt;
+    { scratch for the C side }
+    fastAc: array[0..3, 0..511] of LongInt;
+  end;
+  { 0: read, padbit, last, beLow and beHigh set; 1: not to the end, the
+    state where DecodeScan goes on set }
+  THuffDecodeScanFn = function(var hs: THuffDecScan): SizeInt; cdecl;
+
+var
+  { set by pjav7 (pjasysc.c); nil: EncodeScan and DecodeScan in Pascal.
+    The same bytes, the same coefficients }
+  HuffEncodeScan: THuffEncodeScanFn = nil;
+  HuffDecodeScan: THuffDecodeScanFn = nil;
 
 { Parses and decodes. On error, j is half filled and useless. }
 function Decompose(const data: TBytes; out j: TJpeg): TJpegResult;
@@ -164,6 +236,12 @@ function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt = 0): TJp
 { Decompose + Recompose + compare with the original. The only thing that
   allows a JPEG to be stored as coefficients. }
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
+{ The same answer and the same j for data, a copy of refData with some bytes
+  changed, when ref is what VerifyRoundTrip made of refData: the scans whose
+  bytes did not change are taken from ref instead of being decoded and
+  encoded again (all of them, or the whole work is done) }
+function VerifyRoundTripFrom(const data: TBytes; const ref: TJpeg; const refData: TBytes;
+                             out j: TJpeg): TJpegResult;
 { An MPO (CIPA DC-007, Multi-Picture Format): its first image's APP2 "MPF"
   index lists an image of the Multi-Frame class (a panorama, a stereo pair,
   several angles). Ultra HDR and depth maps hang a second image off a JPEG
@@ -1571,10 +1649,80 @@ end;
 
 { Decodes from data[first]; last ends at the first byte past the
   entropy-coded data. }
+{ The blocks a sequential scan walks, for HuffEncodeScan and
+  HuffDecodeScan: False if one of them would fall outside its component }
+function ScanSlots(const j: TJpeg; const s: TScan; progressive: Boolean; out unitsX, total, nslot: SizeInt;
+                   out bws, hs, vs, preds: array of SizeInt; out coefs: array of PSmallInt): Boolean;
+var i, ci: Integer; unitsY, last: SizeInt;
+begin
+  Result := False;
+  nslot := s.ncomp;
+  total := UnitCount(j, s);
+  unitsX := UnitsPerRow(j, s);
+  if (j.progressive and not progressive) or (nslot < 1) or (nslot > 4) or (total <= 0) or (unitsX <= 0) then Exit;
+  { a progressive scan's band and bits, inside what the C side takes }
+  if j.progressive and ((s.al < 0) or (s.al > 15) or (s.ah < 0) or
+                        ((s.ss > 0) and ((s.se < s.ss) or (s.se > 63))) or (s.ss < 0)) then Exit;
+  unitsY := (total + unitsX - 1) div unitsX;
+  for i := 0 to nslot - 1 do begin
+    ci := s.comp[i];
+    if (ci < 0) or (ci > High(j.comp)) then Exit;
+    bws[i] := j.comp[ci].bw;
+    if nslot = 1 then begin hs[i] := 1; vs[i] := 1; end
+    else begin hs[i] := j.comp[ci].h; vs[i] := j.comp[ci].v; end;
+    if (hs[i] < 1) or (vs[i] < 1) or (bws[i] < 1) or (unitsX * hs[i] > bws[i]) then Exit;
+    { the last block the scan touches, inside the component }
+    last := (unitsY * vs[i] - 1) * bws[i] + unitsX * hs[i] - 1;
+    if (last + 1) * 64 > Length(j.comp[ci].coef) then Exit;
+    coefs[i] := @j.comp[ci].coef[0];
+    preds[i] := IndexInScan(s, ci);
+    if preds[i] < 0 then Exit;
+  end;
+  Result := True;
+end;
+
+{ A sequential scan through HuffDecodeScan: False if it is not there, if
+  some block would fall outside its component, or if the scan is not one
+  it reads to the end (then DecodeScan reads it, from its start) }
+function DecodeScanC(const data: TBytes; first: SizeInt; var j: TJpeg; const s: TScan;
+                     out hs: THuffDecScan): Integer;
+{ 0: read to the end; 1: hs says where to go on; 2: not taken }
+var i: Integer; bws, hh, vv, preds: array[0..3] of SizeInt; coefs: array[0..3] of PSmallInt;
+begin
+  Result := 2;
+  hs := Default(THuffDecScan);
+  if not Assigned(HuffDecodeScan) or (first < 0) or (first > Length(data)) then Exit;
+  if not ScanSlots(j, s, True, hs.unitsX, hs.total, hs.nslot, bws, hh, vv, preds, coefs) then Exit;
+  for i := 0 to hs.nslot - 1 do
+    with hs.slot[i] do begin
+      coef := coefs[i]; bw := bws[i]; h := hh[i]; v := vv[i]; predIdx := preds[i];
+      { the tables of the scan's first entry for the component, as
+        DecodeUnitBlock takes them (IndexInScan) }
+      dcHuff := @s.dc[preds[i]]; acHuff := @s.ac[preds[i]];
+    end;
+  if Length(data) > 0 then hs.d := @data[0];
+  hs.len := Length(data); hs.first := first;
+  hs.ri := s.ri; hs.precision := j.precision;
+  hs.progressive := Ord(j.progressive);
+  hs.ss := s.ss; hs.se := s.se; hs.ah := s.ah; hs.al := s.al; hs.maxEob := s.maxEob;
+  Result := HuffDecodeScan(hs);
+end;
+
 function DecodeScan(const data: TBytes; first: SizeInt; var j: TJpeg; var s: TScan;
                     out last: SizeInt): TJpegResult;
-var rd: TBitReader; total, u, w, ux, uy: SizeInt; un: TUnit; n, i, pb, rst: Integer;
-    pred: array[0..3] of Integer; e: TJpegError; st: TProgState;
+var rd: TBitReader; total, u, u0, w, ux, uy: SizeInt; un: TUnit; n, i, pb, rst: Integer;
+    pred: array[0..3] of Integer; e: TJpegError; st: TProgState; hs: THuffDecScan;
+
+  { AC refinement: libjpeg's limit if the runs allow it, else the smallest
+    that does (Photoshop's, about 256). Runs no limit explains stay with
+    libjpeg's, and the rebuild will tell }
+  procedure TakeBe(beLow, beHigh: Integer);
+  begin
+    if j.progressive and (s.ah > 0) and (s.ss > 0) and
+       ((beLow > LIBJPEG_MAX_BE) or (beHigh < LIBJPEG_MAX_BE)) and
+       (beLow <= beHigh) and (beLow <= MAX_BE_LIMIT) then
+      s.maxBe := beLow;
+  end;
 
   function Padding: Boolean;
   begin
@@ -1596,8 +1744,28 @@ begin
   st.beHigh := High(Integer);
   total := UnitCount(j, s);
   w := UnitsPerRow(j, s); ux := 0; uy := 0;
-  rst := 0;
-  for u := 0 to total - 1 do begin
+  rst := 0; u0 := 0;
+  case DecodeScanC(data, first, j, s, hs) of
+    0: begin
+         s.padbit := hs.padbit;
+         TakeBe(hs.beLow, hs.beHigh);
+         last := hs.last;
+         Exit(Success);
+       end;
+    1: begin
+         { from the start of the unit pjasysc.c did not read to the end }
+         u0 := hs.u; ux := hs.ux; uy := hs.uy; rst := hs.rst; s.padbit := hs.padbit;
+         for i := 0 to 3 do pred[i] := hs.pred[i];
+         rd.p := hs.pos; rd.buf := hs.acc; rd.nbits := hs.nbits; rd.stopped := hs.stopped <> 0;
+         { the whole bytes waiting, for Align to give back: 2 input bytes for FF (FF 00) }
+         rd.nload := 16;
+         for i := 1 to rd.nbits shr 3 do
+           if (hs.acc shr (8 * (i - 1))) and $FF = $FF then rd.sizes[16 - i] := 2 else rd.sizes[16 - i] := 1;
+         st.eobrun := hs.eobrun; st.runBe := hs.runBe; st.runLen := hs.runLen; st.prevEnded := hs.prevEnded <> 0;
+         st.prevBe := hs.prevBe; st.prevLen := hs.prevLen; st.beLow := hs.beLow; st.beHigh := hs.beHigh;
+       end;
+  end;
+  for u := u0 to total - 1 do begin
     if (s.ri > 0) and (u > 0) and (u mod s.ri = 0) then begin
       if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
       if (rd.p + 1 >= Length(data)) or (data[rd.p] <> $FF) or (data[rd.p + 1] <> $D0 + (rst and 7)) then
@@ -1617,13 +1785,7 @@ begin
   end;
   if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
   if s.padbit < 0 then s.padbit := 1;
-  { AC refinement: libjpeg's limit if the runs allow it, else the
-    smallest that does (Photoshop's, about 256). Runs no limit explains
-    stay with libjpeg's, and the rebuild will tell }
-  if j.progressive and (s.ah > 0) and (s.ss > 0) and
-     ((st.beLow > LIBJPEG_MAX_BE) or (st.beHigh < LIBJPEG_MAX_BE)) and
-     (st.beLow <= st.beHigh) and (st.beLow <= MAX_BE_LIMIT) then
-    s.maxBe := st.beLow;
+  TakeBe(st.beLow, st.beHigh);
   { what follows must be a marker, or the end. An RST here is one too many:
     some encoders write them, and they stay in raw (see Parse) }
   if rd.p < Length(data) then
@@ -1633,11 +1795,45 @@ begin
   Result := Success;
 end;
 
+{ A Huffman scan through HuffEncodeScan: False if it is not there, if
+  some block would fall outside its component, or if it did not write the
+  scan (then nothing of wr has changed but bytes past wr.n) }
+function EncodeScanC(var wr: TBitWriter; const j: TJpeg; const s: TScan): Boolean;
+const HE_ROOM = 2; UNIT_ROOM = 6144;
+var hs: THuffEncScan; i: Integer; r: SizeInt; bws, hh, vv, preds: array[0..3] of SizeInt;
+    coefs: array[0..3] of PSmallInt;
+begin
+  Result := False;
+  if not Assigned(HuffEncodeScan) then Exit;
+  hs := Default(THuffEncScan);
+  if not ScanSlots(j, s, True, hs.unitsX, hs.total, hs.nslot, bws, hh, vv, preds, coefs) then Exit;
+  for i := 0 to hs.nslot - 1 do
+    with hs.slot[i] do begin
+      coef := coefs[i]; bw := bws[i]; h := hh[i]; v := vv[i]; predIdx := preds[i];
+      dcCode := @s.dc[preds[i]].code[0]; dcLen := @s.dc[preds[i]].len[0];
+      acCode := @s.ac[preds[i]].code[0]; acLen := @s.ac[preds[i]].len[0];
+    end;
+  hs.ri := s.ri; hs.padbit := s.padbit;
+  hs.progressive := Ord(j.progressive);
+  hs.ss := s.ss; hs.se := s.se; hs.ah := s.ah; hs.al := s.al; hs.maxEob := s.maxEob; hs.maxBe := s.maxBe;
+  hs.acc := wr.acc; hs.nacc := wr.nacc;
+  hs.n := wr.n;
+  repeat
+    if Length(wr.d) < hs.n + UNIT_ROOM then SetLength(wr.d, 2 * Length(wr.d) + UNIT_ROOM);
+    hs.outp := @wr.d[0]; hs.cap := Length(wr.d);
+    r := HuffEncodeScan(hs);
+  until r <> HE_ROOM;
+  if r <> 0 then Exit;
+  wr.n := hs.n; wr.acc := 0; wr.nacc := 0;
+  Result := True;
+end;
+
 {$ifdef PJA_FAST}{$push}{$R-}{$Q-}{$endif}
 function EncodeScan(var wr: TBitWriter; const j: TJpeg; const s: TScan): Boolean;
 var total, u, w, ux, uy: SizeInt; un: TUnit; n, i, rst: Integer; pred: array[0..3] of Integer;
     st: TProgState;
 begin
+  if EncodeScanC(wr, j, s) then Exit(True);
   FillChar(pred, SizeOf(pred), 0);
   st := Default(TProgState);
   total := UnitCount(j, s);
@@ -1998,7 +2194,52 @@ end;
 
 { ---------- top ---------- }
 
-function Parse(const data: TBytes; decode: Boolean; out j: TJpeg): TJpegResult;
+{ Whether a scan of data, just read from its header (s, starting at first)
+  as the scan of the same number in ref, decodes as that one did: the same
+  frame, the same header and tables, the same place, and the same bytes
+  through the two after its end (the marker that stops the reader) }
+function SameScanAs(const data: TBytes; first: SizeInt; const j: TJpeg; const s: TScan;
+                    const ref: TJpeg; const refData: TBytes): Boolean;
+var i: Integer; rs: TScan; e: SizeInt;
+begin
+  Result := False;
+  i := Length(j.scans);
+  if (i > High(ref.scans)) or ref.dnl or j.dnl or ref.arithmetic or ref.lossless then Exit;
+  rs := ref.scans[i];
+  if rs.ignoreRi or (rs.dataStart <> first) or (rs.cut <> s.cut) or (rs.dataEnd < first) then Exit;
+  { the frame }
+  if (j.width <> ref.width) or (j.height <> ref.height) or (j.precision <> ref.precision) or
+     (j.lossless <> ref.lossless) or (j.progressive <> ref.progressive) or (j.arithmetic <> ref.arithmetic) or
+     (j.hmax <> ref.hmax) or (j.vmax <> ref.vmax) or (j.mcusx <> ref.mcusx) or (j.mcusy <> ref.mcusy) or
+     (Length(j.comp) <> Length(ref.comp)) then Exit;
+  for i := 0 to High(j.comp) do
+    if (j.comp[i].id <> ref.comp[i].id) or (j.comp[i].h <> ref.comp[i].h) or (j.comp[i].v <> ref.comp[i].v) or
+       (j.comp[i].tq <> ref.comp[i].tq) or (j.comp[i].bw <> ref.comp[i].bw) or (j.comp[i].bh <> ref.comp[i].bh) or
+       (j.comp[i].bwReal <> ref.comp[i].bwReal) or (j.comp[i].bhReal <> ref.comp[i].bhReal) or
+       (Length(j.comp[i].coef) <> Length(ref.comp[i].coef)) then Exit;
+  { the scan's header, as the decoder reads it }
+  if (s.ncomp <> rs.ncomp) or (s.ncomp < 0) or (s.ncomp > 4) or (s.ss <> rs.ss) or (s.se <> rs.se) or
+     (s.ah <> rs.ah) or (s.al <> rs.al) or (s.ri <> rs.ri) or (s.maxEob <> rs.maxEob) then Exit;
+  for i := 0 to s.ncomp - 1 do
+    if (s.comp[i] <> rs.comp[i]) or (s.td[i] <> rs.td[i]) or (s.ta[i] <> rs.ta[i]) or
+       (s.dcL[i] <> rs.dcL[i]) or (s.dcU[i] <> rs.dcU[i]) or (s.acK[i] <> rs.acK[i]) or
+       not CompareMem(@s.dc[i], @rs.dc[i], SizeOf(THuff)) or not CompareMem(@s.ac[i], @rs.ac[i], SizeOf(THuff)) then
+      Exit;
+  { its bytes, and the two the reader stops at (or the end of both) }
+  e := rs.dataEnd + 2;
+  if e > Length(refData) then begin
+    if Length(data) <> Length(refData) then Exit;
+    e := Length(refData);
+  end;
+  if (e > Length(data)) or (rs.dataEnd > Length(refData)) then Exit;
+  if (e > first) and not CompareMem(@data[first], @refData[first], e - first) then Exit;
+  Result := True;
+end;
+
+type PJpegRef = ^TJpeg;
+
+function ParseWith(const data: TBytes; decode: Boolean; out j: TJpeg; ref: PJpegRef; const refData: TBytes;
+                   out refFailed: Boolean): TJpegResult;
 var p, first, last, copied, seglen: SizeInt; m: Byte; hs: THuffState; ri, i: Integer;
     haveFrame: Boolean; e: TJpegError; s, s2: TScan; rawOut: TBitWriter; ac: TArithCond; r2: TJpegResult;
 
@@ -2006,6 +2247,7 @@ var p, first, last, copied, seglen: SizeInt; m: Byte; hs: THuffState; ri, i: Int
   begin rawOut.CopyFrom(data, copied, upto); copied := upto; end;
 
 begin
+  refFailed := False;
   j := Default(TJpeg);
   hs := Default(THuffState);
   rawOut := Default(TBitWriter);
@@ -2068,7 +2310,15 @@ begin
                Exit(Fail(jeUnsupported, first, m));
              CopyUpTo(last);
              s.cut := rawOut.n;
-             if decode then begin
+             if decode and (ref <> nil) then begin
+               { the scan of ref, bytes and all: what decoding would give }
+               if not SameScanAs(data, last, j, s, ref^, refData) then begin
+                 refFailed := True;
+                 Exit(Fail(jeUnsupported, last));
+               end;
+               s := ref^.scans[Length(j.scans)];
+               copied := s.dataEnd;
+             end else if decode then begin
                if j.lossless then Result := DecodeScanLossless(data, last, j, s, copied)
                else if j.arithmetic then Result := DecodeScanArith(data, last, j, s, copied)
                else Result := DecodeScan(data, last, j, s, copied);
@@ -2088,6 +2338,7 @@ begin
                  if r2.Ok then begin s := s2; s.ignoreRi := True; Result := r2; end;
                end;
                if not Result.Ok then Exit;
+               s.dataStart := last; s.dataEnd := copied;
              end;
              SetLength(j.scans, Length(j.scans) + 1);
              j.scans[High(j.scans)] := s;
@@ -2104,6 +2355,12 @@ begin
   Result := Success;
 end;
 
+function Parse(const data: TBytes; decode: Boolean; out j: TJpeg): TJpegResult;
+var refFailed: Boolean;
+begin
+  Result := ParseWith(data, decode, j, nil, nil, refFailed);
+end;
+
 function Decompose(const data: TBytes; out j: TJpeg): TJpegResult;
 begin
   Result := Parse(data, True, j);
@@ -2115,7 +2372,9 @@ begin
 end;
 
 {$ifdef PJA_FAST}{$push}{$R-}{$Q-}{$endif}
-function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt): TJpegResult;
+{ Recompose; ends, if not nil: where each scan's entropy-coded bytes begin
+  and end in data (2 per scan) }
+function RecomposeAt(const j: TJpeg; out data: TBytes; expected: SizeInt; ends: PSizeInt): TJpegResult;
 var wr: TBitWriter; i: Integer; from, room: SizeInt;
 begin
   data := nil;
@@ -2133,18 +2392,25 @@ begin
     wr.CopyFrom(j.raw, from, j.scans[i].cut);
     from := j.scans[i].cut;
     wr.acc := 0; wr.nacc := 0;
+    if ends <> nil then ends[2 * i] := wr.n;
     if j.lossless then begin
       if not EncodeScanLossless(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
     end else if j.arithmetic then begin
       if not EncodeScanArith(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
     end else
       if not EncodeScan(wr, j, j.scans[i]) then Exit(Fail(jeNoRoundTrip, wr.n));
+    if ends <> nil then ends[2 * i + 1] := wr.n;
   end;
   wr.CopyFrom(j.raw, from, Length(j.raw));
   { the buffer itself, cut to its length: no copy }
   SetLength(wr.d, wr.n);
   data := wr.d;
   Result := Success;
+end;
+
+function Recompose(const j: TJpeg; out data: TBytes; expected: SizeInt): TJpegResult;
+begin
+  Result := RecomposeAt(j, data, expected, nil);
 end;
 
 {$ifdef PJA_FAST}{$pop}{$endif}
@@ -2218,20 +2484,50 @@ begin
 end;
 
 function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
-var other: TBytes; k: SizeInt;
+var other: TBytes; k: SizeInt; ends: array of SizeInt; i: Integer;
 begin
   Result := Decompose(data, j);
   if not Result.Ok then Exit;
-  Result := Recompose(j, other, Length(data));
+  ends := nil; SetLength(ends, 2 * Length(j.scans) + 1);
+  Result := RecomposeAt(j, other, Length(data), @ends[0]);
   if not Result.Ok then Exit;
   { the same bytes and length: the common case in one comparison; the
     first difference is only looked for when there is one }
   if (Length(other) = Length(data)) and
-     ((Length(data) = 0) or CompareMem(@other[0], @data[0], Length(data))) then Exit(Success);
+     ((Length(data) = 0) or CompareMem(@other[0], @data[0], Length(data))) then begin
+    j.scansExact := True;
+    for i := 0 to High(j.scans) do
+      if (ends[2 * i] <> j.scans[i].dataStart) or (ends[2 * i + 1] <> j.scans[i].dataEnd) then
+        j.scansExact := False;
+    Exit(Success);
+  end;
   for k := 0 to Min(High(other), High(data)) do
     if other[k] <> data[k] then Exit(Fail(jeNoRoundTrip, k));
   if Length(other) <> Length(data) then Exit(Fail(jeNoRoundTrip, Min(Length(other), Length(data))));
   Result := Success;
+end;
+
+function VerifyRoundTripFrom(const data: TBytes; const ref: TJpeg; const refData: TBytes;
+                             out j: TJpeg): TJpegResult;
+var refFailed: Boolean; c: Integer;
+begin
+  { each scan as ref's: its bytes as Recompose writes them, there, so that
+    the rebuild is data itself (RecomposeAt in VerifyRoundTrip saw it) }
+  if ref.scansExact and (Length(ref.scans) > 0) then begin
+    Result := ParseWith(data, True, j, @ref, refData, refFailed);
+    if not refFailed then begin
+      if not Result.Ok then Exit;
+      if Length(j.scans) = Length(ref.scans) then begin
+        for c := 0 to High(j.comp) do begin
+          j.comp[c].coef := ref.comp[c].coef;
+          j.comp[c].samples := ref.comp[c].samples;
+        end;
+        j.scansExact := True;
+        Exit(Success);
+      end;
+    end;
+  end;
+  Result := VerifyRoundTrip(data, j);
 end;
 
 end.

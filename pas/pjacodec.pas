@@ -222,7 +222,12 @@ procedure RunBands(var jobs: array of TBandJob; threads: Integer);
 var i, next, k: Integer; pool: array of TBandThread;
 begin
   if (threads <= 1) or (Length(jobs) <= 1) then begin
-    for i := 0 to High(jobs) do RunBand(jobs[i]);
+    { PJA_BANDS_REVERSE=1 (the codec suite): the last band first, which shows
+      that no band reads what an earlier band decodes }
+    if GetEnvironmentVariable('PJA_BANDS_REVERSE') = '1' then
+      for i := High(jobs) downto 0 do RunBand(jobs[i])
+    else
+      for i := 0 to High(jobs) do RunBand(jobs[i]);
     Exit;
   end;
   next := 0;
@@ -766,7 +771,7 @@ end;
 
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                     model: TModelKind; depth: Integer; huffOnly: Boolean = False): TCodecResult;
-var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from: SizeInt; n, i, c: Integer;
+var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from, nextFF: SizeInt; n, i, c: Integer;
     sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TQuirks;
 begin
   stream := nil;
@@ -792,6 +797,12 @@ begin
   parts := nil; n := 0;
   k := 2;
   while (k + 3 <= Length(jpeg)) and (n < MAX_PARTS) do begin
+    { straight to the next FF (IndexByte: the RTL's vector search) }
+    if jpeg[k] <> $FF then begin
+      nextFF := IndexByte(jpeg[k], Length(jpeg) - 2 - k, $FF);
+      if nextFF < 0 then Break;
+      Inc(k, nextFF);
+    end;
     ok := False;
     if (jpeg[k] = $FF) and (jpeg[k + 1] = $D8) and (jpeg[k + 2] = $FF) and
        Decompose(Copy(jpeg, k, Length(jpeg) - k), sj).Ok then begin
@@ -841,7 +852,7 @@ begin
     SetLength(host, p);
     { a host PJA does not take as the file (a part that was not where it
       seemed) leaves the file whole }
-    if VerifyRoundTrip(host, hj).Ok and SameQuirks(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
+    if VerifyRoundTripFrom(host, j, jpeg, hj).Ok and SameQuirks(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
     else n := 0;
     hj := Default(TJpeg);
   end;
