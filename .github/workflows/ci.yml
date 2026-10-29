@@ -6,10 +6,18 @@
 # format's with the plugin's ZPAQL decoders (pas/run_tests.sh).
 name: CI
 
+# Branches only: a tag's commit was already tested on its branch, and the
+# Release workflow builds the tag. A newer push to the same branch cancels
+# the run of the older one.
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -30,7 +38,7 @@ jobs:
 
   linux-x64-codec-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Free Pascal
@@ -40,7 +48,7 @@ jobs:
 
   linux-x64-format-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Free Pascal

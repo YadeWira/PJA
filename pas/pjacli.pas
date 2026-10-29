@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -195,7 +195,7 @@ begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
   fastModel := False; noVerify := False;
-  threads := TThread.ProcessorCount;
+  threads := CpuCount;
   if threads > 8 then threads := 8;
   if threads < 1 then threads := 1;
   maxOutput := DEFAULT_MAX_OUTPUT;

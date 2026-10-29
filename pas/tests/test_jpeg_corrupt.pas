@@ -1,33 +1,41 @@
 { Layer 1 against broken JPEGs: every bit of every file flipped (up to the
   first max bytes), and every truncation. VerifyRoundTrip must return a named
   error or rebuild identically: an exception (range, overflow) is a FAILURE.
+  The variants run on every processor (corrupt_par).
 
     test_jpeg_corrupt <directory> [max bytes per file] }
 program test_jpeg_corrupt;
 {$I ../pja.inc}
-uses SysUtils, Classes, pjajpeg, pjajls;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjajpeg, pjajls, corrupt_par;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
   if s.Size > 0 then s.ReadBuffer(Result[0], s.Size); finally s.Free; end; end;
 
 var
-  dir: string; files: TStringList; sr: TSearchRec;
-  i, b, maxBytes: Integer; n, variants, accepted, failures: Int64;
-  d, m: TBytes; j: TJpeg; jl: TJls; r: TJpegResult; isLs: Boolean;
+  dir: string; files: TStringList; sr: TSearchRec; i, maxBytes: Integer;
+  inputs: array of TBytes; names: array of string; totals: array of Int64; c: TVariantCounts;
 
-procedure Try1(const x: TBytes; const what: string);
+{ variant v of file k: a bit flipped, or the file truncated }
+function TryVariant(k: Integer; v: Int64; out what: string): Integer;
+var m: TBytes; flips: Int64; j: TJpeg; jl: TJls; r: TJpegResult;
 begin
-  Inc(variants);
+  Result := 0; what := '';
+  flips := Length(inputs[k]); if flips > maxBytes then flips := maxBytes; flips := flips * 8;
+  if v < flips then begin
+    m := Copy(inputs[k], 0, Length(inputs[k]));
+    m[v div 8] := m[v div 8] xor (1 shl (v mod 8));
+  end else m := Copy(inputs[k], 0, v - flips);
   try
     { a JPEG-LS file, damaged, can stop looking like one: then it goes to the
       JPEG path, which has to reject it just as safely }
-    if isLs and IsJls(x) then r := VerifyJls(x, jl) else r := VerifyRoundTrip(x, j);
-    if r.Ok then Inc(accepted);
+    if IsJls(inputs[k]) and IsJls(m) then r := VerifyJls(m, jl) else r := VerifyRoundTrip(m, j);
+    if r.Ok then Result := CV_TAKEN;
   except
     on e: Exception do begin
-      Inc(failures);
-      if failures <= 20 then Writeln('  FAIL ', e.ClassName, ': ', e.Message, '  ', what);
+      Result := CV_FAILURE;
+      if v < flips then what := Format('%s: %s  %s bit %d', [e.ClassName, e.Message, names[k], v])
+      else what := Format('%s: %s  %s truncated to %d', [e.ClassName, e.Message, names[k], v - flips]);
     end;
   end;
 end;
@@ -39,19 +47,14 @@ begin
     repeat if (sr.Attr and faDirectory) = 0 then files.Add(dir + '/' + sr.Name); until FindNext(sr) <> 0;
     FindClose(sr);
   end;
-  variants := 0; accepted := 0; failures := 0;
+  SetLength(inputs, files.Count); SetLength(names, files.Count); SetLength(totals, files.Count);
   for i := 0 to files.Count - 1 do begin
-    d := ReadFile(files[i]);
-    isLs := IsJls(d);
-    n := Length(d); if n > maxBytes then n := maxBytes;
-    for b := 0 to n * 8 - 1 do begin
-      m := Copy(d, 0, Length(d));
-      m[b div 8] := m[b div 8] xor (1 shl (b mod 8));
-      Try1(m, Format('%s bit %d', [ExtractFileName(files[i]), b]));
-    end;
-    for b := 0 to Length(d) - 1 do Try1(Copy(d, 0, b), Format('%s truncated to %d', [ExtractFileName(files[i]), b]));
+    inputs[i] := ReadFile(files[i]);
+    names[i] := ExtractFileName(files[i]);
+    totals[i] := VariantCount(Length(inputs[i]), maxBytes);
   end;
+  c := RunVariants(totals, @TryVariant);
   { an accepted variant is legitimate: VerifyRoundTrip rebuilt it identically }
-  Writeln(files.Count, ' files, ', variants, ' variants, ', accepted, ' identical round trips, ', failures, ' failures');
-  if (failures > 0) or (variants < 1000) then Halt(1);
+  Writeln(files.Count, ' files, ', c.variants, ' variants, ', c.taken, ' identical round trips, ', c.failures, ' failures');
+  if (c.failures > 0) or (c.variants < 1000) then Halt(1);
 end.
