@@ -9,6 +9,22 @@
    SSE2) gives the same words, and tests/test_blake3 checks both against
    the official vectors. */
 #include <stdint.h>
+/* 64-bit bit scans without libgcc: on 32-bit targets gcc may call
+   __ctzdi2 / __clzdi2 for the builtins on 64-bit operands, so there they
+   are two 32-bit scans. x must not be 0. */
+#if UINTPTR_MAX > 0xFFFFFFFFu
+static inline int ctz64(uint64_t x) { return __builtin_ctzll(x); }
+static inline int clz64(uint64_t x) { return __builtin_clzll(x); }
+#else
+static inline int ctz64(uint64_t x) {
+  uint32_t lo = (uint32_t)x;
+  return lo ? __builtin_ctz(lo) : 32 + __builtin_ctz((uint32_t)(x >> 32));
+}
+static inline int clz64(uint64_t x) {
+  uint32_t hi = (uint32_t)(x >> 32);
+  return hi ? __builtin_clz(hi) : 32 + __builtin_clz((uint32_t)x);
+}
+#endif
 #if defined(__SSE2__) && !defined(PJA_V7_PLAIN)
 #include <emmintrin.h>
 #define B3_SSE2 1
@@ -248,7 +264,7 @@ static inline int hblock(hw_t *w, const int16_t *cf, const hetab_t *tb, intptr_t
           (int)(e & 31) + t);
   nz = hnzmask(cf) & ~(uint64_t)1;
   while (nz) {
-    int k = __builtin_ctzll(nz), r = k - last - 1;
+    int k = ctz64(nz), r = k - last - 1;
     nz &= nz - 1;
     last = k;
     v = cf[k];

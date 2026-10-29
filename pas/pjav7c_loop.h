@@ -97,7 +97,7 @@ static inline TARGET void FN(kernels)(const int64_t *fb, uint64_t mask, uint32_t
 #if IN_AVX2
   __m256i a0 = _mm256_setzero_si256(), a1 = a0, a2 = a0, a3 = a0;
   while (mask) {
-    int pos = __builtin_ctzll(mask); mask &= mask - 1;
+    int pos = ctz64(mask); mask &= mask - 1;
     uint32_t f = (uint32_t)fb[pos];
     const __m256i *k = (const __m256i *)K4[pos]; __m256i fv = _mm256_set1_epi32((int32_t)f);
     a0 = _mm256_add_epi32(a0, _mm256_mullo_epi32(_mm256_load_si256(k), fv));
@@ -111,7 +111,7 @@ static inline TARGET void FN(kernels)(const int64_t *fb, uint64_t mask, uint32_t
 #elif IN_SSE41
   __m128i a0 = _mm_setzero_si128(), a1 = a0, a2 = a0, a3 = a0, a4 = a0, a5 = a0, a6 = a0, a7 = a0;
   while (mask) {
-    int pos = __builtin_ctzll(mask); mask &= mask - 1;
+    int pos = ctz64(mask); mask &= mask - 1;
     uint32_t f = (uint32_t)fb[pos];
     const __m128i *k = (const __m128i *)K4[pos]; __m128i fv = _mm_set1_epi32((int32_t)f);
     a0 = _mm_add_epi32(a0, _mm_mullo_epi32(_mm_load_si128(k), fv));
@@ -130,7 +130,7 @@ static inline TARGET void FN(kernels)(const int64_t *fb, uint64_t mask, uint32_t
 #else
   for (int y = 0; y < 32; y++) acc[y] = 0;
   while (mask) {
-    int pos = __builtin_ctzll(mask); mask &= mask - 1;
+    int pos = ctz64(mask); mask &= mask - 1;
     uint32_t f = (uint32_t)fb[pos]; const uint32_t *k = K4[pos];
     for (int y = 0; y < 32; y++) acc[y] += k[y] * f;
     eg[pos >> 3] += E3U[pos & 7] * f; eg[8 + (pos & 7)] += E3U[pos >> 3] * f;
@@ -317,7 +317,7 @@ static TARGET int FN(component)(CD_T *dc, v7m_t *m, int16_t *coef, intptr_t bw, 
       }
       if (rem > 0) { ok = 0; break; }
       uint64_t fm = 0, zm = nzmask(b) & T.interiorZz;
-      while (zm) { int k = __builtin_ctzll(zm); zm &= zm - 1; fb[T.zzTable[k]] = dequant(b[k], q[k]); fm |= 1ull << T.zzTable[k]; }
+      while (zm) { int k = ctz64(zm); zm &= zm - 1; fb[T.zzTable[k]] = dequant(b[k], q[k]); fm |= 1ull << T.zzTable[k]; }
       /* 3. each edge coefficient predicted across its edge (from the interior and the block there only) */
       int32_t pn[16]; int pcn[2] = {15, 15};   /* pn: each prediction's numerator, row 0 even, column 0 odd, from lane 2 */
       {
@@ -325,7 +325,7 @@ static TARGET int FN(component)(CD_T *dc, v7m_t *m, int16_t *coef, intptr_t bw, 
         int64_t csum[8] = {0}, rsum[8] = {0};
         uint64_t mm = fm;
         while (mm) {
-          int pos = __builtin_ctzll(mm); mm &= mm - 1;
+          int pos = ctz64(mm); mm &= mm - 1;
           int64_t f = fb[pos];
           csum[pos & 7] += T.w3[pos >> 3] * f; rsum[pos >> 3] += T.w3[pos & 7] * f;
         }
@@ -450,7 +450,7 @@ static TARGET int FN(component)(CD_T *dc, v7m_t *m, int16_t *coef, intptr_t bw, 
         }
       }
       zm = nzmask(b) & T.edgeZz;
-      while (zm) { int k = __builtin_ctzll(zm); zm &= zm - 1; int pos = T.zzTable[k]; fb[pos] = dequant(b[k], q[k]); fm |= 1ull << pos; }
+      while (zm) { int k = ctz64(zm); zm &= zm - 1; int pos = T.zzTable[k]; fb[pos] = dequant(b[k], q[k]); fm |= 1ull << pos; }
       /* 4. the DC, from up to 16 boundary estimates */
       int64_t ests[16], lo = 0, hi = 0, total = 0, pred;
       uint32_t ka[32] __attribute__((aligned(16))), eg[16];
@@ -543,7 +543,7 @@ static TARGET int FN(component)(CD_T *dc, v7m_t *m, int16_t *coef, intptr_t bw, 
         rc_->eg[0] += E3U[0] * f; bc_->eg[0] += E3U[0] * f;
       }
       uint64_t mm = fm | 1;
-      while (mm) { fb[__builtin_ctzll(mm)] = 0; mm &= mm - 1; }
+      while (mm) { fb[ctz64(mm)] = 0; mm &= mm - 1; }
       { ecache_t *t = leftC; leftC = rightC; rightC = t; }  /* this block is the next one's left */
     }
   return ok;

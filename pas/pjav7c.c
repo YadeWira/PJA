@@ -182,14 +182,31 @@ static inline __attribute__((always_inline)) void learn(abit_t *c, int bit) {
 static inline int32_t truncshr(int32_t x, int n) { return (x + ((x >> 31) & ((1 << n) - 1))) >> n; }
 static inline int32_t clampi(int32_t x, int32_t lo, int32_t hi) { x = x < lo ? lo : x; return x > hi ? hi : x; }
 
+/* 64-bit bit scans without libgcc: on 32-bit targets gcc may call
+   __ctzdi2 / __clzdi2 for the builtins on 64-bit operands, so there they
+   are two 32-bit scans. x must not be 0. */
+#if UINTPTR_MAX > 0xFFFFFFFFu
+static inline int ctz64(uint64_t x) { return __builtin_ctzll(x); }
+static inline int clz64(uint64_t x) { return __builtin_clzll(x); }
+#else
+static inline int ctz64(uint64_t x) {
+  uint32_t lo = (uint32_t)x;
+  return lo ? __builtin_ctz(lo) : 32 + __builtin_ctz((uint32_t)(x >> 32));
+}
+static inline int clz64(uint64_t x) {
+  uint32_t hi = (uint32_t)(x >> 32);
+  return hi ? __builtin_clz(hi) : 32 + __builtin_clz((uint32_t)x);
+}
+#endif
+
 /* ---------- pjamodel's helpers ---------- */
 static inline int iabs(int v) { return v < 0 ? -v : v; }
 static inline uint64_t uabs64(int64_t v) { return v < 0 ? 0 - (uint64_t)v : (uint64_t)v; }
-static inline int bitlen64(int64_t v) { uint64_t u = uabs64(v); return u ? 64 - __builtin_clzll(u) : 0; }
+static inline int bitlen64(int64_t v) { uint64_t u = uabs64(v); return u ? 64 - clz64(u) : 0; }
 static inline int finelog(int64_t v) {
   uint64_t u = uabs64(v);
   if (u <= 1) return (int)u;
-  int e = 64 - __builtin_clzll(u);
+  int e = 64 - clz64(u);
   return 2 * e - 2 + (int)((u >> (e - 2)) & 1);
 }
 static inline int ones64(uint64_t x) {
