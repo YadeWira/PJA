@@ -69,8 +69,15 @@ measured against the old spelling.
 - **Never larger than the original by more than 52 bytes** (37 and the
   extension): a file the codec does not make smaller is stored as it is,
   and `a` and `list` say so.
+- **On Windows, `pja` expands `*` and `?` itself**, because neither `cmd`
+  nor PowerShell does it for a program: `pja a photos\*.jpg` takes every
+  file that matches, in order of name, folders left out. Only the name part
+  is a pattern (`photos\*.jpg`, not `*\x.jpg`). A pattern that matches
+  nothing fails as `no file matches`, and the other inputs still go through.
+  Elsewhere the shell expands them, as always.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (48 cells: round trips, existing outputs, links,
-damage, `--keep-corrupt`, `--max-output`, threads, every usage error).
+Tested by `pas/tests/cli.sh` (51 cells: round trips, existing outputs, links,
+damage, `--keep-corrupt`, `--max-output`, threads, every usage error), and
+on Windows by `pas/tests/windows.ps1` (28 cells, the wildcards among them).

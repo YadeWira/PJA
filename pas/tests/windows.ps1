@@ -104,4 +104,16 @@ Check (Test-Path -LiteralPath 'win_full\fotoñandú.pja') 'a name in the ANSI co
 Check (Test-Path -LiteralPath 'win_full\写真.pja') 'a name outside it: written under its own name'
 Check (Test-Path -LiteralPath 'win_full\-dash.pja') 'a name that starts with a dash, after --'
 
+Log '--- wildcards (neither cmd nor PowerShell expands them for a program)'
+& $pja a -q -o win_glob\ 'in\*.jls'; $n = (Get-ChildItem win_glob -Filter *.pja).Count
+Check (($LASTEXITCODE -eq 0) -and ($n -eq ($inputs | Where-Object { $_ -like '*.jls' }).Count)) "in\*.jls: every .jls ($n)"
+& $pja a -q -o win_glob2\ 'in\gray?.jls' 'in\写*.jpg'; $g = (Get-ChildItem win_glob2 -Name) -join ' '
+Check (($LASTEXITCODE -eq 0) -and ($g -eq 'gray2.pja gray8.pja 写真.pja')) "in\gray?.jls and in\写*.jpg: $g"
+New-Item -ItemType Directory -Force -Path 'in_dir\sub.jpg' | Out-Null
+Copy-Item -LiteralPath 'in\grayscale.jpg' -Destination 'in_dir\g.jpg'
+& $pja a -q -o win_glob3\ 'in_dir\*.jpg'; Check (($LASTEXITCODE -eq 0) -and ((Get-ChildItem win_glob3 -Name) -join ' ') -eq 'g.pja') 'a folder that matches is left out'
+$e = & $pja a -q -o win_glob4\ 'in\*.zzz' 2>&1 | Out-String
+Check (($LASTEXITCODE -eq 1) -and ($e -match 'no file matches')) "a pattern that matches nothing: $($e.Trim())"
+Remove-Item -Recurse -Force in_dir, win_glob, win_glob2, win_glob3, win_glob4 -ErrorAction SilentlyContinue
+
 Log "$($script:cells) cells, $($script:fails) failures"

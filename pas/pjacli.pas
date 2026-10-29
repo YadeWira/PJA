@@ -73,6 +73,36 @@ begin
   for i := 0 to n - 1 do args[i] := UTF8Encode(UnicodeString(w[i]));
   LocalFree(HLOCAL(w));
 end;
+{ cmd passes a pattern such as *.jpg as it is (Windows leaves that to each
+  program): an input with * or ? in its name becomes the files that match,
+  in order of name; the folder part is taken as written. A pattern that
+  matches nothing stays, and fails as such (ReadWhole). }
+procedure ExpandWildcards;
+var all, found: TStringList; i: Integer; a, dir: string; sr: TUnicodeSearchRec;
+begin
+  all := TStringList.Create;
+  found := TStringList.Create;
+  for i := 0 to inputs.Count - 1 do begin
+    a := inputs[i];
+    if LastDelimiter('*?', a) <= LastDelimiter('\/:', a) then begin all.Add(a); Continue; end;
+    dir := Copy(a, 1, LastDelimiter('\/:', a));
+    found.Clear;
+    if FindFirst(UnicodeString(UTF8Decode(a)), faAnyFile, sr) = 0 then begin
+      repeat
+        if sr.Attr and faDirectory = 0 then found.Add(dir + UTF8Encode(sr.Name));
+      until FindNext(sr) <> 0;
+      FindClose(sr);
+    end;
+    if found.Count = 0 then all.Add(a)
+    else begin
+      found.Sort;
+      all.AddStrings(found);
+    end;
+  end;
+  found.Free;
+  inputs.Free;
+  inputs := all;
+end;
 {$else}
 procedure ReadArgs;
 var i: Integer;
@@ -207,6 +237,7 @@ begin
     else UsageError('unknown option "' + a + '"');
     Inc(i);
   end;
+  {$ifdef MSWINDOWS} ExpandWildcards; {$endif}
   if inputs.Count = 0 then UsageError('no input files');
   if (outArg <> '') and (outDir <> '') then UsageError('-o and --output-dir together');
   if (command = cmList) and ((outArg <> '') or (outDir <> '')) then UsageError('list writes nothing');
@@ -220,6 +251,10 @@ begin
   data := nil;
   Result := False;
   if DirectoryExists(f) then begin Fail(f + ': is a directory'); Exit; end;
+  {$ifdef MSWINDOWS}
+  { a pattern still here matched nothing (no Windows name has * or ?) }
+  if LastDelimiter('*?', f) > 0 then begin Fail(f + ': no file matches'); Exit; end;
+  {$endif}
   try
     s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone);
     try
