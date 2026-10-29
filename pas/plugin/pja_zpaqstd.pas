@@ -322,9 +322,11 @@ begin
       d := Bytes(src, n);
       { 8-bit DCT with its height in the frame and its restarts where its DRI
         says: the ZPAQL decoder is frozen as v0.0.1 left it, which had
-        neither 12-bit nor lossless JPEG nor DNL nor ignored DRIs }
+        neither 12-bit nor lossless JPEG nor DNL nor ignored DRIs, nor
+        another encoder's correction bits' limit (0.0.8) }
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
          (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and
+         not HasCorrectionLimits(j) and
          (Length(j.scans) <= ZPAQL_MAX_SCANS) and
          (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
     end else if StrComp(codecName, 'pjax') = 0 then begin
@@ -335,7 +337,8 @@ begin
         those files are pja's }
       d := Bytes(src, n);
       if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         not j.arithmetic and not j.lossless and (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
+         not j.arithmetic and not j.lossless and not HasCorrectionLimits(j) and
+         (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
         w := ZpaqlPjaxFileWords(d, j, after);
         if ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and (Log2Words(w) <= ZPAQL_MAX_PH) then
           Result := 1;

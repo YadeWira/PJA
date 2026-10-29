@@ -7,7 +7,12 @@
     symbol: the largest one is taken out of a scan's DHT, the scan is
     re-encoded (so the runs get cut like such an encoder cuts them), and the
     result has to come back byte for byte and decode to the same
-    coefficients.
+    coefficients;
+  - progressive EOB runs of an AC refinement scan ended after fewer
+    correction bits than libjpeg's 937, as Photoshop does: the scan is
+    re-encoded with a limit of 1 and of 4 bits (the samples are small).
+    Layer 1 has to find a limit that gives the same bytes, version 6 to
+    hold it, and version 5 (the zpaq-std plugin's) to refuse it.
 
     test_tolerances <directory> }
 program test_tolerances;
@@ -122,10 +127,22 @@ begin
   cnt := 0;
 end;
 
-var
-  files: TStringList; sr: TSearchRec; f: string; d, t: TBytes; j, jt: TJpeg; extra, sc, rmax, nprog: Integer;
+{ The JPEG with the AC refinement scan `scan` re-encoded, its EOB runs
+  ended after `limit` correction bits }
+function WithCorrectionLimit(const j: TJpeg; scan, limit: Integer; out d: TBytes): Boolean;
+var j2: TJpeg;
 begin
-  cells := 0; failures := 0; nprog := 0;
+  j2 := j;
+  j2.scans := Copy(j.scans, 0, Length(j.scans));
+  j2.scans[scan].maxBe := limit;
+  Result := Recompose(j2, d).Ok;
+end;
+
+var
+  files: TStringList; sr: TSearchRec; f: string; d, t, st, lj: TBytes; j, jt: TJpeg;
+  extra, sc, rmax, nprog, ncorr, limit, k: Integer;
+begin
+  cells := 0; failures := 0; nprog := 0; ncorr := 0;
   files := TStringList.Create; files.Sorted := True;
   if FindFirst(ParamStr(1) + '/*.jpg', faAnyFile, sr) = 0 then begin
     repeat files.Add(ParamStr(1) + '/' + sr.Name); until FindNext(sr) <> 0;
@@ -145,8 +162,23 @@ begin
           Check(not Same(t, d) and VerifyRoundTrip(t, jt).Ok and SameCoefficients(j, jt) and CodecRoundTrip(t),
                 Format('%s scan %d without EOB%d: runs cut, same coefficients', [ExtractFileName(f), sc, rmax]));
         end;
+    if j.progressive and not j.arithmetic then
+      for sc := 0 to High(j.scans) do
+        if (j.scans[sc].ah > 0) and (j.scans[sc].ss > 0) then
+          for k := 0 to 1 do begin
+            limit := 1 + 3 * k;
+            { only a limit that changes the scan from libjpeg's own }
+            if WithCorrectionLimit(j, sc, limit, t) and WithCorrectionLimit(j, sc, LIBJPEG_MAX_BE, lj) and
+               not Same(t, lj) then begin
+              Inc(ncorr);
+              Check(VerifyRoundTrip(t, jt).Ok and SameCoefficients(j, jt) and HasCorrectionLimits(jt) and
+                    CodecRoundTrip(t) and not Compress(t, st, True, 1, False, False).Ok,
+                    Format('%s scan %d, runs of %d correction bits: v6 only', [ExtractFileName(f), sc, limit]));
+            end;
+          end;
   end;
   Check(nprog >= 1, Format('%d progressive scans with shorter EOB runs tried', [nprog]));
+  Check(ncorr >= 2, Format('%d refinement scans with fewer correction bits tried', [ncorr]));
   Writeln(cells, ' cells, ', failures, ' failures');
   if (failures > 0) or (cells < 10) then Halt(1);
 end.

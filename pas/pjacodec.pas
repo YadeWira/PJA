@@ -111,6 +111,13 @@ uses Classes, Math, pjaarith, pjamodel;
 type
   { scan numbers: version 6's quirks }
   TScanList = array of Integer;
+  TQuirks = record
+    { the scans that ignore the DRI in force }
+    ri: TScanList;
+    { the scans whose EOB runs hold another number of correction bits, and
+      that number (pjajpeg TScan.maxBe) }
+    be, beMax: TScanList;
+  end;
 
 const
   ERROR_NAMES: array[TCodecError] of string = ('Ok', 'Jpeg', 'NoRoundTrip', 'BadStream', 'FutureVersion', 'TooLarge');
@@ -490,6 +497,12 @@ begin
       Result.err := ceJpeg; Result.jpeg.err := jeBadRst;
       Exit;
     end;
+    { and so does a scan with another correction bits' limit: version 5
+      rebuilds libjpeg's }
+    if HasCorrectionLimits(j) then begin
+      Result.err := ceJpeg; Result.jpeg.err := jeNoRoundTrip;
+      Exit;
+    end;
     Result := CompressJpeg(jpeg, j, stream, verify, threads, fast);
   end;
 end;
@@ -566,7 +579,7 @@ begin
 end;
 
 function DecompressOne(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
-                       expected: SizeInt; const quirks: TScanList): TCodecResult;
+                       expected: SizeInt; const quirks: TQuirks): TCodecResult;
 var h: THead; jobs: array of TBandJob; r: array of TRange; b: Integer; len: Int64;
 begin
   jpeg := nil;
@@ -581,10 +594,19 @@ begin
   if (h.isLs or h.j.lossless) and (stream[1] <> 0) then Exit(CodecFail(ceBadStream));
   { the scans that ignore the DRI in force (version 6 says which): only
     sequential Huffman or lossless ones, as Decompose finds them }
-  for b := 0 to High(quirks) do begin
-    if h.isLs or h.j.progressive or h.j.arithmetic or (quirks[b] > High(h.j.scans)) or
-       (h.j.scans[quirks[b]].ri = 0) then Exit(CodecFail(ceBadStream));
-    h.j.scans[quirks[b]].ri := 0; h.j.scans[quirks[b]].ignoreRi := True;
+  for b := 0 to High(quirks.ri) do begin
+    if h.isLs or h.j.progressive or h.j.arithmetic or (quirks.ri[b] > High(h.j.scans)) or
+       (h.j.scans[quirks.ri[b]].ri = 0) then Exit(CodecFail(ceBadStream));
+    h.j.scans[quirks.ri[b]].ri := 0; h.j.scans[quirks.ri[b]].ignoreRi := True;
+  end;
+  { the correction bits' limits: progressive Huffman AC refinement scans }
+  for b := 0 to High(quirks.be) do begin
+    if h.isLs or not h.j.progressive or h.j.arithmetic or (quirks.be[b] > High(h.j.scans)) then
+      Exit(CodecFail(ceBadStream));
+    with h.j.scans[quirks.be[b]] do begin
+      if (ah = 0) or (ss = 0) then Exit(CodecFail(ceBadStream));
+      maxBe := quirks.beMax[b];
+    end;
   end;
   r := nil; SetLength(r, h.nb);
   if not BandRanges(stream, STREAM_HEADER + len, h.nb, r) then Exit(CodecFail(ceBadStream));
@@ -606,11 +628,12 @@ end;
 { ---------- version 6: JPEGs inside a JPEG, encoder quirks, bytes ----------
 
     byte 0          STREAM_PARTS
-    byte 1          flags: bit 0 QUIRKS; bit 1 BYTES, alone
+    byte 1          flags: bit 0 QUIRKS; bit 1 BYTES, alone; bit 2 CORRECTION
   BYTES: the rest is the whole file through the raw bytes' model
   (CodeRaw): a file that starts like a JPEG and that PJA takes no other
   way. Otherwise:
-    4 bytes (LE)    K, the parts: 0 to MAX_PARTS (0 only with QUIRKS)
+    4 bytes (LE)    K, the parts: 0 to MAX_PARTS (0 only with QUIRKS or
+                    CORRECTION)
     K x 13 bytes    each part: where it is in the file (u32), its length
                     there (u32), its stream's length (u32), and its mode:
                     bit 0, how the host keeps its place (0 = cut out,
@@ -621,6 +644,11 @@ end;
                     ascending: the host's scans whose DRI is in force but
                     that have no restart markers (pjajpeg TScan.ignoreRi),
                     which the raw bytes cannot tell
+    CORRECTION:     4 bytes (LE) C, 1 to MAX_QUIRK_SCANS; then C x 8 bytes,
+                    ascending scans: the scan (u32) and how many correction
+                    bits its EOB runs hold before the encoder ends them
+                    (u32, pjajpeg TScan.maxBe; never libjpeg's 937): AC
+                    refinement scans of an encoder such as Photoshop
     the K streams   each of a JPEG, version 5 or itself with parts (none
                     for a copy)
     the rest        the host, version 5: the file with the parts cut out or
@@ -640,6 +668,7 @@ const
   PART_COPY = 2;
   FLAG_QUIRKS = 1;
   FLAG_BYTES = 2;
+  FLAG_CORRECTION = 4;
   MAX_QUIRK_SCANS = 256;
 
 type
@@ -664,13 +693,30 @@ begin
   Result := cd.enc.Finish;
 end;
 
-{ The scans with a DRI in force and no restarts }
-function QuirkScans(const j: TJpeg): TScanList;
-var i, n: Integer;
+{ The scans with a DRI in force and no restarts, and those whose EOB runs
+  hold another number of correction bits than libjpeg's }
+function QuirkScans(const j: TJpeg): TQuirks;
+var i, n, m: Integer;
 begin
-  Result := nil; n := 0;
-  for i := 0 to High(j.scans) do
-    if j.scans[i].ignoreRi then begin SetLength(Result, n + 1); Result[n] := i; Inc(n); end;
+  Result := Default(TQuirks); n := 0; m := 0;
+  for i := 0 to High(j.scans) do begin
+    if j.scans[i].ignoreRi then begin SetLength(Result.ri, n + 1); Result.ri[n] := i; Inc(n); end;
+    if j.scans[i].maxBe <> LIBJPEG_MAX_BE then begin
+      SetLength(Result.be, m + 1); SetLength(Result.beMax, m + 1);
+      Result.be[m] := i; Result.beMax[m] := j.scans[i].maxBe; Inc(m);
+    end;
+  end;
+end;
+
+function NoQuirks(const q: TQuirks): Boolean;
+begin Result := (q.ri = nil) and (q.be = nil); end;
+
+{ what they take in the stream }
+function QuirkBytes(const q: TQuirks): Integer;
+begin
+  Result := 0;
+  if q.ri <> nil then Inc(Result, 4 + 4 * Length(q.ri));
+  if q.be <> nil then Inc(Result, 4 + 8 * Length(q.be));
 end;
 
 function SameScans(const a, b: TScanList): Boolean;
@@ -679,6 +725,9 @@ begin
   Result := Length(a) = Length(b);
   if Result then for i := 0 to High(a) do if a[i] <> b[i] then Exit(False);
 end;
+
+function SameQuirks(const a, b: TQuirks): Boolean;
+begin Result := SameScans(a.ri, b.ri) and SameScans(a.be, b.be) and SameScans(a.beMax, b.beMax); end;
 
 function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
                       expected: SizeInt; depth: Integer): TCodecResult; forward;
@@ -694,7 +743,7 @@ end;
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                     fast: Boolean; depth: Integer; huffOnly: Boolean = False): TCodecResult;
 var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from: SizeInt; n, i, c: Integer;
-    sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TScanList;
+    sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TQuirks;
 begin
   stream := nil;
   { huffOnly (the zpaq-std plugin's pjax): Huffman JPEGs and parts of one
@@ -709,7 +758,8 @@ begin
   Result := CodecFail(ceOk);
   Result.jpeg := VerifyRoundTrip(jpeg, j);
   if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
-  if huffOnly and (j.arithmetic or j.lossless) then begin
+  { pjax's ZPAQL knows the DRI's quirk, not the correction bits' }
+  if huffOnly and (j.arithmetic or j.lossless or HasCorrectionLimits(j)) then begin
     Result.err := ceJpeg; Result.jpeg.err := jeUnsupported; Exit;
   end;
   quirks := QuirkScans(j);
@@ -767,7 +817,7 @@ begin
     SetLength(host, p);
     { a host PJA does not take as the file (a part that was not where it
       seemed) leaves the file whole }
-    if VerifyRoundTrip(host, hj).Ok and SameScans(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
+    if VerifyRoundTrip(host, hj).Ok and SameQuirks(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
     else n := 0;
     hj := Default(TJpeg);
   end;
@@ -784,11 +834,11 @@ begin
       withParts := 6 + PART_ENTRY * n + STREAM_HEADER + Length(hostHead);
       for i := 0 to n - 1 do Inc(withParts, Length(parts[i].stream));
       without := STREAM_HEADER + Length(HeadBytes(j));
-      if quirks <> nil then without := without + 6;
+      if not NoQuirks(quirks) then without := without + 6;
       if withParts >= without then n := 0;
     end;
   end;
-  if (n = 0) and (quirks = nil) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
+  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
   { the host's stream: its header stream and the bands, coded once from the
     file, whose bands they are; the file's own with no parts }
   if n > 0 then Result := CompressJpeg(jpeg, j, hs, False, threads, fast, hostHead)
@@ -796,10 +846,11 @@ begin
   if not Result.Ok then Exit;
   len := 6 + PART_ENTRY * n + Length(hs);
   for i := 0 to n - 1 do Inc(len, Length(parts[i].stream));
-  if quirks <> nil then Inc(len, 4 + 4 * Length(quirks));
+  Inc(len, QuirkBytes(quirks));
   SetLength(stream, len);
   stream[0] := STREAM_PARTS; stream[1] := 0;
-  if quirks <> nil then stream[1] := FLAG_QUIRKS;
+  if quirks.ri <> nil then stream[1] := FLAG_QUIRKS;
+  if quirks.be <> nil then stream[1] := stream[1] or FLAG_CORRECTION;
   p := 2; PutU32(stream, p, n);
   for i := 0 to n - 1 do begin
     PutU32(stream, p, Cardinal(parts[i].off)); PutU32(stream, p, Cardinal(parts[i].len));
@@ -807,9 +858,13 @@ begin
     else PutU32(stream, p, Length(parts[i].stream));
     stream[p] := parts[i].mode; Inc(p);
   end;
-  if quirks <> nil then begin
-    PutU32(stream, p, Length(quirks));
-    for i := 0 to High(quirks) do PutU32(stream, p, quirks[i]);
+  if quirks.ri <> nil then begin
+    PutU32(stream, p, Length(quirks.ri));
+    for i := 0 to High(quirks.ri) do PutU32(stream, p, quirks.ri[i]);
+  end;
+  if quirks.be <> nil then begin
+    PutU32(stream, p, Length(quirks.be));
+    for i := 0 to High(quirks.be) do begin PutU32(stream, p, quirks.be[i]); PutU32(stream, p, quirks.beMax[i]); end;
   end;
   for i := 0 to n - 1 do
     if Length(parts[i].stream) > 0 then begin
@@ -820,7 +875,7 @@ begin
   if verify and not SameAfter(jpeg, stream, threads, depth) then begin
     { a bug in the parts must not cost the file: without quirks it goes as
       one stream }
-    if quirks = nil then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
+    if NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, fast));
     stream := nil;
     Exit(CodecFail(ceNoRoundTrip));
   end;
@@ -847,12 +902,13 @@ end;
 function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
                       expected: SizeInt; depth: Integer): TCodecResult;
 var n, i, flags: Integer; p, hp, op: SizeInt; total, cut, at: Int64; parts: array of TPart; host, part: TBytes;
-    k: SizeInt; quirks: TScanList; cd: TCoder;
+    k: SizeInt; quirks, none: TQuirks; cd: TCoder;
 begin
   jpeg := nil;
   if Length(stream) < 1 then Exit(CodecFail(ceBadStream));
   if stream[0] > STREAM_PARTS then Exit(CodecFail(ceFutureVersion));
-  if stream[0] = STREAM_VERSION then Exit(DecompressOne(stream, jpeg, maxRaw, threads, expected, nil));
+  none := Default(TQuirks);
+  if stream[0] = STREAM_VERSION then Exit(DecompressOne(stream, jpeg, maxRaw, threads, expected, none));
   if (stream[0] <> STREAM_PARTS) or (depth > MAX_PART_DEPTH) or (Length(stream) < 2) then Exit(CodecFail(ceBadStream));
   flags := stream[1];
   if flags = FLAG_BYTES then begin
@@ -862,10 +918,10 @@ begin
     if not CodeRaw(cd, jpeg, maxRaw) then begin jpeg := nil; Exit(CodecFail(ceTooLarge)); end;
     Exit(CodecFail(ceOk));
   end;
-  if (flags and not FLAG_QUIRKS <> 0) or (Length(stream) < 6) then Exit(CodecFail(ceBadStream));
+  if (flags and not (FLAG_QUIRKS or FLAG_CORRECTION) <> 0) or (Length(stream) < 6) then Exit(CodecFail(ceBadStream));
   if GetU32(stream, 2) > MAX_PARTS then Exit(CodecFail(ceBadStream));
   n := Integer(GetU32(stream, 2));
-  if (n = 0) and (flags and FLAG_QUIRKS = 0) then Exit(CodecFail(ceBadStream));
+  if (n = 0) and (flags = 0) then Exit(CodecFail(ceBadStream));
   if 6 + Int64(PART_ENTRY) * n > Length(stream) then Exit(CodecFail(ceBadStream));
   parts := nil; SetLength(parts, n);
   p := 6; total := 0; cut := 0;
@@ -881,17 +937,30 @@ begin
     if total > maxRaw then Exit(CodecFail(ceTooLarge));
     if parts[i].mode and PART_ZEROS = 0 then Inc(cut, parts[i].len);
   end;
-  quirks := nil;
+  quirks := Default(TQuirks);
   if flags and FLAG_QUIRKS <> 0 then begin
     { scans in order, each one at most once }
     if p + 4 > Length(stream) then Exit(CodecFail(ceBadStream));
     k := GetU32(stream, p); Inc(p, 4);
     if (k < 1) or (k > MAX_QUIRK_SCANS) or (p + 4 * k > Length(stream)) then Exit(CodecFail(ceBadStream));
-    SetLength(quirks, k);
+    SetLength(quirks.ri, k);
     for i := 0 to k - 1 do begin
       if GetU32(stream, p) >= MAX_QUIRK_SCANS then Exit(CodecFail(ceBadStream));
-      quirks[i] := Integer(GetU32(stream, p)); Inc(p, 4);
-      if (i > 0) and (quirks[i] <= quirks[i - 1]) then Exit(CodecFail(ceBadStream));
+      quirks.ri[i] := Integer(GetU32(stream, p)); Inc(p, 4);
+      if (i > 0) and (quirks.ri[i] <= quirks.ri[i - 1]) then Exit(CodecFail(ceBadStream));
+    end;
+  end;
+  if flags and FLAG_CORRECTION <> 0 then begin
+    { scans in order, each with its limit, never libjpeg's }
+    if p + 4 > Length(stream) then Exit(CodecFail(ceBadStream));
+    k := GetU32(stream, p); Inc(p, 4);
+    if (k < 1) or (k > MAX_QUIRK_SCANS) or (p + 8 * k > Length(stream)) then Exit(CodecFail(ceBadStream));
+    SetLength(quirks.be, k); SetLength(quirks.beMax, k);
+    for i := 0 to k - 1 do begin
+      if (GetU32(stream, p) >= MAX_QUIRK_SCANS) or (GetU32(stream, p + 4) > MAX_BE_LIMIT) or
+         (GetU32(stream, p + 4) = LIBJPEG_MAX_BE) then Exit(CodecFail(ceBadStream));
+      quirks.be[i] := Integer(GetU32(stream, p)); quirks.beMax[i] := Integer(GetU32(stream, p + 4)); Inc(p, 8);
+      if (i > 0) and (quirks.be[i] <= quirks.be[i - 1]) then Exit(CodecFail(ceBadStream));
     end;
   end;
   at := p;

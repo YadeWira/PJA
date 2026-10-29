@@ -960,3 +960,36 @@ group of 12 went to pjalsx (85.8%). Windows 10, 64 and 32 bits: that
 group through the ZPAQL, the same archive, every file back without the
 plugin. The suite runs pjalsx's ZPAQL in the Python interpreter on two
 small samples.
+
+## Photoshop's EOB runs: a second encoder quirk (29/10/2026)
+
+To look for more quirks, the JPEGs inside the corpus' documents and
+archives were taken out (epub, docx, odt, zip, PDF DCTDecode streams):
+286 different ones, from as many encoders as the documents had. PJA took
+285; the other went as bytes (`NoRoundTrip`): a progressive JPEG from
+Photoshop. Its scans decode, but the rebuild differed in the last one, an
+AC refinement: Photoshop ends an EOB run once it holds a bit over 256
+correction bits, where libjpeg goes on to 937 (jcphuff.c's MAX_CORR_BITS
+- 64 + 1). The coefficients are the same; only where the runs are cut
+differs, so this too is a quirk to say, not a patch.
+
+pjajpeg's decoder now watches each refinement scan's runs: the correction
+bits a run held and went on (the limit is at least that), and those of a
+run that ended for no other reason than its bits, when the next block
+starts with an EOB of its own and the run was shorter than the table
+allows (the limit is less). If libjpeg's 937 fits, the scan is libjpeg's;
+if not, the smallest limit that fits (TScan.maxBe) rebuilds it: for the
+Photoshop file, 252. Stream version 6 carries the scans with another limit
+and the limit (CORRECTION, flag bit 2); version 5 has no room for it, so
+CompressOne refuses these files as before, and the zpaq-std plugin's
+detects say no to them (pja and pjax), as with the DRI quirk.
+
+The file: 77.45% as bytes, 61.46% now. The streams of every other file
+are the same bytes as 0.0.7's: tests' 37 (the CI's hash unchanged), the
+78 and 93 corpus JPEGs, the 151 photos, the 244 arithmetic ones and the
+other 285 of the 286. New sample `prog_correction_limit.jpg` (a blurred
+plasma, progressive, its refinement scans re-encoded ending runs at 2
+bits; djpeg gives the same pixels as libjpeg's own); test_tolerances
+re-encodes refinement scans with limits of 1 and 4 bits and checks that
+layer 1 finds a limit that rebuilds them, that version 6 holds it and
+that version 5 refuses it.

@@ -44,6 +44,12 @@ const
     35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
     58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63);
 
+const
+  { jcphuff.c: MAX_CORR_BITS - DCTSIZE2 + 1 }
+  LIBJPEG_MAX_BE = 1000 - 64 + 1;
+  { the most correction bits a run may hold, here: TProgState.bebuf }
+  MAX_BE_LIMIT = 4096 - 64;
+
 type
   TJpegError = (
     jeNone,
@@ -108,6 +114,12 @@ type
       (2 shl r) - 1 for its largest EOBr symbol; 32767 with a full table }
     maxEob: Integer;
     padbit: Integer;
+    { progressive Huffman, AC refinement: how many correction bits an EOB
+      run may hold before the encoder ends it, the run going on while they
+      are no more than this. libjpeg's is LIBJPEG_MAX_BE; Photoshop ends
+      its runs sooner. Decompose finds it from the scan, ParseHeaders
+      leaves libjpeg's, and the caller sets another }
+    maxBe: Integer;
     { a DRI in force, but the scan has no restart markers: an encoder that
       wrote the DRI and then coded as if there were none (ri is 0 then).
       ParseHeaders cannot tell it from the raw bytes: the caller says it }
@@ -159,6 +171,9 @@ function VerifyRoundTrip(const data: TBytes; out j: TJpeg): TJpegResult;
 function IsMpo(const data: TBytes): Boolean;
 { Some scan with a DRI in force and no restarts (TScan.ignoreRi) }
 function HasIgnoredRestarts(const j: TJpeg): Boolean;
+{ Some scan whose EOB runs end at another number of correction bits than
+  libjpeg's (TScan.maxBe) }
+function HasCorrectionLimits(const j: TJpeg): Boolean;
 { A bit per coefficient of a block of 64 (zigzag order), set where it is
   not zero. }
 function NonzeroMask(cf: PSmallInt): QWord;
@@ -665,12 +680,17 @@ type
     eobrun: Integer;
     { pending correction bits, in the encoder (BE in jcphuff.c) }
     be: Integer;
-    bebuf: array[0..999] of Byte;
+    bebuf: array[0..MAX_BE_LIMIT + 63] of Byte;
+    { the decoder, AC refinement: the correction bits of the run it is in
+      and its length; the run that ended with the last block, if one did
+      (not at a restart); and the bounds of the encoder's TScan.maxBe the
+      runs so far allow: the bits a run held and went on, and one less
+      than the bits of a run that ended for no other reason }
+    runBe, runLen: Integer;
+    prevEnded: Boolean;
+    prevBe, prevLen: Integer;
+    beLow, beHigh: Integer;
   end;
-
-const
-  { jcphuff.c: MAX_CORR_BITS - DCTSIZE2 + 1 }
-  MAX_BE = 1000 - 64 + 1;
 
 function DecodeDcFirst(var rd: TBitReader; var j: TJpeg; const s: TScan; i: Integer; const b: TBlockRef;
                        var pred: Integer): TJpegError;
@@ -736,12 +756,13 @@ end;
 
 function DecodeAcRefine(var rd: TBitReader; var j: TJpeg; const s: TScan; const b: TBlockRef;
                         var st: TProgState): TJpegError;
-var e: TJpegError; k, rs, r, t, v, base, p1, c: Integer;
+var e: TJpegError; k, rs, r, t, v, base, p1, c, bits: Integer; first: Boolean;
 begin
   base := b.idx * 64;
   p1 := 1 shl s.al;
   if p1 > 16383 then Exit(jeCoefOutOfRange);
   k := s.ss;
+  first := True;
   if st.eobrun = 0 then
     while k <= s.se do begin
       e := DecodeSymbol(rd, s.ac[0], rs);
@@ -757,8 +778,14 @@ begin
           if not rd.Bits(r, v) then Exit(jeTruncated);
           Inc(st.eobrun, v);
         end;
+        { a run that starts with the block, right after another: that one
+          was ended by its correction bits, unless by its length }
+        if first and st.prevEnded and (st.prevLen < s.maxEob) and (st.prevBe - 1 < st.beHigh) then
+          st.beHigh := st.prevBe - 1;
+        st.runBe := 0; st.runLen := st.eobrun;
         Break;
       end;
+      first := False;
       { skip r zeros, refining the ones that were already nonzero }
       repeat
         c := j.comp[b.c].coef[base + k];
@@ -778,16 +805,24 @@ begin
       Inc(k);
     end;
   if st.eobrun > 0 then begin
+    bits := 0;
     while k <= s.se do begin
       c := j.comp[b.c].coef[base + k];
       if c <> 0 then begin
         if not rd.Bit(v) then Exit(jeTruncated);
         if v = 1 then j.comp[b.c].coef[base + k] := Refine(c, p1);
+        Inc(bits);
       end;
       Inc(k);
     end;
     Dec(st.eobrun);
-  end;
+    Inc(st.runBe, bits);
+    if st.eobrun > 0 then begin
+      if st.runBe > st.beLow then st.beLow := st.runBe;
+    end else begin
+      st.prevEnded := True; st.prevBe := st.runBe; st.prevLen := st.runLen;
+    end;
+  end else st.prevEnded := False;
   Result := jeNone;
 end;
 
@@ -896,7 +931,7 @@ begin
   if (r > 0) or (br > 0) then begin
     Inc(st.eobrun);
     for ibr := 0 to br - 1 do begin st.bebuf[st.be] := brbuf[ibr]; Inc(st.be); end;
-    if (st.eobrun = s.maxEob) or (st.be > MAX_BE) then
+    if (st.eobrun = s.maxEob) or (st.be > s.maxBe) then
       if not FlushEobrun(wr, s, st) then Exit(False);
   end;
   Result := True;
@@ -1558,6 +1593,7 @@ begin
   s.padbit := -1;
   FillChar(pred, SizeOf(pred), 0);
   st := Default(TProgState);
+  st.beHigh := High(Integer);
   total := UnitCount(j, s);
   w := UnitsPerRow(j, s); ux := 0; uy := 0;
   rst := 0;
@@ -1569,6 +1605,7 @@ begin
       Inc(rd.p, 2); Inc(rst);
       FillChar(pred, SizeOf(pred), 0);
       st.eobrun := 0;
+      st.prevEnded := False;
     end;
     { the unit's position kept as it goes, not divided out of u }
     BlocksAt(j, s, ux, uy, un, n);
@@ -1580,6 +1617,13 @@ begin
   end;
   if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
   if s.padbit < 0 then s.padbit := 1;
+  { AC refinement: libjpeg's limit if the runs allow it, else the
+    smallest that does (Photoshop's, about 256). Runs no limit explains
+    stay with libjpeg's, and the rebuild will tell }
+  if j.progressive and (s.ah > 0) and (s.ss > 0) and
+     ((st.beLow > LIBJPEG_MAX_BE) or (st.beHigh < LIBJPEG_MAX_BE)) and
+     (st.beLow <= st.beHigh) and (st.beLow <= MAX_BE_LIMIT) then
+    s.maxBe := st.beLow;
   { what follows must be a marker, or the end. An RST here is one too many:
     some encoders write them, and they stay in raw (see Parse) }
   if rd.p < Length(data) then
@@ -1753,6 +1797,7 @@ function ReadSos(const d: TBytes; p, last: SizeInt; const j: TJpeg; const hs: TH
 var i, k, c, td, ta, sum, prev: Integer; q: SizeInt; tds, tas: array[0..3] of Integer;
 begin
   s := Default(TScan);
+  s.maxBe := LIBJPEG_MAX_BE;
   if last - p < 1 then Exit(jeBadSos);
   s.ncomp := d[p];
   if (s.ncomp < 1) or (s.ncomp > 4) or (last - p <> 4 + 2 * s.ncomp) then Exit(jeBadSos);
@@ -2108,6 +2153,13 @@ var i: Integer;
 begin
   Result := False;
   for i := 0 to High(j.scans) do if j.scans[i].ignoreRi then Exit(True);
+end;
+
+function HasCorrectionLimits(const j: TJpeg): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  for i := 0 to High(j.scans) do if j.scans[i].maxBe <> LIBJPEG_MAX_BE then Exit(True);
 end;
 
 function IsMpo(const data: TBytes): Boolean;

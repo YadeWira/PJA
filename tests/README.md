@@ -27,6 +27,7 @@ flip every bit of them.
 | `thumbs_twice.jpg` | a 320x240 plasma (`-seed 31`, `cjpeg -quality 85`) with the same image at 96x72 (`cjpeg -quality 75`) as a thumbnail twice, in an APP1 and in an APP2, as some cameras write it |
 | `two_images.jpg` | the same with the thumbnail once, and a second image after its EOI, a 240x160 plasma (`-seed 32`, `cjpeg -quality 80`), as an MPO has it |
 | `image_after_eoi.jpg` | `solid_color.jpg` with `baseline_444.jpg` after its EOI (`cat`): a small file of stream version 6, for the pjax ZPAQL in the Python interpreter |
+| `prog_correction_limit.jpg` | `convert -seed 71 -size 192x128 plasma:fractal -blur 0x4` → `cjpeg -progressive -quality 90`, its AC refinement scans re-encoded by PJA's own encoder ending each EOB run once it holds more than 2 correction bits (libjpeg: 937; Photoshop: about 256): it needs stream version 6, and `djpeg` decodes it to the same pixels |
 
 ## `jls/`
 
