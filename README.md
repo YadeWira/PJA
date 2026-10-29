@@ -74,7 +74,7 @@ interleave.
 | Linux | x86 (32-bit) | built and tested in CI; streams byte-identical to x86-64 |
 | macOS | arm64 (Apple silicon) | built and tested in CI; streams byte-identical to x86-64 |
 | Windows (7 and later) | x86-64 | built and tested in CI; also validated in Windows 10 and Windows 7 VMs |
-| Windows (7 and later) | x86 | built and tested in CI; also validated in Windows 10 and Windows 7 VMs |
+| Windows (XP and later) | x86 | built and tested in CI; also validated in Windows 10, Windows 7 and Windows XP SP3 VMs |
 
 On every platform CI builds the command and the zpaq-std plugin, takes
 every sample of the repository through `pja a` and `pja x`, and compares
