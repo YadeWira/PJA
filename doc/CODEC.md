@@ -993,3 +993,45 @@ bits; djpeg gives the same pixels as libjpeg's own); test_tolerances
 re-encodes refinement scans with limits of 1 and 4 bits and checks that
 layer 1 finds a limit that rebuilds them, that version 6 holds it and
 that version 5 refuses it.
+
+## A faster mode with rANS, explored (29/10/2026)
+
+Aqueous (`aqr`, measured in the README) is 7% larger than PJA on the 151
+photos but 6 to 13 times faster. Its JPEG model is static: two passes,
+each image's frequency tables stored, a few symbols per block (the count
+of nonzero ACs; each AC's bit length by position, nonzeros left and
+neighbours' counts; the DC from its neighbours' edges) through rANS, and
+the mantissas and signs as raw bits. No predictions of the edges.
+
+Could a rANS mode of PJA's sit in between? Measured on 30 of the photos,
+the coefficients only, with a probe (`rprobe`: the ideal cost of each
+design with adaptive multi-symbol tables) and then a coder (`rcoef`, in C
+with SSE2: adaptive tables of 16 symbols in the AV1 way, of a fixed total
+so that two can be averaged, rANS, raw bits apart), every image back:
+
+| design | coefficients against `--fast`'s |
+|---|---|
+| Aqueous's contexts, tables adaptive | +5.3% |
+| + the first mantissa bit and the sign modeled | +4.2% |
+| + PJA's neighbour magnitude, nonzero count by the luma for chroma | +3.6% |
+| + a second table by the neighbours in the block, averaged | +3.3% (ideal) |
+| the same as a coder, AV1-style adaptation | +7.4% |
+| the coder without the average | +8.2% |
+
+Speed, 30 photos, one thread: `--fast` decodes them in 5.1 s (the whole
+`pja x`); the coder decodes their coefficients in 3.1 s in plain C, 1.7 s
+with SSE2, 1.5 s without the average. About 2.5 times `--fast`, Huffman
+re-encoding included, for 7% more: larger than packJPG and than Aqueous.
+
+Where the gap is: not the edges (+1.7% without PJA's edge predictions);
+it is the adaptation. A multi-symbol table that adapts by a shift learns
+less than PJA's counters with their counts, and adapting by counts needs a
+division per symbol, which is the cost rANS was meant to save. Static
+tables, as Aqueous's, are what make it fast, and they land where Aqueous
+does: about 80%, 5% more than `--fast`.
+
+Not done: a mode between packJPG and Aqueous in size is no use to anyone,
+and one as fast as Aqueous would be Aqueous's ratio. PJA's place is the
+ratio; for speed it has threads (8 threads: the 151 photos in 9.9 s
+`--fast`). The probe and the coder are in the author's lab
+(`/mnt/IA_LAB/agentes/pja/rans/`).
