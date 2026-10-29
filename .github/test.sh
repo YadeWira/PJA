@@ -15,8 +15,11 @@ if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 2
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/pu" "$OUT/in" "$OUT/p" "$OUT/x" "$OUT/st"
 
 echo "== build"
-# the C part (CC: the platform's C compiler)
-sh pas/build_c.sh "$OUT/c"
+# the C part (CC: the platform's C compiler). A compiler given by its full
+# path (MSYS2's MinGW-w64 gcc on Windows) needs its own folder on PATH for
+# its DLLs and its cc1/as; without it, it fails without a word.
+case ${CC:-} in /*) PATH=$(dirname "$CC"):$PATH; export PATH ;; esac
+sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; exit 1; }
 $FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja$EXE" pas/pjacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 $FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/dump_streams$EXE" pas/tests/dump_streams.pas > "$OUT/fpc.log" 2>&1 \
