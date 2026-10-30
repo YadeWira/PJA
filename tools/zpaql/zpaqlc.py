@@ -28,6 +28,14 @@ The source is a subset of Python, read with the ast module:
     did: H[0 .. n) and every R register in use back to zero (n is past
     the last word the program used: its heap pointer), then halt. libzpaq
     keeps H, M and R from one segment of a block to the next.
+  - def onbyte(c): when there is one, each byte of the segment goes to it
+    instead of into M (an unpacker: an LZ77 expander writes M itself and
+    says how long the segment came out with setinlen(n)). M[i] is then
+    M[mbase() + i], mbase() being where this segment starts: reset() moves
+    it past the segment, so a block's segments follow one another in M
+    (which wraps) and each can refer to the ones before. onbyte runs before
+    the arrays have their places and the globals their first values: it
+    keeps to variables that start at 0, and to M.
 
 Variables live in R, or in H when R is full: each function has its own
 fixed places (no recursion, so nothing needs a stack). A call stores a
@@ -147,6 +155,7 @@ class Alloc:
 
 
 R_INLEN = 0
+R_MBASE = 7     # with onbyte(): where the segment starts in M; reset() keeps it
 R_T1, R_T2, R_T3 = 1, 2, 3     # scratch the code generator uses between two instructions
 
 
@@ -296,6 +305,7 @@ class Compiler:
                 err(node, 'only constants, globals, arrays and functions at top level')
         if 'main' not in self.funcs:
             raise CompileError('no main()')
+        self.unpacker = 'onbyte' in self.funcs
         if self.heap:
             self.arr_order.append(self.heap)    # last, wherever it was declared
         for name in self.globals:
@@ -509,7 +519,10 @@ class Compiler:
         elif space == 'H':
             self.expr(idx, depth); a.op('d=a')
         else:
-            self.expr(idx, depth); a.op('c=a')
+            self.expr(idx, depth)
+            if self.unpacker:
+                a.op('b=r %d' % R_MBASE); a.op('a+=b')
+            a.op('c=a')
 
     def bool_value(self, node, depth):
         a = self.asm
@@ -622,6 +635,10 @@ class Compiler:
             a.op('error'); return
         if name == 'inlen':
             a.op('a=r %d' % R_INLEN); return
+        if name == 'setinlen':
+            self.expr(args[0], depth); a.op('r=a %d' % R_INLEN); return
+        if name == 'mbase':
+            a.op('a=r %d' % R_MBASE); return
         if name == 'reset':
             if len(args) != 1:
                 err(node, 'reset() takes the end of the H in use')
@@ -842,7 +859,7 @@ class Compiler:
         emitted after every body, when all the sites are known."""
         a = self.asm
         a.put(f.exit)
-        if f.name == 'main':
+        if f.name in ('main', 'onbyte'):
             a.op('halt'); return
         self.load_a(f.ret)
         for i, site in enumerate(f.sites, 1):
@@ -854,7 +871,8 @@ class Compiler:
         """The functions main() can call, and every name their bodies use:
         nothing else is compiled, placed in H or initialized, so one source
         can hold what several programs share."""
-        reach, todo, names = {'main'}, ['main'], set()
+        roots = ['main'] + (['onbyte'] if self.unpacker else [])
+        reach, todo, names = set(roots), list(roots), set()
         while todo:
             f = self.funcs[todo.pop()]
             for n in self.live(f.node):
@@ -875,8 +893,14 @@ class Compiler:
         # every byte: into M; the end (A > 255): set up and run main
         leos = a.label()
         a.op('a> 255'); a.jmp('jt', leos)
-        a.op('c=r %d' % R_INLEN); a.op('*c=a'); a.op('a=c'); a.op('a++'); a.op('r=a %d' % R_INLEN)
-        a.op('halt')
+        if self.unpacker:
+            f = self.funcs['onbyte']
+            if len(f.params) != 1:
+                raise CompileError('onbyte takes the byte')
+            self.store_a(f.vars[f.params[0]]); a.jmp('jmp', f.entry)
+        else:
+            a.op('c=r %d' % R_INLEN); a.op('*c=a'); a.op('a=c'); a.op('a++'); a.op('r=a %d' % R_INLEN)
+            a.op('halt')
         a.put(leos)
         for name, v in self.ginit.items():
             if v:
@@ -907,13 +931,17 @@ class Compiler:
             # counter among them; only A and D, which hold nothing between runs
             lloop, ldone = a.label(), a.label()
             a.put(self.lreset)
+            if self.unpacker:
+                # the next segment starts after this one
+                a.op('a=r %d' % R_INLEN); a.op('b=r %d' % R_MBASE); a.op('a+=b'); a.op('r=a %d' % R_MBASE)
             a.put(lloop)
             a.op('a=d'); a.op('a== 0'); a.jmp('jt', ldone)
             a.op('d--'); a.op('a=0'); a.op('*d=a'); a.jmp('jmp', lloop)
             a.put(ldone)
             a.op('a=0')
             for r in range(min(self.alloc.r, 256)):
-                a.op('r=a %d' % r)
+                if not (self.unpacker and r == R_MBASE):
+                    a.op('r=a %d' % r)
             a.op('halt')
         return a.assemble()
 

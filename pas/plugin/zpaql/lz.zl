@@ -1,0 +1,103 @@
+"""The pjaz codecs' unpacker: the segment comes as zpaq's level 1 LZ77
+(libzpaq's LZBuffer, the -m1 method, with rb = 0) and goes out into M,
+where the decoder reads it as if it had come as it is. Each segment's
+codes start afresh (their own bits, padded to a byte at the end), but a
+match may reach back into the block's earlier segments: M keeps them
+(onbyte() in zpaqlc).
+
+    00, n, n bytes                 n literal bytes
+    mm, mmm, n, ll, q              a match of 4n + ll bytes, lo + 8 = 8mm + mmm,
+                                   at distance 2^lo + q (q: lo bits)
+
+n is written in interleaved Elias gamma (its leading 1 implied, each
+further bit after a 1, a 0 at the end); everything LSB first. One byte
+at a time: lzst says what the next bits are."""
+
+lzbits = 0      # bits not used yet, the oldest in bit 0
+lznb = 0        # how many
+lzst = 0        # 0 a code; 1, 2 a literal run's length; 3 its bytes;
+                # 4 mmm; 5, 6 a match's length; 7 ll; 8 q
+lzn = 0
+lzlo = 0
+lzpos = 0       # the segment's bytes so far
+
+
+def lzdrop(k):
+    global lzbits, lznb
+    lzbits = lzbits >> k
+    lznb -= k
+
+
+def onbyte(c):
+    global lzbits, lznb, lzst, lzn, lzlo, lzpos
+    lzbits = lzbits | (c << lznb)
+    lznb += 8
+    while True:
+        st = lzst
+        if st == 0:
+            if lznb < 2:
+                break
+            mm = lzbits & 3
+            lzdrop(2)
+            lzn = 1
+            if mm == 0:
+                lzst = 1
+            else:
+                lzlo = mm * 8 - 8
+                lzst = 4
+        elif st == 1 or st == 5:
+            if lznb < 1:
+                break
+            f = lzbits & 1
+            lzdrop(1)
+            if f:
+                lzst = st + 1
+            elif st == 1:
+                lzst = 3
+            else:
+                lzst = 7
+        elif st == 2 or st == 6:
+            if lznb < 1:
+                break
+            lzn = lzn * 2 + (lzbits & 1)
+            lzdrop(1)
+            lzst = st - 1
+        elif st == 3:
+            if lznb < 8:
+                break
+            M[lzpos] = lzbits & 255
+            lzpos += 1
+            lzdrop(8)
+            lzn -= 1
+            if lzn == 0:
+                lzst = 0
+        elif st == 4:
+            if lznb < 3:
+                break
+            lzlo += lzbits & 7
+            lzdrop(3)
+            if lzlo > 23:
+                error()
+            lzst = 5
+        elif st == 7:
+            if lznb < 2:
+                break
+            lzn = lzn * 4 + (lzbits & 3)
+            lzdrop(2)
+            lzst = 8
+        else:
+            if lznb < lzlo:
+                break
+            off = (1 << lzlo) | (lzbits & ((1 << lzlo) - 1))
+            lzdrop(lzlo)
+            # nothing before the block's first byte
+            if off > mbase() + lzpos:
+                error()
+            p = lzpos - off
+            e = lzpos + lzn
+            while lzpos < e:
+                M[lzpos] = M[p]
+                lzpos += 1
+                p += 1
+            lzst = 0
+    setinlen(lzpos)
