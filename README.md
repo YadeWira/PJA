@@ -115,6 +115,11 @@ archive per set:
 | arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 18.59%, 14.0 / 5.5 s |
 | generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 17.69%, 29.0 / 13.1 s |
 
+Since 0.5.0 the filter also takes the JPEGs that FlashPix, Picture It's
+and PhotoDraw's `.mix` and TIFF keep as tiles without their tables: 34
+such files of the sample corpus in one archive, 71.92% with 0.4.0 (no
+better than plain LZMA2), 59.55% now ([doc/LIBRARY.md](doc/LIBRARY.md)).
+
 It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
 8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),
 lossless JPEG, and JPEG-LS, along with the oddities real encoders leave.
