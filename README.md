@@ -25,7 +25,7 @@ Against [packJPG](https://github.com/YadeWira/packJPG) 5.0g and
 output against its input, every file decompressed and compared with the
 original, a file a tool does not take counted at its own size:
 
-| set | files | size | packJPG | Aqueous | PJA 0.1.0 |
+| set | files | size | packJPG | Aqueous | PJA 0.4.0 |
 |---|---|---|---|---|---|
 | photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 80.46% | **72.61%** |
 | corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 72.01% | **70.39%** |
@@ -51,42 +51,40 @@ Xeon E5-2697A v4, 64 threads, with other work running):
 | compress, 8 threads | — | **2.3 s** | 17.0 s | 10.2 s |
 | decompress, 8 threads | — | **0.7 s** | 8.1 s | 5.3 s |
 
-PJA is the smallest on every set but the generated one; Aqueous is many
+PJA's command, the same model since 0.1.0, is the smallest on every set but the generated one; Aqueous is many
 times faster, at 11% larger than PJA on photos (and takes far more than
 JPEG); packJPG uses one thread. 0.1.0 is 3.1% smaller than 0.0.8 on the
 photos and about 1.6 times as fast.
 
 Aqueous is an archiver; PJA reaches one through the
-[zpaq-std](https://github.com/YadeWira/zpaq-std) plugin (`-sa`). Both
-writing one archive per set, 8 threads, measured on 29/10/2026: Aqueous
-(commit `4117140`, `aqr -c -T 8 -l high`) and zpaq-std 1.9.0 with PJA
-0.0.8's plugin (`zpaq-std a set.zpaq FILES -sa -threads 8`). Every file
-came back byte for byte from zpaq-std; every Aqueous archive passed
-`aqr -t`. Times are to write the archive / to get it back:
+[zpaq-std](https://github.com/YadeWira/zpaq-std) plugin (`-sa`). Each
+writing one archive per set, 8 threads: Aqueous (commit `4117140`,
+`aqr -c -T 8 -l high`, 29/10/2026), and on 30/10/2026 zpaq-std 1.9.4 with
+PJA 0.4.0's plugin (`zpaq-std a set.zpaq FILES -sa -threads 8`) and the
+same with zpaq-std's next version, not released yet (its `exp/sa5`
+branch), the first to use the plugin's z codecs: the PJA streams of a
+block's files go through an LZ77 that reaches back into the files
+before, so what one file shares with another (the same image saved
+progressive and baseline, with and without restarts) is stored once.
+Every file came back byte for byte from zpaq-std; every Aqueous archive
+passed `aqr -t`. Times are to write the archive / to get it back:
 
-| set | Aqueous | zpaq-std + PJA 0.0.8 | `pja` alone, 0.0.8 |
-|---|---|---|---|
-| photos (151) | 80.46%, 2.3 / 0.7 s | **75.50%**, 33.1 / 15.0 s | 74.96% |
-| corpus (78) | 71.91%, 1.6 / 0.3 s | **71.29%**, 40.7 / 12.8 s | 72.08% |
-| MPO (6) | **78.94%**, 1.2 / 0.4 s | 80.68%, 26.8 / 8.7 s | 74.13% |
-| arithmetic-coded (244) | 85.71%, 0.2 / 0.01 s | **81.89%**, 1.4 / 0.1 s | 76.50% |
-| generated (640) | **33.96%**, 0.6 / 0.2 s | 83.60%, 16.2 / 6.6 s | 75.61% |
+| set | Aqueous | zpaq-std 1.9.4 + PJA 0.4.0 | zpaq-std with the z codecs (not released yet) | `pja` alone, 0.4.0 |
+|---|---|---|---|---|
+| photos (151) | 80.46%, 2.3 / 0.7 s | 75.50%, 32.5 / 16.0 s | **75.34%**, 35.4 / 15.0 s | 72.61% |
+| corpus (78) | 71.91%, 1.6 / 0.3 s | 71.29%, 29.6 / 11.0 s | **70.66%**, 31.5 / 11.3 s | 70.39% |
+| MPO (6) | **78.94%**, 1.2 / 0.4 s | 80.68%, 22.8 / 7.4 s | 80.62%, 24.1 / 7.2 s | 73.38% |
+| arithmetic-coded (244) | 85.71%, 0.2 / 0.01 s | 71.26%, 7.7 / 3.0 s | **18.59%**, 14.0 / 5.5 s | 74.59% |
+| generated (640) | 33.96%, 0.6 / 0.2 s | 72.31%, 18.3 / 6.9 s | **17.69%**, 29.0 / 13.1 s | 73.73% |
 
-zpaq-std + PJA is smaller on photos, the corpus and arithmetic-coded
-JPEG; Aqueous is 10 to 20 times faster, and far smaller on the generated
-set, whose 640 files are variants of 12 images that it codes against each
-other. Inside zpaq-std, PJA decodes through its ZPAQL program, which is
-what makes it slower.
-
-Since 0.4.0 the plugin also has z codecs (`pjaz`, `pjalsz`, `pjaxz`,
-`pjallz`, `pjalsxz`): zpaq-std passes the PJA streams of a block's files
-through an LZ77 that reaches back into the files before, and the z
-decoder undoes it, so what one file shares with another (the same image
-saved progressive and baseline, with and without restarts) is stored
-once. Measured by zpaq-std with them (`-sat`, a z codec only where it
-wins): the arithmetic-coded set down to 18.8% and the generated one to
-17.9%, from 71.3% and 72.3%; photos, corpus and MPO a little smaller
-([doc/CODEC.md](doc/CODEC.md#the-z-codecs-lz77-across-a-blocks-files-for-zpaq-std-30102026)).
+With the z codecs zpaq-std + PJA is the smallest archive on every set but
+the MPO, and on the arithmetic-coded and generated sets, whose files are
+variants of a few images, it stores each image about once. Aqueous is 10
+to 50 times faster. Inside zpaq-std, PJA decodes through its ZPAQL
+program, which is what makes it slower; `pja` alone (each file on its
+own, nothing shared) is still the smallest on photos and MPO. The z
+codecs' numbers will be measured again with zpaq-std's release
+([how they work](doc/CODEC.md#the-z-codecs-lz77-across-a-blocks-files-for-zpaq-std-30102026)).
 
 ## In 7-Zip and 7-Zip-zstd
 
@@ -109,13 +107,13 @@ needs the plugin too
 ([doc/LIBRARY.md](doc/LIBRARY.md)). With 7-Zip 25 on Linux, 8 threads, one
 archive per set:
 
-| set | 7-Zip + PJA | Aqueous | zpaq-std + PJA 0.0.8 |
+| set | 7-Zip + PJA | Aqueous | zpaq-std + PJA 0.4.0, z codecs (not released yet) |
 |---|---|---|---|
-| photos (151) | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 75.50%, 33.1 / 15.0 s |
-| corpus (78) | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 71.29%, 40.7 / 12.8 s |
-| MPO (6) | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 80.68%, 26.8 / 8.7 s |
-| arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 81.89%, 1.4 / 0.1 s |
-| generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 83.60%, 16.2 / 6.6 s |
+| photos (151) | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 75.34%, 35.4 / 15.0 s |
+| corpus (78) | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 70.66%, 31.5 / 11.3 s |
+| MPO (6) | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 80.62%, 24.1 / 7.2 s |
+| arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 18.59%, 14.0 / 5.5 s |
+| generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 17.69%, 29.0 / 13.1 s |
 
 It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
 8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),
