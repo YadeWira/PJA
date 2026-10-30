@@ -40,7 +40,9 @@ for f in pjafilter pja7z; do
 done
 CG=; [ -n "$PIC" ] && CG=-Cg
 echo "units from $PAS, objects in $OUT/c"
+# MSYS would take "-Fud:/..." for a list of paths (the colon) and rewrite
+# it: no conversion for FreePascal's arguments
 # shellcheck disable=SC2086
-$FPC -O3 -dPJA_FAST $CG -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja.$EXT" "$HERE/pjalib.pas" \
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' $FPC -O3 -dPJA_FAST $CG -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja.$EXT" "$HERE/pjalib.pas" \
   > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
 echo "$OUT/pja.$EXT"
