@@ -10,7 +10,7 @@ libraries.
 | Latest release | [![Release][relBadge]][relLink] |
 
 ```sh
-pja a photo.jpg          # -> photo.pja, about 25% smaller
+pja a photo.jpg          # -> photo.pja, about 27% smaller
 pja x photo.pja          # -> photo.jpg, the same file byte for byte
 ```
 
@@ -25,14 +25,14 @@ Against [packJPG](https://github.com/YadeWira/packJPG) 5.0g and
 output against its input, every file decompressed and compared with the
 original, a file a tool does not take counted at its own size:
 
-| set | files | size | packJPG | Aqueous | PJA 0.0.8 |
+| set | files | size | packJPG | Aqueous | PJA 0.1.0 |
 |---|---|---|---|---|---|
-| photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 80.46% | **74.96%** |
-| corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | **72.01%** | 72.08% |
-| MPO (stereo pairs) | 6 | 41.0 MB | 86.54% | 78.95% | **74.13%** |
-| arithmetic-coded JPEG | 244 | 6.7 MB | 78.52% | 85.73% | **76.50%** |
-| generated JPEGs | 640 | 18.3 MB | 77.48% | **33.96%**¹ | 75.61% |
-| 12-bit JPEG | 10 | 83 KB | does not take them | 92.55% | **88.34%** |
+| photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 80.46% | **72.61%** |
+| corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 72.01% | **70.39%** |
+| MPO (stereo pairs) | 6 | 41.0 MB | 86.54% | 78.95% | **73.38%** |
+| arithmetic-coded JPEG | 244 | 6.7 MB | 78.52% | 85.73% | **74.59%** |
+| generated JPEGs | 640 | 18.3 MB | 77.48% | **33.96%**¹ | 73.73% |
+| 12-bit JPEG | 10 | 83 KB | does not take them | 92.55% | **88.14%** |
 | lossless JPEG | 36 | 390 KB | does not take them | 96.54% | **96.04%** |
 
 ¹ Aqueous is an archiver: it codes a set as one archive and its files
@@ -43,17 +43,18 @@ decoders, about 42 KB.
 And how fast, on the 151 photos, every tool verifying what it writes (two
 Xeon E5-2697A v4, 64 threads, with other work running):
 
-| | packJPG 5.0g | Aqueous | PJA `--fast` | PJA (full model) |
+| | packJPG 5.0g | Aqueous | PJA 0.0.8 | PJA 0.1.0 |
 |---|---|---|---|---|
-| compressed | 60,084,653 | 63,098,952 | 59,776,460 | **58,788,017** |
-| compress, 1 thread | 69.6 s | **12.5 s** | 77.4 s | 118.6 s |
-| decompress, 1 thread | 34.7 s | **4.4 s** | 31.2 s | 57.3 s |
-| compress, 8 threads | — | **2.3 s** | 9.9 s | 17.0 s |
-| decompress, 8 threads | — | **0.7 s** | 4.6 s | 8.1 s |
+| compressed | 60,084,653 | 63,098,952 | 58,788,017 | **56,939,009** |
+| compress, 1 thread | 69.6 s | **12.5 s** | 118.6 s | 73.7 s |
+| decompress, 1 thread | 34.7 s | **4.4 s** | 57.3 s | 36.2 s |
+| compress, 8 threads | — | **2.3 s** | 17.0 s | 10.2 s |
+| decompress, 8 threads | — | **0.7 s** | 8.1 s | 5.3 s |
 
-PJA is the smallest on photos, MPOs, arithmetic-coded, 12-bit and lossless
-JPEG; Aqueous is many times faster, at 7% larger than PJA on photos (and takes
-far more than JPEG); packJPG uses one thread.
+PJA is the smallest on every set but the generated one; Aqueous is many
+times faster, at 11% larger than PJA on photos (and takes far more than
+JPEG); packJPG uses one thread. 0.1.0 is 3.1% smaller than 0.0.8 on the
+photos and about 1.6 times as fast.
 
 Aqueous is an archiver; PJA reaches one through the
 [zpaq-std](https://github.com/YadeWira/zpaq-std) plugin (`-sa`). Both

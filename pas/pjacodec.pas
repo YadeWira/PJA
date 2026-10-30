@@ -44,7 +44,7 @@ uses SysUtils, pjajpeg, pjajls;
 
 const
   { PJA's release: the command and the zpaq-std plugin say this one }
-  PJA_VERSION = '0.0.8';
+  PJA_VERSION = '0.1.0';
   { 5 since 0.0.1: the predictions' arithmetic made 32-bit (pjamodel.W32),
     so a ZPAQL decoder can follow it exactly; 4 streams decoded with the
     64-bit one and are no longer read }
