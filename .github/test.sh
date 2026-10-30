@@ -32,7 +32,8 @@ $FPC -O3 -dPJA_FAST $PIC -Fupas -Fipas -Fupas/plugin -Fipas/plugin -FU"$OUT/pu" 
 "$OUT/pja$EXE" --version
 
 echo "== libpja"
-LIBF=$(sh pas/lib/build.sh "$OUT/lib" | tail -1) || { echo "FAIL: libpja did not build"; exit 1; }
+sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; echo "FAIL: libpja did not build"; exit 1; }
+LIBF=$(tail -1 "$OUT/lib.log")
 RP=; case "$(uname -s)" in Linux) RP="-Wl,-rpath,$OUT/lib" ;; esac
 # shellcheck disable=SC2086
 ${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $RP
@@ -40,9 +41,11 @@ DYLD_LIBRARY_PATH="$OUT/lib" "$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* REA
   || { cat "$OUT/lib/test.txt"; echo "FAIL: libpja's test"; exit 1; }
 tail -4 "$OUT/lib/test.txt"
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
-# plugin in its Codecs folder, an archive written and extracted
-if [ -f /usr/lib/7zip/7z.so ] && [ -x /usr/lib/7zip/7z ]; then
-  Z="$OUT/7z"; rm -rf "$Z"; cp -r /usr/lib/7zip "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
+# plugin in its Codecs folder (the same word size as the library), an
+# archive written and extracted
+case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN= ;; *) SEVEN=/usr/lib/7zip ;; esac
+if [ -n "$SEVEN" ] && [ -f "$SEVEN/7z.so" ] && [ -x "$SEVEN/7z" ]; then
+  Z="$OUT/7z"; rm -rf "$Z"; cp -r "$SEVEN" "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
   cp "$LIBF" "$Z/Codecs/"
   cp tests/jpg/* tests/jls/* README.md "$OUT/7in/"
   "$Z/7z" i | grep -q '37F01 PJA' || { echo "FAIL: 7-Zip does not list PJA"; exit 1; }

@@ -10,11 +10,15 @@
 # target (pas/build_c.sh).
 set -eu
 OUT=${1:?usage: build.sh <out dir>}
-HERE=$(cd "$(dirname "$0")" && pwd); PAS=$(dirname "$HERE")
+# a folder's absolute path; on Windows (MSYS, Git Bash) in Windows' form,
+# since FreePascal gets it glued to an option (-Fu...), which MSYS does not
+# translate
+apath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
+HERE=$(apath "$(dirname "$0")"); PAS=$(dirname "$HERE")
 FPC=${FPC:-fpc}
 CC=${CC:-cc}
 mkdir -p "$OUT/c" "$OUT/u"
-OUT=$(cd "$OUT" && pwd)
+OUT=$(apath "$OUT")
 case "$CC $FPC" in
   *mingw*|*-Twin*) PIC=; EXT=dll ;;
   *) PIC=-fPIC; EXT=so ;;

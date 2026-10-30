@@ -83,7 +83,7 @@ function pja7z_GetModuleProp(prop: LongWord; v: Pointer): HRESULT; cdecl; extern
 {$ifdef windows}
 function SysAllocStringByteLen(s: Pointer; len: LongWord): Pointer; stdcall; external 'oleaut32.dll';
 
-function Bstr(bytes: Pointer; len: LongWord): Pointer; cdecl;
+function MakeBstr(bytes: Pointer; len: LongWord): Pointer; cdecl;
 begin
   Result := SysAllocStringByteLen(bytes, len);
 end;
@@ -92,7 +92,7 @@ function malloc(size: SizeUInt): Pointer; cdecl; external 'c';
 
 { 7-Zip's BSTR outside Windows (CPP/Common/MyWindows.cpp): from malloc, a
   32-bit byte count, the bytes, and two zero bytes; 7-Zip frees it }
-function Bstr(bytes: Pointer; len: LongWord): Pointer; cdecl;
+function MakeBstr(bytes: Pointer; len: LongWord): Pointer; cdecl;
 var p: PByte;
 begin
   p := malloc(SizeUInt(len) + 4 + 4);
@@ -104,7 +104,7 @@ begin
 end;
 {$endif}
 
-function Alloc(size: SizeUInt): Pointer; cdecl;
+function HostAlloc(size: SizeUInt): Pointer; cdecl;
 begin
   try
     Result := GetMem(size);
@@ -113,7 +113,7 @@ begin
   end;
 end;
 
-procedure Release(p: Pointer); cdecl;
+procedure HostRelease(p: Pointer); cdecl;
 begin
   FreeMem(p);
 end;
@@ -122,7 +122,7 @@ end;
 function Hand(const b: TBytes; out output: PByte; out outSize: SizeUInt): Boolean;
 begin
   outSize := Length(b);
-  output := Alloc(outSize + 1);
+  output := HostAlloc(outSize + 1);
   Result := output <> nil;
   if Result and (outSize > 0) then Move(b[0], output^, outSize);
 end;
@@ -176,7 +176,7 @@ end;
 
 { the jobs on up to `threads` threads at once; when there are fewer jobs
   than threads, each file's bands share what is left }
-procedure Run(jobs: PJob; n, encode, threads: LongInt); cdecl;
+procedure RunJobs(jobs: PJob; n, encode, threads: LongInt); cdecl;
 var w: array of TBatch; k, nw, per: Integer; next: LongInt;
 begin
   if n <= 0 then Exit;
@@ -305,13 +305,13 @@ exports
 
 begin
   IsMultiThread := True;
-  host.alloc := @Alloc;
-  host.release := @Release;
-  host.run := @Run;
+  host.alloc := @HostAlloc;
+  host.release := @HostRelease;
+  host.run := @RunJobs;
   pjafilter_host(host);
-  host7z.bstr := @Bstr;
-  host7z.alloc := @Alloc;
-  host7z.release := @Release;
+  host7z.bstr := @MakeBstr;
+  host7z.alloc := @HostAlloc;
+  host7z.release := @HostRelease;
   host7z.threads := CpuCount;
   if host7z.threads > 8 then host7z.threads := 8;
   pja7z_host(host7z);
