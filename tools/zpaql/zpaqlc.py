@@ -40,10 +40,61 @@ The source is a subset of Python, read with the ast module:
 Variables live in R, or in H when R is full: each function has its own
 fixed places (no recursion, so nothing needs a stack). A call stores a
 call-site number, long-jumps to the function and comes back through a
-comparison chain on that number."""
+comparison chain on that number.
+
+compile_source(..., opt=True), for programs not frozen yet: each constant
+as the shortest sequence found (a= 255 a+= 5 for 260, a= 255 a+=a a++ for
+511), and in the start-up code the constants that are near the one before
+are built from it, kept in A or B (the arrays' places, one after another).
+Without it the output is byte for byte what it always was."""
 import ast, sys
 
 M32 = 0xFFFFFFFF
+
+
+def ops_size(ops):
+    return sum(2 if ' ' in o else 1 for o in ops)
+
+
+def const_bytes(k):
+    """k into A a byte at a time (the frozen programs' way)."""
+    if k < 256:
+        return ['a= %d' % k]
+    if k == M32:
+        return ['a=0', 'a!']
+    bs = [(k >> s) & 255 for s in (24, 16, 8, 0)]
+    i = 0
+    while bs[i] == 0:
+        i += 1
+    ops = ['a= %d' % bs[i]]
+    shift = 0
+    for b in bs[i + 1:]:
+        shift += 8
+        if b:
+            ops += ['a<<= %d' % shift, 'a|= %d' % b]; shift = 0
+    if shift:
+        ops.append('a<<= %d' % shift)
+    return ops
+
+
+def run_ops(ops, known=None):
+    """What A holds after ops (the ones const_a uses); to check them."""
+    a = known.get('a') if known else None
+    for o in ops:
+        t = o.split()
+        n = int(t[1]) if len(t) == 2 else None
+        if o == 'a=b':
+            a = known['b']
+        elif t[0] == 'a=':
+            a = n
+        elif o == 'a=0':
+            a = 0
+        else:
+            a = {'a!': lambda: ~a, 'a++': lambda: a + 1, 'a--': lambda: a - 1, 'a+=a': lambda: 2 * a,
+                 'a<<=': lambda: a << n, 'a|=': lambda: a | n, 'a+=': lambda: a + n,
+                 'a-=': lambda: a - n}[t[0]]()
+        a &= M32
+    return a
 
 
 class CompileError(Exception):
@@ -175,7 +226,10 @@ class Func:
 
 
 class Compiler:
-    def __init__(self, tree):
+    def __init__(self, tree, opt=False):
+        self.opt = opt        # shortest constants, known A and B reused (new programs only)
+        self.known = None     # with opt, in straight-line code: {'a': value, 'b': value}
+        self.cbest = {}
         self.asm = Asm()
         self.alloc = Alloc()
         self.consts = {}
@@ -349,25 +403,70 @@ class Compiler:
 
     # ----------------------------------------------------------- moves
 
+    def const_best(self, t, busy=frozenset()):
+        """The shortest ops found that leave t in A, from nothing known."""
+        if t in self.cbest:
+            return self.cbest[t]
+        if t == 0:
+            return ['a=0']
+        if t < 256:
+            return ['a= %d' % t]
+        busy = busy | {t}
+        cands = []
+        def via(u, ops):
+            if 0 <= u <= M32 and u not in busy:
+                cands.append(self.const_best(u, busy) + ops)
+        if t >> 31:
+            via(~t & M32, ['a!'])
+        tz = (t & -t).bit_length() - 1
+        if tz:
+            via(t >> tz, ['a+=a'] if tz == 1 else ['a<<= %d' % tz])
+        else:
+            via(t - 1, ['a++']); via(t + 1, ['a--'])
+        lo = t & 255
+        if lo:
+            via(t - lo, ['a|= %d' % lo]); via(t + 256 - lo, ['a-= %d' % (256 - lo)])
+        if t < 511:
+            cands.append(['a= 255', 'a+= %d' % (t - 255)])
+        cands.append(const_bytes(t))
+        best = min(cands, key=ops_size)
+        self.cbest[t] = best
+        return best
+
     def const_a(self, k):
         k &= M32
         a = self.asm
-        if k < 256:
-            a.op('a= %d' % k); return
-        if k == M32:
-            a.op('a=0'); a.op('a!'); return
-        bs = [(k >> s) & 255 for s in (24, 16, 8, 0)]
-        i = 0
-        while bs[i] == 0:
-            i += 1
-        a.op('a= %d' % bs[i])
-        shift = 0
-        for b in bs[i + 1:]:
-            shift += 8
-            if b:
-                a.op('a<<= %d' % shift); a.op('a|= %d' % b); shift = 0
-        if shift:
-            a.op('a<<= %d' % shift)
+        if self.opt:
+            ops = self.const_best(k)
+            kn = self.known
+            if kn is not None:
+                for reg, pre in (('a', []), ('b', ['a=b'])):
+                    v = kn.get(reg)
+                    if v is None:
+                        continue
+                    d = (k - v) & M32
+                    if d == 0:
+                        alt = []
+                    elif d == 1 or d == M32:
+                        alt = ['a++' if d == 1 else 'a--']
+                    elif d < 256 or d > M32 - 255:
+                        alt = ['a+= %d' % d if d < 256 else 'a-= %d' % (M32 + 1 - d)]
+                    else:
+                        continue
+                    if ops_size(pre + alt) < ops_size(ops):
+                        ops = pre + alt
+            if run_ops(ops, kn) != k:
+                raise CompileError('internal: constant %d' % k)
+            for o in ops:
+                a.op(o)
+            if kn is not None:
+                kn['a'] = k
+                # a long one: kept in B too, for the nearby ones that follow
+                if ops_size(ops) > 3 and kn.get('b') != k:
+                    a.op('b=a'); kn['b'] = k
+            return
+        for o in const_bytes(k):
+            a.op(o)
 
     def d_to(self, n):
         """D := word n of H (clobbers A when n > 255)."""
@@ -392,7 +491,11 @@ class Compiler:
             if s.n < 256:
                 self.asm.op('d= %d' % s.n)
             else:
+                kn = self.known
+                v = kn and kn.get('a')
                 self.asm.op('r=a %d' % R_T1); self.const_a(s.n); self.asm.op('d=a'); self.asm.op('a=r %d' % R_T1)
+                if kn is not None:
+                    kn['a'] = v
             self.asm.op('*d=a')
 
     def load_b(self, s):
@@ -902,6 +1005,8 @@ class Compiler:
             a.op('c=r %d' % R_INLEN); a.op('*c=a'); a.op('a=c'); a.op('a++'); a.op('r=a %d' % R_INLEN)
             a.op('halt')
         a.put(leos)
+        if self.opt:
+            self.known = {}
         for name, v in self.ginit.items():
             if v:
                 self.const_a(v); self.store_a(self.globals[name])
@@ -917,8 +1022,11 @@ class Compiler:
             if name not in used:
                 continue
             self.load_a(self.arrays[name][0]); a.op('d=a')
+            if self.known is not None:
+                self.known['a'] = None
             for v in vals:
                 self.const_a(v); a.op('*d=a'); a.op('d++')
+        self.known = None
         a.jmp('jmp', self.funcs['main'].entry)
         # main first, then the rest, in the order written
         order = ['main'] + [n for n in self.funcs if n != 'main']
@@ -946,9 +1054,9 @@ class Compiler:
         return a.assemble()
 
 
-def compile_source(src, name='zl', ph='24', pm='$1+1'):
+def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False):
     tree = ast.parse(src)
-    c2 = Compiler(tree)
+    c2 = Compiler(tree, opt)
     lines, size = c2.program()
     text = ['comp 0 0 %s %s 0' % (ph, pm), 'hcomp', '  halt', 'pcomp %s ;' % name]
     text += ['  ' + l for l in lines]
