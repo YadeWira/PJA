@@ -1696,3 +1696,23 @@ plugin and the command never set them). 34 containers in one 7-Zip
 archive: 71.92% -> 59.55% (FlashPix 12 to 17% smaller, the .mix 15 to 63%,
 a TIFF 46%); photos, corpus and arithmetic sets give the same archives as
 0.4.0, byte for byte.
+
+The quirks came next, as repairs rather than a byte-by-byte patch: a
+file PJA refuses for a restart numbered wrong (`BadRst` at an RST: the
+scan's RSTs from there numbered again, D0 to D7 in turn) or for bytes
+between a scan and the next marker (`DataAfterScan`: taken out) is
+repaired, one slip at a time as the parser meets them, compressed as any
+JPEG, and its repairs kept: stream version 6, PATCH (flag bit 3, alone,
+at the top): the edits (where in the repaired file, how many bytes go,
+which take their place) and the repaired file's stream. Decoding applies
+them back; Compress verifies the whole, as always. Only `Compress` with
+parts (the command, libpja) repairs; version 5 and the zpaq-std plugin
+do not. `pja a` shows `(repaired: BadRst@19896)`.
+
+Of the 26 quirky JPEGs cut from the corpus, 14 are repaired: Second
+Nature's slide shows (RSTs numbered from RST4: 98.5% as bytes, 92.2% now)
+and Xara's (a 00 before the EOI: 98.6% -> 67 to 83%); every one back. The
+other 12 (scans that end early, bad codes, an SOS that does not add up)
+look damaged or cut wrong, and still go as bytes. New samples
+`restarts_misnumbered.jpg` and `byte_before_eoi.jpg`.
+

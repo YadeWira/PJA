@@ -333,10 +333,13 @@ begin
   if (Length(pja) > 5) and ((pja[5] and FLAG_STORED) <> 0) then Result := '  (stored as is)' else Result := '';
 end;
 
-{ PJA did not take it as a JPEG, and it went as bytes: why }
+{ PJA did not take it as a JPEG, and it went as bytes, or it repaired an
+  encoder's slip first: why }
 function BytesNote(const r: TPackResult): string;
 begin
-  if r.codec.asBytes then Result := '  (as bytes: ' + r.codec.jpeg.Text + ')' else Result := '';
+  if r.codec.asBytes then Result := '  (as bytes: ' + r.codec.jpeg.Text + ')'
+  else if r.codec.repaired then Result := '  (repaired: ' + r.codec.jpeg.Text + ')'
+  else Result := '';
 end;
 
 procedure CompressOne(const f: string);
