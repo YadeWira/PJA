@@ -1669,3 +1669,30 @@ block now carries some 17 KB less): arithmetic 4,763,128 -> 1,259,556 bytes, gen
 13,217,825 -> 3,268,732; the MPO, the corpus and the photos a little smaller,
 none larger. The suite runs each z decoder on a block of two files and the
 first again, the third all matches into the first.
+
+## JPEGs without their tables, in libpja (30/10/2026)
+
+Stage E of the JPEG family plan was a generic patch for JPEGs with
+encoder quirks. To find what real files need, the JPEGs stored inside
+the sample corpus' other files were cut out (cover art, video, PDF, TIFF,
+FlashPix, resources, thumbnails): 19,054 different ones, 556 MB. PJA
+took half of them; of the 9,329 it took as bytes, 9,303 were
+`MissingTable`: "abbreviated" JPEGs without DQT and DHT, the tiles of
+FlashPix (`.fpx`), Picture It's and PhotoDraw's `.mix` and TIFF, whose
+tables the container keeps once, as a JPEG of tables only. The quirks a
+patch would cover were 26 files, about 2 MB: a 00 byte before the EOI
+(Xara, 9), restarts numbered wrong (4), scans that end early.
+
+So the tiles come first, in the filter (doc/LIBRARY.md): it gives a tile
+the tables of the last JPEG of tables (or of the first one ahead: FlashPix
+writes them after its tiles), and PJA codes the tile as the JPEG it would
+be with them after its SOI. Coding those tables in each tile's raw bytes
+cost more than a 2 KB tile gains, so CodeRaw learnt "given tables"
+(pjamodel.SetGivenTables, set by libpja's pool for that job only): one
+direct bit, 1 when the raw bytes have them right after the SOI, and then
+the raw bytes are coded without them and put back when decoding. Without
+given tables nothing changes: no bit, the same streams (the zpaq-std
+plugin and the command never set them). 34 containers in one 7-Zip
+archive: 71.92% -> 59.55% (FlashPix 12 to 17% smaller, the .mix 15 to 63%,
+a TIFF 46%); photos, corpus and arithmetic sets give the same archives as
+0.4.0, byte for byte.

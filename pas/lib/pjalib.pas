@@ -44,6 +44,8 @@ type
     outSize: SizeUInt;
     ok, threads: LongInt;
     done: LongInt;
+    given: PByte;            { a JPEG without tables of its own: the ones put after its SOI }
+    givenSize: SizeUInt;
   end;
   PJob = ^TJob;
   { pjafilter.c's host_t }
@@ -148,6 +150,7 @@ procedure RunJob(var j: TJob; encode: Boolean; threads: Integer);
 var b: TBytes; r: TCodecResult;
 begin
   j.output := nil; j.outSize := 0; j.ok := 0;
+  SetGivenTables(InBytes(j.given, j.givenSize));
   try
     if encode then begin
       r := Compress(InBytes(j.input, j.size), b, True, threads, False, True, True);
@@ -160,6 +163,7 @@ begin
     if j.output <> nil then FreeMem(j.output);
     j.output := nil; j.ok := 0;
   end;
+  SetGivenTables(nil);
 end;
 
 type

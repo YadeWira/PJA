@@ -7,6 +7,10 @@
    together into one stream with bytes around them, through the filter in
    read sizes of 1 byte to 1 MiB, and back: the same bytes, every time. A
    damaged filter stream must give an error or other bytes, never a crash.
+   And the first Huffman JPEG cut in two as FlashPix keeps its tiles: a JPEG
+   of its tables only, and the JPEG without them, before and after it; the
+   filter must take those (smaller than with the tables broken) and give
+   them back.
    Prints a line per check and "N checks, 0 failures" at the end. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +59,70 @@ static unsigned char *slurp(const char *name, size_t *n) {
   return d;
 }
 
+/* d[0..n), a Huffman JPEG: its DQT and DHT segments as a JPEG of tables
+   only (*t, *tn) and the rest as a JPEG without them (*a, *an); 0 if it
+   has no DHT before its first scan */
+static int split_tables(const unsigned char *d, size_t n, unsigned char **t, size_t *tn,
+                        unsigned char **a, size_t *an) {
+  if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return 0;
+  *t = malloc(n + 4); *a = malloc(n);
+  size_t i = 2, ti = 2, ai = 2;
+  int dht = 0;
+  (*t)[0] = (*a)[0] = 0xFF; (*t)[1] = (*a)[1] = 0xD8;
+  while (i + 4 <= n && d[i] == 0xFF && d[i + 1] != 0xDA) {
+    unsigned char m = d[i + 1];
+    size_t len = 2 + ((size_t)d[i + 2] << 8 | d[i + 3]);
+    if (i + len > n || (m >= 0xC9 && m <= 0xCF && m != 0xCC)) break;   /* arithmetic: none */
+    if (m == 0xDB || m == 0xC4) { memcpy(*t + ti, d + i, len); ti += len; dht |= m == 0xC4; }
+    else { memcpy(*a + ai, d + i, len); ai += len; }
+    i += len;
+  }
+  if (!dht || i + 4 > n || d[i + 1] != 0xDA) { free(*t); free(*a); return 0; }
+  memcpy(*a + ai, d + i, n - i); ai += n - i;
+  (*t)[ti++] = 0xFF; (*t)[ti++] = 0xD9;
+  *tn = ti; *an = ai;
+  return 1;
+}
+
+/* JPEGs without tables, as FlashPix keeps them: one before its JPEG of
+   tables, one after; the filter, both versions, against the same stream
+   with that JPEG of tables broken */
+static void abbreviated(const char *name) {
+  size_t n, tn, an;
+  unsigned char *d = slurp(name, &n), *t, *a;
+  if (!d || !split_tables(d, n, &t, &tn, &a, &an)) { free(d); return; }
+  size_t cn = 0;
+  unsigned char *c = malloc(3 * 100 + tn + 2 * an);
+  memset(c, 0x11, 100); cn += 100;
+  memcpy(c + cn, a, an); cn += an;
+  memset(c + cn, 0x22, 100); cn += 100;
+  size_t at = cn;
+  memcpy(c + cn, t, tn); cn += tn;
+  memset(c + cn, 0x33, 100); cn += 100;
+  memcpy(c + cn, a, an); cn += an;
+  size_t sizes[2][2];
+  for (int broken = 0; broken < 2; broken++) {
+    c[at + 1] = broken ? 0x00 : 0xD8;
+    for (int v = 1; v <= 2; v++) {
+      src_t in = {c, cn, 0, 4096};
+      dst_t e = {0}, eb = {0}, back = {0};
+      int r = v == 1 ? pja_filter_encode(rd, &in, wr, &e, 2) : pja_filter2_encode(rd, &in, wr, &e, wr, &eb, 2);
+      check(r == PJA_OK, "abbreviated: filter encode", name);
+      src_t ia = {e.d, e.n, 0, 4096}, ib = {eb.d, eb.n, 0, 4096};
+      r = v == 1 ? pja_filter_decode(rd, &ia, wr, &back, 2) : pja_filter2_decode(rd, &ia, rd, &ib, wr, &back, 2);
+      check(r == PJA_OK && back.n == cn && memcmp(back.d, c, cn) == 0, "abbreviated: filter round trip", name);
+      sizes[broken][v - 1] = e.n + eb.n;
+      free(e.d); free(eb.d); free(back.d);
+    }
+  }
+  /* smaller even with the 02 record's copy of the tables, which the
+     archiver's compressor finds next to the JPEG of tables itself */
+  check(sizes[0][0] < sizes[1][0] && sizes[0][1] < sizes[1][1], "abbreviated: taken", name);
+  printf("abbreviated JPEGs (%s): %zu bytes -> %zu, %zu + B; with the tables broken %zu, %zu\n",
+         name, cn, sizes[0][0], sizes[0][1], sizes[1][0], sizes[1][1]);
+  free(c); free(t); free(a); free(d);
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", pja_version());
@@ -92,6 +160,12 @@ int main(int argc, char **argv) {
     free(d);
   }
   printf("%zu of %d files taken: %zu -> %zu bytes as .pja\n", taken, argc - 1, insum, outsum);
+  for (int a = 1, done = 0; a < argc && !done; a++) {
+    size_t n, tn, an;
+    unsigned char *d = slurp(argv[a], &n), *t, *ab;
+    if (d && split_tables(d, n, &t, &tn, &ab, &an)) { free(t); free(ab); abbreviated(argv[a]); done = 1; }
+    free(d);
+  }
   static const size_t steps[] = {1 << 20, 4096, 1000, 7, 1};
   dst_t enc = {0};
   for (unsigned s = 0; s < sizeof steps / sizeof steps[0]; s++) {

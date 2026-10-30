@@ -95,6 +95,11 @@ function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind
   FreePascal does not free when a thread ends). Each thread that codes calls
   it before it ends: the library starts threads on every call. }
 procedure ReleaseThreadModels;
+{ libpja's JPEGs without tables of their own (pjafilter.c): the tables the
+  filter put after the SOI of the one this thread codes now, which CodeRaw
+  then leaves out of the stream (a bit says it did) and puts back when
+  decoding; nil for every other file. Both sides set the same. }
+procedure SetGivenTables(const t: TBytes);
 
 type
   { What version 7's C code (pjav7c.c) reads: the counters and the mixers'
@@ -609,7 +614,45 @@ begin
   end;
 end;
 
+threadvar
+  GivenTables: TBytes;
+
+procedure SetGivenTables(const t: TBytes);
+begin
+  GivenTables := t;
+end;
+
+function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean; forward;
+
 function CodeRaw(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
+var given, rest: TBytes; g: SizeInt; f: Int64;
+begin
+  given := GivenTables;
+  g := Length(given);
+  if g = 0 then Exit(CodeRawBytes(cd, raw, maxLen));
+  { tables given: one bit, 1 when the raw bytes have them right after the
+    SOI and they are left out }
+  if cd.encoding then begin
+    if (Length(raw) >= 2 + g) and CompareMem(@raw[2], @given[0], g) then f := 1 else f := 0;
+    cd.Direct(Cardinal(f), 1);
+    if f = 0 then Exit(CodeRawBytes(cd, raw, maxLen));
+    rest := Copy(raw, 0, 2);
+    SetLength(rest, Length(raw) - g);
+    if Length(raw) > 2 + g then Move(raw[2 + g], rest[2], Length(raw) - 2 - g);
+    Result := CodeRawBytes(cd, rest, maxLen);
+  end else begin
+    f := cd.Direct(0, 1);
+    Result := CodeRawBytes(cd, raw, maxLen);
+    if not Result or (f = 0) then Exit;
+    if (Length(raw) < 2) or (Length(raw) + g > maxLen) then Exit(False);
+    rest := raw;
+    SetLength(raw, Length(rest) + g);
+    Move(given[0], raw[2], g);
+    if Length(rest) > 2 then Move(rest[2], raw[2 + g], Length(rest) - 2);
+  end;
+end;
+
+function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
 var mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
     o0, o1, o2: TBits;
 begin
@@ -1365,6 +1408,7 @@ procedure ReleaseThreadModels;
 begin
   RawO0 := nil; RawO1 := nil; RawO2 := nil;
   RawDirty := False;
+  GivenTables := nil;
   PoolLuma := Default(TCoefModel);
   PoolChroma := Default(TCoefModel);
 end;

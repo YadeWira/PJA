@@ -53,6 +53,25 @@ not get smaller stays raw; so does any file over 256 MiB. The JPEGs inside
 a JPEG (EXIF thumbnails) are inside its segments, so they go with it; an
 MPO's images, one after another, are found one by one.
 
+### JPEGs without their tables (0.5.0)
+
+Some formats keep an image as many small JPEGs that share their tables:
+FlashPix (`.fpx`), Picture It's and PhotoDraw's `.mix` (built on it), and
+TIFF's JPEG compression. The tables (DQT, DHT) are written once, as a JPEG
+of tables only (`FF D8`, the segments, `FF D9`; TIFF's JPEGTables), and
+each tile is an "abbreviated" JPEG without them, which no decoder, PJA
+included, reads alone. The filter gives such a JPEG the last JPEG of tables
+it saw, or, before the first one, the first ahead of it (up to 16 MiB on:
+FlashPix writes them after the tiles); PJA codes it as if the tables were
+after its SOI, and leaves them out of its stream (pjamodel.SetGivenTables),
+so a tile of 2 KB still gains. The JPEGs of tables themselves stay raw.
+
+34 such files of the sample corpus (FlashPix, Picture It, PhotoDraw, TIFF;
+25.3 MB) in one 7-Zip archive, `-m0=PJA -m1=LZMA2`: 71.92% of their size
+with 0.4.0, which did not take the tiles (plain LZMA2: 71.92% too),
+**59.55%** now; every file back. Konica's `.kqp` and `.pic` have no tables
+anywhere (their software assumes them) and stay raw.
+
 ### The stream
 
 ```
@@ -61,8 +80,19 @@ records, each a tag byte:
   00 n bytes                 n raw bytes (n a LEB128 number, 1 to 262,144)
   01 size n stream           a file of `size` bytes as PJA's codec stream of
                              n bytes (doc/CODEC.md), n < size
+  02 n segments              tables (0.5.0): n bytes of DQT, DHT, DRI or COM
+                             segments, for the 03 records after it; nothing
+                             is written
+  03 size n stream           a file of `size` bytes without tables of its own
+                             (0.5.0): its codec stream is that of the file
+                             with the last 02's tables after its SOI, which
+                             the stream leaves out (one bit says so)
   FF                         the end
 ```
+
+A 02 record comes just before the first 03 record that needs other tables
+than the decoder has. A decoder of 0.4.0 or before stops at 02 or 03 with
+a data error.
 
 Raw bytes are cut into records of 262,144 bytes counted from the end of the
 last file, so the stream depends only on the input: not on how it was read,

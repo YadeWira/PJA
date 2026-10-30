@@ -9,7 +9,24 @@
        00 n bytes                  n raw bytes (n a LEB128 number, >= 1)
        01 size n stream            a file of `size` bytes, as PJA's codec
                                    stream of n bytes (pjacodec.Compress)
+       02 n segments               tables: n bytes of DQT, DHT, DRI or COM
+                                   segments, for the 03 records after it;
+                                   nothing is written
+       03 size n stream            a file of `size` bytes without tables of
+                                   its own (an "abbreviated" JPEG): its
+                                   codec stream is that of the file with
+                                   the tables put after its SOI, coded as
+                                   known (pjamodel.SetGivenTables)
        FF                          the end
+
+   FlashPix (and Picture It's and PhotoDraw's .mix, built on it) and
+   TIFF's JPEG (its JPEGTables) keep the tables once, as a JPEG of tables
+   only (SOI, the segments, EOI), and the image as many JPEGs without
+   them, which PJA cannot decode alone. The encoder gives such a file the
+   last tables it saw, or, before any, the first ones ahead (FlashPix
+   writes them after the tiles); the JPEGs of tables stay among the raw
+   bytes. A decoder of 0.4.0 or before does not know 02 and 03 and stops
+   with a data error.
 
    The encoder finds a file by its first bytes (FF D8 FF), then walks its
    markers to the EOI: segment lengths, and after each SOS the entropy-coded
@@ -53,6 +70,10 @@ typedef struct {
   size_t out_size;
   int ok, threads;
   volatile int done;  /* set by the pool */
+  /* a file without tables of its own: the tables put after its SOI, which
+     its codec stream leaves out (pjamodel.SetGivenTables); 0 bytes if none */
+  const uint8_t *given;
+  size_t given_size;
 } job_t;
 typedef struct {
   void *(*alloc)(size_t size);
@@ -73,7 +94,9 @@ enum {
   RAW_RUN = 1 << 18,            /* the longest raw record */
   AHEAD_BYTES = 64 << 20,       /* the files' bytes in the pool at most */
   IOBUF = 1 << 16,              /* the decoder's read buffer */
-  TAG_RAW = 0x00, TAG_FILE = 0x01, TAG_END = 0xFF
+  TAG_RAW = 0x00, TAG_FILE = 0x01, TAG_TABLES = 0x02, TAG_FILE_T = 0x03, TAG_END = 0xFF,
+  MAX_TABLES = 1 << 16,         /* the longest JPEG of tables taken */
+  TABLES_AHEAD = 16 << 20       /* how far ahead the first tables are looked for */
 };
 static const uint8_t MAGIC[5] = {'P', 'J', 'A', 'F', 1};
 
@@ -127,6 +150,60 @@ static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n) {
       break;
     }
   }
+}
+
+/* p[0..n): a JPEG of tables only (SOI, then DQT, DHT, DRI or COM
+   segments, at least one DQT or DHT, then EOI): its length, EXT_MORE if n
+   bytes are not enough to tell, EXT_NOT if it is not one */
+static ptrdiff_t tables_extent(const uint8_t *p, size_t n) {
+  size_t i = 2;
+  int tables = 0;
+  for (;;) {
+    if (i + 2 > n) return i + 2 > MAX_TABLES ? EXT_NOT : EXT_MORE;
+    if (p[i] != 0xFF) return EXT_NOT;
+    uint8_t m = p[i + 1];
+    i += 2;
+    if (m == 0xD9) return tables ? (ptrdiff_t)i : EXT_NOT;
+    if (m != 0xDB && m != 0xC4 && m != 0xDD && m != 0xFE) return EXT_NOT;
+    if (m != 0xFE) tables = 1;
+    if (i + 2 > n) return EXT_MORE;
+    size_t len = ((size_t)p[i] << 8) | p[i + 1];
+    if (len < 2) return EXT_NOT;
+    i += len;
+    if (i > MAX_TABLES) return EXT_NOT;
+  }
+}
+
+/* p[0..n): DQT, DHT, DRI or COM segments, n bytes of them exactly */
+static int tables_segments(const uint8_t *p, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    if (i + 4 > n || p[i] != 0xFF) return 0;
+    uint8_t m = p[i + 1];
+    if (m != 0xDB && m != 0xC4 && m != 0xDD && m != 0xFE) return 0;
+    size_t len = ((size_t)p[i + 2] << 8) | p[i + 3];
+    if (len < 2) return 0;
+    i += 2 + len;
+  }
+  return i == n && n > 0;
+}
+
+/* p[0..n), a whole JPEG: 1 if it has no DHT (Huffman) or no DQT before
+   its first scan, so that PJA could not decode it alone */
+static int lacks_tables(const uint8_t *p, size_t n) {
+  size_t i = 2;
+  int dqt = 0, dht = 0, arith = 0;
+  while (i + 4 <= n && p[i] == 0xFF) {
+    uint8_t m = p[i + 1];
+    if (m == 0xFF) { i++; continue; }
+    if (m == 0xDA || m == 0xD9) break;
+    if (m == 0xDB) dqt = 1;
+    if (m == 0xC4) dht = 1;
+    if (m >= 0xC9 && m <= 0xCF && m != 0xCC) arith = 1;
+    if (m == 0xF7) return 0;                       /* JPEG-LS */
+    i += 2 + (((size_t)p[i + 2] << 8) | p[i + 3]);
+  }
+  return !dqt || (!dht && !arith);
 }
 
 /* ---------- writing ---------- */
@@ -295,6 +372,13 @@ typedef struct {
   int threads;
   out_t *ob;         /* version 2: stream B, and its history */
   dedup_t *dd;
+  /* the last JPEG of tables, its segments (without SOI and EOI); for each
+     file in the pool, how many bytes of them it was given (0: none); the
+     tables the decoder has (the last 02 record); how far ahead tables were
+     looked for, counted from the start of the input (base: the bytes the
+     buffer has dropped) */
+  uint8_t *tab, *dtab;
+  size_t tabn, dtabn, *given, base, looked;
 } in_t;
 
 /* more bytes. When the buffer is full, what is before rs (written already)
@@ -304,7 +388,7 @@ static void fill(in_t *s, size_t *x) {
   if (s->have == s->cap && s->rs) {
     size_t d = s->rs;
     move_down(s->buf, s->buf + d, s->have - d);
-    s->have -= d; *x -= d; s->rs = 0;
+    s->have -= d; *x -= d; s->rs = 0; s->base += d;
     for (int k = 0; k < s->np; k++) s->at[(s->first + k) % s->maxp] -= d;
   }
   if (s->have == s->cap) {
@@ -327,19 +411,52 @@ static void raw_upto(in_t *s, out_t *o, size_t to, int all) {
   if (all) { put_raw(o, s->buf + s->rs, to - s->rs); s->rs = to; }
 }
 
-/* the file buf[c..c+len) to the pool, as a copy (the buffer moves) */
-static void submit(in_t *s, size_t c, size_t len) {
+/* before any tables: the first JPEG of tables after buf[c], up to
+   TABLES_AHEAD bytes on, into s->tab; each byte looked at once */
+static void tables_ahead(in_t *s, size_t *c) {
+  size_t i = s->looked > s->base + *c ? s->looked - s->base : *c;
+  for (;;) {
+    while (i + 3 <= s->have && !(s->buf[i] == 0xFF && s->buf[i + 1] == 0xD8 && s->buf[i + 2] == 0xFF)) i++;
+    if (i - *c >= TABLES_AHEAD) break;
+    if (i + 3 <= s->have) {
+      ptrdiff_t t = tables_extent(s->buf + i, s->have - i);
+      if (t > 0) {
+        s->tabn = (size_t)t - 4;
+        copy(s->tab, s->buf + i + 2, s->tabn);
+        break;
+      }
+      if (t != EXT_MORE || s->eof) { i++; continue; }
+    }
+    if (s->eof || s->err) break;
+    size_t at = i - *c;
+    fill(s, c);
+    i = *c + at;
+  }
+  s->looked = s->base + i;
+}
+
+/* the file buf[c..c+len) to the pool, as a copy (the buffer moves); one
+   without tables of its own with the tables put after its SOI, which its
+   codec stream then leaves out */
+static void submit(in_t *s, size_t *pc, size_t len) {
+  if (!s->tabn && lacks_tables(s->buf + *pc, len)) tables_ahead(s, pc);
+  size_t c = *pc;
   int k = (s->first + s->np) % s->maxp;
   job_t *f = &s->files[k];
-  uint8_t *in = H.alloc(len);
+  size_t g = s->tabn && lacks_tables(s->buf + c, len) ? s->tabn : 0;
+  uint8_t *in = H.alloc(len + g);
   if (!in) { s->err = PJA_E_MEMORY; return; }
-  copy(in, s->buf + c, len);
-  f->in = in; f->size = len; f->expected = 0; f->out = 0; f->out_size = 0; f->ok = 0; f->done = 0;
+  copy(in, s->buf + c, 2);
+  copy(in + 2, s->tab, g);
+  copy(in + 2 + g, s->buf + c + 2, len - 2);
+  s->given[k] = g;
+  f->given = in + 2; f->given_size = g;
+  f->in = in; f->size = len + g; f->expected = 0; f->out = 0; f->out_size = 0; f->ok = 0; f->done = 0;
   /* a file alone gets the threads for its bands; more files share them */
   f->threads = s->threads / (s->np + 1);
   if (f->threads < 1) f->threads = 1;
   s->at[k] = c;
-  s->np++; s->pbytes += len;
+  s->np++; s->pbytes += len + g;
   H.pool_submit(s->pool, f);
 }
 
@@ -349,14 +466,23 @@ static void submit(in_t *s, size_t c, size_t len) {
 static void retire(in_t *s, out_t *o) {
   int k = s->first;
   job_t *f = &s->files[k];
+  size_t g = s->given[k], size = f->size - g;      /* the file's own bytes */
   H.pool_wait(s->pool, f);
-  if (f->ok && f->out_size + 12 < f->size && !s->err) {
+  if (f->ok && f->out_size + 12 < size && !s->err) {
     raw_upto(s, o, s->at[k], 1);
-    uint8_t t = TAG_FILE;
-    put(o, &t, 1); put_num(o, f->size); put_num(o, f->out_size);
+    /* its tables, unless the decoder has them already */
+    int same = g == s->dtabn;
+    for (size_t j = 0; same && j < g; j++) same = f->in[2 + j] == s->dtab[j];
+    if (g && !same) {
+      uint8_t t = TAG_TABLES;
+      put(o, &t, 1); put_num(o, g); put(o, f->in + 2, g);
+      copy(s->dtab, f->in + 2, g); s->dtabn = g;
+    }
+    uint8_t t = g ? TAG_FILE_T : TAG_FILE;
+    put(o, &t, 1); put_num(o, size); put_num(o, f->out_size);
     if (s->ob) dedup_put(s->dd, s->ob, f->out, f->out_size);
     else put(o, f->out, f->out_size);
-    s->rs = s->at[k] + f->size;
+    s->rs = s->at[k] + size;
   }
   if (f->out) H.release(f->out);
   H.release((void *)f->in);
@@ -378,8 +504,11 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
   s.buf = H.alloc(s.cap);
   s.files = H.alloc(sizeof(job_t) * (size_t)s.maxp);
   s.at = H.alloc(sizeof(size_t) * (size_t)s.maxp);
+  s.given = H.alloc(sizeof(size_t) * (size_t)s.maxp);
+  s.tab = H.alloc(MAX_TABLES);
+  s.dtab = H.alloc(MAX_TABLES);
   s.pool = H.pool_open(threads, 1);
-  if (!ddok || !s.buf || !s.files || !s.at || !s.pool) s.err = PJA_E_MEMORY;
+  if (!ddok || !s.buf || !s.files || !s.at || !s.given || !s.tab || !s.dtab || !s.pool) s.err = PJA_E_MEMORY;
   if (write_b) {
     s.ob = &ob; s.dd = &dd;
     put(&o, MAGIC2, sizeof MAGIC2);
@@ -405,6 +534,19 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
       continue;
     }
     ptrdiff_t len;
+    /* a JPEG of tables: the tables from here on; it stays raw */
+    for (;;) {
+      len = tables_extent(s.buf + c, s.have - c);
+      if (len != EXT_MORE || s.eof || s.err) break;
+      fill(&s, &c);
+    }
+    if (s.err) break;
+    if (len > 0) {
+      s.tabn = (size_t)len - 4;
+      copy(s.tab, s.buf + c + 2, s.tabn);
+      pos = c + (size_t)len;
+      continue;
+    }
     for (;;) {
       len = jpeg_extent(s.buf + c, s.have - c);
       if (len != EXT_MORE || s.eof || s.err || s.have - c > MAX_FILE) break;
@@ -413,7 +555,7 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
     if (s.err) break;
     if (len <= 0) { pos = c + 1; continue; }
     while (s.np && (s.np == s.maxp || s.pbytes + (size_t)len > AHEAD_BYTES)) retire(&s, &o);
-    submit(&s, c, (size_t)len);
+    submit(&s, &c, (size_t)len);
     pos = c + (size_t)len;
   }
   /* on an error, the files still in the pool are waited for and dropped */
@@ -430,6 +572,9 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
   if (s.buf) H.release(s.buf);
   if (s.files) H.release(s.files);
   if (s.at) H.release(s.at);
+  if (s.given) H.release(s.given);
+  if (s.tab) H.release(s.tab);
+  if (s.dtab) H.release(s.dtab);
   dedup_free(&dd);
   return s.err ? s.err : o.err ? o.err : ob.err;
 }
@@ -497,6 +642,7 @@ static int rd_num(rd_t *r, uint64_t *v) {
    thread (or AHEAD_BYTES) ahead. */
 typedef struct {
   int file;          /* 1: job holds a file in the pool; 0: raw bytes in job.in */
+  size_t given;      /* a file: the bytes of tables put after its SOI, to take out */
   job_t job;
 } item_t;
 typedef struct {
@@ -514,18 +660,27 @@ static void drop(queue_t *q, item_t *it) {
   }
   H.release((void *)it->job.in);
   q->bytes -= it->file ? it->job.expected : it->job.size;
+  it->given = 0;
   q->first = (q->first + 1) % q->max; q->n--;
 }
 
-/* the oldest item written; PJA_E_DATA when its file did not come back */
-static int retire_item(queue_t *q, out_t *o) {
+/* the oldest item written; PJA_E_DATA when its file did not come back. A
+   file given tables: they come out of it, after its SOI, and must be the
+   ones it was given */
+static int retire_item(queue_t *q, out_t *o, const uint8_t *tab) {
   item_t *it = &q->items[q->first];
   int res = PJA_OK;
+  size_t g = it->given;
   if (!it->file) put(o, it->job.in, it->job.size);
   else {
     H.pool_wait(q->pool, &it->job);
+    const uint8_t *b = it->job.out;
     if (!it->job.ok || it->job.out_size != it->job.expected) res = PJA_E_DATA;
-    else put(o, it->job.out, it->job.out_size);
+    else if (!g) put(o, b, it->job.out_size);
+    else {
+      for (size_t k = 0; k < g && res == PJA_OK; k++) if (b[2 + k] != tab[k]) res = PJA_E_DATA;
+      if (res == PJA_OK) { put(o, b, 2); put(o, b + 2 + g, it->job.out_size - 2 - g); }
+    }
   }
   drop(q, it);
   return res;
@@ -559,6 +714,10 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
   if (!read || !write || !H.alloc) return PJA_E_ARG;
   if (threads < 1) threads = 1;
   rd_t r = {read, read_ctx, 0, 0, 0, 0}, rb = {read_b, read_b_ctx, 0, 0, 0, 0};
+  /* the tables of the last 02 record; a new one waits until the files
+     before it, which were given the old ones, are written */
+  uint8_t *tab = 0;
+  size_t tabn = 0;
   dedup_t dd;
   dedup_init(&dd, 0);
   out_t o = {write, write_ctx, 0};
@@ -568,8 +727,9 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
   if (read_b) rb.buf = H.alloc(IOBUF);
   q.items = H.alloc(sizeof(item_t) * (size_t)q.max);
   q.pool = H.pool_open(threads, 0);
+  tab = H.alloc(MAX_TABLES);
   int res = PJA_E_DATA;
-  if (!r.buf || !q.items || !q.pool || (read_b && !rb.buf)) { res = PJA_E_MEMORY; goto done; }
+  if (!r.buf || !q.items || !q.pool || !tab || (read_b && !rb.buf)) { res = PJA_E_MEMORY; goto done; }
   for (size_t k = 0; k < sizeof MAGIC; k++) if (rd_byte(&r) != (read_b ? MAGIC2 : MAGIC)[k]) goto done;
   if (read_b) for (size_t k = 0; k < sizeof MAGIC_B; k++) if (rd_byte(&rb) != MAGIC_B[k]) goto done;
   for (;;) {
@@ -577,34 +737,42 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
     uint64_t n, size;
     if (t == TAG_END) {
       res = PJA_OK;
-      while (q.n && res == PJA_OK && !o.err) res = retire_item(&q, &o);
+      while (q.n && res == PJA_OK && !o.err) res = retire_item(&q, &o, tab);
       break;
     }
     /* room for one more item */
     int bad = 0;
-    while (q.n && (q.n >= q.max - 1 || q.files >= q.maxf || q.bytes >= AHEAD_BYTES))
-      if (retire_item(&q, &o) != PJA_OK) { bad = 1; break; }
+    while (q.n && (q.n >= q.max - 1 || q.files >= q.maxf || q.bytes >= AHEAD_BYTES || t == TAG_TABLES))
+      if (retire_item(&q, &o, tab) != PJA_OK) { bad = 1; break; }
     if (bad || o.err) break;
     item_t *it = &q.items[(q.first + q.n) % q.max];
-    if (t == TAG_RAW) {
+    it->given = 0;
+    if (t == TAG_TABLES) {
+      if (!rd_num(&r, &n) || !n || n > MAX_TABLES) break;
+      if (rd(&r, tab, (size_t)n) != n || !tables_segments(tab, (size_t)n)) break;
+      tabn = (size_t)n;
+    } else if (t == TAG_RAW) {
       if (!rd_num(&r, &n) || !n || n > RAW_RUN) break;
       uint8_t *b = H.alloc((size_t)n);
       if (!b) { res = PJA_E_MEMORY; break; }
       it->file = 0; it->job.in = b; it->job.size = (size_t)n; it->job.out = 0;
       q.n++; q.bytes += (size_t)n;
       if (rd(&r, b, (size_t)n) != n) break;
-    } else if (t == TAG_FILE) {
+    } else if (t == TAG_FILE || t == TAG_FILE_T) {
       if (!rd_num(&r, &size) || !rd_num(&r, &n) || !size || size > MAX_FILE || !n || n >= size) break;
+      size_t g = t == TAG_FILE_T ? tabn : 0;
+      if (t == TAG_FILE_T && !g) break;               /* no tables yet */
       uint8_t *st = H.alloc((size_t)n);
       if (!st) { res = PJA_E_MEMORY; break; }
-      it->file = 0; it->job.in = st; it->job.size = (size_t)n; it->job.expected = (size_t)size;
+      it->file = 0; it->job.in = st; it->job.size = (size_t)n; it->job.expected = (size_t)size + g;
+      it->given = g; it->job.given = tab; it->job.given_size = g;
       it->job.out = 0; it->job.out_size = 0; it->job.ok = 0; it->job.done = 0;
       q.n++; q.bytes += (size_t)n;
       if (read_b ? !dedup_get(&dd, &rb, st, (size_t)n) : rd(&r, st, (size_t)n) != n) {
         if (dd.err) res = dd.err;
         break;
       }
-      q.bytes += (size_t)size - (size_t)n;
+      q.bytes += (size_t)size + g - (size_t)n;
       it->file = 1; q.files++;
       it->job.threads = threads / q.files; if (it->job.threads < 1) it->job.threads = 1;
       H.pool_submit(q.pool, &it->job);
@@ -614,6 +782,7 @@ done:
   if (q.items) while (q.n) drop(&q, &q.items[q.first]);
   if (q.pool) H.pool_close(q.pool);
   if (q.items) H.release(q.items);
+  if (tab) H.release(tab);
   if (r.buf) H.release(r.buf);
   if (rb.buf) H.release(rb.buf);
   dedup_free(&dd);
