@@ -80,6 +80,34 @@ what makes it slower, and on MPO, arithmetic-coded and generated JPEG some
 files are still not taken the way `pja` alone takes them (being looked
 into with zpaq-std).
 
+## In 7-Zip and 7-Zip-zstd
+
+`libpja` (in each release) is a C library and, in the same file, a codec
+for [7-Zip](https://7-zip.org) and
+[7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd): put `pja.dll` (or
+`pja.so`) in the `Codecs` folder next to 7-Zip, and
+
+```sh
+7z a -m0=PJA -m1=LZMA2 photos.7z photos/      # 7-Zip-zstd: -m1=zstd
+```
+
+PJA goes first in the chain as a filter: it recompresses the JPEG and
+JPEG-LS files it finds in the solid block and passes every other byte on
+to LZMA2 or zstd. The two help each other: LZMA2 matches what PJA cannot
+(EXIF, other files, and one image saved several times at the same quality,
+progressive or not, with or without restarts, which PJA turns into the same
+coefficient stream). Extracting needs the plugin too
+([doc/LIBRARY.md](doc/LIBRARY.md)). With 7-Zip 25 on Linux, 8 threads, one
+archive per set:
+
+| set | 7-Zip + PJA + LZMA2 | Aqueous | zpaq-std + PJA 0.0.8 |
+|---|---|---|---|
+| photos (151) | **72.60%**, 21 / 7.8 s | 80.46%, 2.3 / 0.7 s | 75.50%, 33.1 / 15.0 s |
+| corpus (78) | **66.90%**, 15 / 6.2 s | 71.91%, 1.6 / 0.3 s | 71.29%, 40.7 / 12.8 s |
+| MPO (6) | **73.40%** | 78.94% | 80.68% |
+| arithmetic-coded (244) | **17.37%** | 85.71% | 81.89% |
+| generated (640) | **16.52%** | 33.96% | 83.60% |
+
 It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
 8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),
 lossless JPEG, and JPEG-LS, along with the oddities real encoders leave.
@@ -104,7 +132,8 @@ The command's manual is [doc/CLI.md](doc/CLI.md).
 ## More
 
 The [wiki][wiki] has the rest: [benchmarks][wComp], the
-[zpaq-std plugin][wPlugin] (PJA as codecs for zpaq archives),
+[zpaq-std plugin][wPlugin] (PJA as codecs for zpaq archives), [the library
+and 7-Zip plugin][wLib],
 [building and testing][wBuild], [how it works][wHow], the [source
 layout][wLayout], [FreePascal pitfalls][wFpc] and the [release
 history][wRel]. The codec's full notes are in [doc/CODEC.md](doc/CODEC.md),
@@ -135,6 +164,7 @@ work of the Independent JPEG Group; see `NOTICE` for that and other credits.
 [wHandles]: https://github.com/YadeWira/PJA/wiki/What-PJA-handles
 [wInstall]: https://github.com/YadeWira/PJA/wiki/Installing
 [wPlat]: https://github.com/YadeWira/PJA/wiki/Platforms
+[wLib]: https://github.com/YadeWira/PJA/wiki/Library-and-7-Zip
 [wPlugin]: https://github.com/YadeWira/PJA/wiki/The-zpaq-std-plugin
 [wBuild]: https://github.com/YadeWira/PJA/wiki/Building
 [wHow]: https://github.com/YadeWira/PJA/wiki/How-it-works

@@ -35,9 +35,10 @@ The two help each other:
 - PJA does what no general compressor can: the JPEGs' coefficients.
 - The compressor after it does what PJA alone cannot: matches across
   files. EXIF blocks and thumbnails of one camera, other files, and — the
-  big one — **the same picture in several JPEGs**: PJA writes the same
-  stream for the same image whatever the encoding (progressive or not,
-  restarts, Huffman tables), so LZMA2 finds it again. On 640 JPEGs that are
+  big one — **one image saved several times**: the same coefficients
+  written progressive or not, with or without restarts, with other Huffman
+  tables come out of PJA as the same coefficient stream, so LZMA2 finds it
+  again. On 640 JPEGs that are
   variants of 12 images, PJA + xz writes 16% of the input, where PJA alone
   writes 74% and Aqueous 34%.
 
@@ -105,8 +106,37 @@ Put the library in the `Codecs` folder next to 7-Zip: `7z.exe` on Windows
 7z x photos.7z
 ```
 
-`-mmt` sets the filter's threads. **The archive needs the plugin to be
-extracted**, in every 7-Zip that opens it.
+`-mmt` sets the filter's threads when compressing; extracting, 7-Zip
+gives its thread count only to the first coder of the chain that takes one
+(LZMA2), so PJA uses the processors (up to 8), as the `pja` command does.
+**The archive needs the plugin to be extracted**, in every 7-Zip that
+opens it. It works with 7-Zip on Windows and with 7-Zip 23 or later on
+Linux and macOS; p7zip (the old port, `7z` 16.02) builds its interfaces
+differently and does not load it.
+
+Measured on 29/10/2026 with 7-Zip 25.01 on Linux (`-mmt=8`, one archive per
+set, every file extracted and compared): the input's size, the archive
+against it, and the times to write it and to extract it.
+
+| set | files | 7-Zip + PJA + LZMA2 | 7-Zip-zstd + PJA + zstd | Aqueous | `pja` alone |
+|---|---|---|---|---|---|
+| photos | 151 | **72.60%**, 20.9 / 7.8 s | 72.60%, 15.5 / 7.7 s | 80.46%, 2.3 / 0.7 s | 72.61% |
+| corpus of JPEGs of every kind | 78 | **66.90%**, 15.3 / 6.2 s | 69.99%, 12.9 / 6.2 s | 71.91% | 70.39% |
+| MPO | 6 | **73.40%** | | 78.94% | 73.38% |
+| arithmetic-coded JPEG | 244 | **17.37%** | | 85.71% | 74.59% |
+| generated JPEGs | 640 | **16.52%**, 4.7 / 2.7 s | 16.58%, 4.3 / 2.5 s | 33.96% | 73.73% |
+
+On the photos the archive is as small as the `pja` command's files: there
+is little for LZMA2 to add. Where files repeat an image's coefficients (the
+arithmetic-coded and generated sets hold the same images in several
+encodings), the
+pair is four times smaller than PJA alone and half the size of Aqueous.
+LZMA2 is the slower half of the chain: PJA's output does not compress
+further, and LZMA2 goes through it on one or two threads; zstd is faster.
+
+Tested on Windows 10 with 7-Zip 26.05 and 7-Zip-zstd 26.02, 64 and 32
+bits: the plugin listed, archives written, tested and extracted byte for
+byte, and an archive written on Linux extracted.
 
 The method ID, `03 7F 01`, is the one 7-Zip's `DOC/Methods.txt` keeps for
 an experimental method; PJA will move to an ID of its own once 7-Zip

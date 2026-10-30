@@ -13,7 +13,7 @@ OUT=${1:?usage: build.sh <out dir>}
 # a folder's absolute path; on Windows (MSYS, Git Bash) in Windows' form,
 # since FreePascal gets it glued to an option (-Fu...), which MSYS does not
 # translate
-apath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
+apath() { (cd "$1" && { cygpath -m "$(pwd)" 2>/dev/null || pwd; }); }
 HERE=$(apath "$(dirname "$0")"); PAS=$(dirname "$HERE")
 FPC=${FPC:-fpc}
 CC=${CC:-cc}
