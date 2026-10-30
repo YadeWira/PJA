@@ -212,6 +212,7 @@ end;
 procedure TBandThread.Execute;
 begin
   RunBand(job^);
+  ReleaseThreadModels;
 end;
 
 function Min2(a, b: Integer): Integer;

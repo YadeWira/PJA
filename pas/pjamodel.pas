@@ -91,6 +91,10 @@ type
   produces a value that does not fit. model: which one; each is a different
   stream. mkV7 needs pjav7 in the program (V7Code). }
 function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind = mkFull): Boolean;
+{ Frees the models this thread kept for its next file (threadvars, which
+  FreePascal does not free when a thread ends). Each thread that codes calls
+  it before it ends: the library starts threads on every call. }
+procedure ReleaseThreadModels;
 
 type
   { What version 7's C code (pjav7c.c) reads: the counters and the mixers'
@@ -1356,6 +1360,14 @@ threadvar
     refills tables already allocated (NewBits), instead of allocating and
     zeroing megabytes per band }
   PoolLuma, PoolChroma: TCoefModel;
+
+procedure ReleaseThreadModels;
+begin
+  RawO0 := nil; RawO1 := nil; RawO2 := nil;
+  RawDirty := False;
+  PoolLuma := Default(TCoefModel);
+  PoolChroma := Default(TCoefModel);
+end;
 
 procedure V7FillTables(out t: TV7Tables);
 begin

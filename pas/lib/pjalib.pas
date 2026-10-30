@@ -18,7 +18,7 @@ library pja;
 
 uses
   {$ifdef unix}cthreads,{$endif}
-  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7;
+  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjamodel;
 
 {$L pjafilter.o}
 {$L pja7z.o}
@@ -201,6 +201,7 @@ begin
       InterLockedExchange(j^.done, 1);
       RTLEventSetEvent(pool.finished);
     end;
+  ReleaseThreadModels;
 end;
 
 function OpenPool(threads, encode: LongInt): Pointer; cdecl;

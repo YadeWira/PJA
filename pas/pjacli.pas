@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -448,6 +448,7 @@ type
 procedure TWorker.Execute;
 begin
   Work;
+  ReleaseThreadModels;
 end;
 
 var i, workers: Integer; pool: array of TWorker;

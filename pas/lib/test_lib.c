@@ -56,6 +56,7 @@ static unsigned char *slurp(const char *name, size_t *n) {
 }
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", pja_version());
   unsigned char *all = 0;
   size_t alln = 0, taken = 0, insum = 0, outsum = 0;
