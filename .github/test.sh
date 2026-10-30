@@ -2,7 +2,8 @@
 # The check every platform runs (CI): the pja command and dump_streams built
 # with the shipped options, every sample of the repository compressed and
 # extracted by the command (each must come back byte for byte), the zpaq-std
-# plugin built, and the SHA-256 of all the codec's streams written to
+# plugin built, libpja built and its C test run (pas/lib: with 7-Zip's
+# plugin through a real 7-Zip where one is installed), and the SHA-256 of all the codec's streams written to
 # hash.txt: the format makes the same bytes on every platform, which the
 # last CI job checks.
 #
@@ -29,6 +30,29 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) PIC= ;; *) PIC=-Cg ;; esac
 $FPC -O3 -dPJA_FAST $PIC -Fupas -Fipas -Fupas/plugin -Fipas/plugin -FU"$OUT/pu" -o"$OUT/pja_plugin" \
   pas/plugin/pja_zpaqstd.pas > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/pja$EXE" --version
+
+echo "== libpja"
+LIBF=$(sh pas/lib/build.sh "$OUT/lib" | tail -1) || { echo "FAIL: libpja did not build"; exit 1; }
+RP=; case "$(uname -s)" in Linux) RP="-Wl,-rpath,$OUT/lib" ;; esac
+# shellcheck disable=SC2086
+${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $RP
+DYLD_LIBRARY_PATH="$OUT/lib" "$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* README.md > "$OUT/lib/test.txt" \
+  || { cat "$OUT/lib/test.txt"; echo "FAIL: libpja's test"; exit 1; }
+tail -4 "$OUT/lib/test.txt"
+# 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
+# plugin in its Codecs folder, an archive written and extracted
+if [ -f /usr/lib/7zip/7z.so ] && [ -x /usr/lib/7zip/7z ]; then
+  Z="$OUT/7z"; rm -rf "$Z"; cp -r /usr/lib/7zip "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
+  cp "$LIBF" "$Z/Codecs/"
+  cp tests/jpg/* tests/jls/* README.md "$OUT/7in/"
+  "$Z/7z" i | grep -q '37F01 PJA' || { echo "FAIL: 7-Zip does not list PJA"; exit 1; }
+  (cd "$OUT/7in" && "../7z/7z" a -bso0 -bsp0 -m0=PJA -m1=LZMA2 ../a.7z .)
+  "$Z/7z" x -bso0 -bsp0 -o"$OUT/7x" "$OUT/a.7z"
+  for f in "$OUT"/7in/*; do
+    cmp -s "$f" "$OUT/7x/$(basename "$f")" || { echo "FAIL: 7-Zip: $(basename "$f") does not come back"; exit 1; }
+  done
+  echo "7-Zip with the PJA plugin: every sample back, $(wc -c < "$OUT/a.7z" | tr -d ' ') bytes"
+fi
 
 echo "== the command: every sample, a then x"
 cp tests/jpg/* tests/jls/* "$OUT/in/"

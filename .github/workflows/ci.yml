@@ -1,6 +1,7 @@
 # Every platform PJA supports builds the pja command (Pascal, and the C of
 # stream version 7's model: CC, the platform's C compiler) and the zpaq-std
-# plugin, compresses and extracts every sample of the repository, and
+# plugin, compresses and extracts every sample of the repository, builds
+# libpja and runs its C test (Linux x86-64: with 7-Zip too), and
 # records the SHA-256 of the codec's streams (.github/test.sh); the last job
 # checks that they are the same bytes everywhere. Linux x86-64 also runs the
 # two full suites: the codec's (pas/run_codec_tests.sh) and the .pja
@@ -28,8 +29,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal
-        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Install Free Pascal, and 7-Zip for libpja's plugin
+        run: sudo apt-get update && sudo apt-get install -y fpc 7zip
       - name: Test
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4

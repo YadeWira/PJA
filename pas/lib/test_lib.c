@@ -107,10 +107,10 @@ int main(int argc, char **argv) {
     if (s == 0) enc = e; else free(e.d);
     free(b.d);
   }
-  /* damaged filter streams: every 97th byte flipped, one at a time, and
-     cut short at a few places */
+  /* damaged filter streams: about 300 bytes spread over the stream
+     flipped, one at a time, and cut short at a few places */
   int bad = 0, same = 0;
-  for (size_t k = 0; k < enc.n && k < 200000; k += 97) {
+  for (size_t k = 0; k < enc.n; k += enc.n / 300 + 1) {
     enc.d[k] ^= 0x41;
     src_t in = {enc.d, enc.n, 0, 1 << 20};
     dst_t b = {0};

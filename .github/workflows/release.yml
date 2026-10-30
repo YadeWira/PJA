@@ -86,22 +86,20 @@ jobs:
             macos-*) EXE=; LIB=pja.dylib ;;
             *) EXE=; LIB=pja.so ;;
           esac
-          CLI=pja-$V-$P; PLG=pja-$V-zpaqstd-plugin-$P
-          mkdir -p dist "$CLI" "$PLG"
+          CLI=pja-$V-$P; PLG=pja-$V-zpaqstd-plugin-$P; LIBP=pja-$V-lib-$P
+          mkdir -p dist "$CLI" "$PLG" "$LIBP"
           cp build/rel/pja$EXE README.md LICENSE NOTICE doc/CLI.md "$CLI/"
           cp build/rel/pja_plugin* "$PLG/$LIB"
           cp LICENSE NOTICE "$PLG/"
-          case $P in
-            windows-*)
-              7z a -tzip -bso0 "dist/$CLI.zip" "$CLI"
-              7z a -tzip -bso0 "dist/$PLG.zip" "$PLG" ;;
-            macos-*)
-              tar --uid 0 --gid 0 -czf "dist/$CLI.tar.gz" "$CLI"
-              tar --uid 0 --gid 0 -czf "dist/$PLG.tar.gz" "$PLG" ;;
-            *)
-              tar --owner=0 --group=0 -czf "dist/$CLI.tar.gz" "$CLI"
-              tar --owner=0 --group=0 -czf "dist/$PLG.tar.gz" "$PLG" ;;
-          esac
+          # libpja: the C library and 7-Zip / 7-Zip-zstd plugin
+          cp build/rel/lib/$LIB pas/lib/pja.h doc/LIBRARY.md LICENSE NOTICE "$LIBP/"
+          for d in "$CLI" "$PLG" "$LIBP"; do
+            case $P in
+              windows-*) 7z a -tzip -bso0 "dist/$d.zip" "$d" ;;
+              macos-*) tar --uid 0 --gid 0 -czf "dist/$d.tar.gz" "$d" ;;
+              *) tar --owner=0 --group=0 -czf "dist/$d.tar.gz" "$d" ;;
+            esac
+          done
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:
