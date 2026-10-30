@@ -1177,19 +1177,22 @@ end;
 
 { PATCH: the edits, then the repaired file's stream }
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
-var p: SizeInt; e, i: Int64; edits: TEdits; fixed, inner: TBytes;
+var p: SizeInt; e, i: Integer; pos, del, ins: Int64; edits: TEdits; fixed, inner: TBytes;
 begin
   jpeg := nil;
   if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
-  e := GetU32(stream, 2);
-  if (e < 1) or (e > MAX_EDITS) then Exit(CodecFail(ceBadStream));
+  if (GetU32(stream, 2) < 1) or (GetU32(stream, 2) > MAX_EDITS) then Exit(CodecFail(ceBadStream));
+  e := Integer(GetU32(stream, 2));
   edits := nil; SetLength(edits, e);
   p := 6;
   for i := 0 to e - 1 do begin
     if p + 12 > Length(stream) then Exit(CodecFail(ceBadStream));
-    edits[i].pos := GetU32(stream, p); edits[i].del := GetU32(stream, p + 4);
-    if GetU32(stream, p + 8) > Length(stream) - p - 12 then Exit(CodecFail(ceBadStream));
-    edits[i].ins := Copy(stream, p + 12, GetU32(stream, p + 8));
+    { each number checked before it becomes a SizeInt (32 bits on 32-bit
+      systems): no file is larger than maxRaw }
+    pos := GetU32(stream, p); del := GetU32(stream, p + 4); ins := GetU32(stream, p + 8);
+    if (pos > maxRaw) or (del > maxRaw) or (ins > Length(stream) - p - 12) then Exit(CodecFail(ceBadStream));
+    edits[i].pos := pos; edits[i].del := del;
+    edits[i].ins := Copy(stream, p + 12, ins);
     p := p + 12 + Length(edits[i].ins);
   end;
   inner := Copy(stream, p, Length(stream) - p);
