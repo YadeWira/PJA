@@ -6,7 +6,8 @@
 
    PJA is a filter in 7-Zip's sense of a first coder: it takes the solid
    block, recompresses the JPEG and JPEG-LS files in it (pjafilter.c) and
-   passes every other byte on to the next coder. Extracting needs the plugin
+   passes every other byte on to the next coder; its own data goes into the
+   archive by a second stream (see METHODS). Extracting needs the plugin
    too.
 
    7-Zip's interfaces are C++ classes with only virtual methods, which is a
@@ -16,8 +17,9 @@
    v23 checks it). The exported functions are pjalib.pas's, which call the
    pja7z_* ones here.
 
-   The method's ID is 03 7F 01, the one 7-Zip's DOC/Methods.txt leaves for
-   an experimental method, until 7-Zip gives PJA one of its own. */
+   The methods' IDs, 03 7F 02 (PJA) and 03 7F 01 (PJA1), are in the slot
+   7-Zip's DOC/Methods.txt leaves for an experimental method, until 7-Zip
+   gives PJA an ID of its own. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -64,9 +66,23 @@ typedef ptrdiff_t (PJA_CALL *pja_read_fn)(void *ctx, void *buf, size_t size);
 typedef int (PJA_CALL *pja_write_fn)(void *ctx, const void *buf, size_t size);
 int pjafilter_encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *write_ctx, int threads);
 int pjafilter_decode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *write_ctx, int threads);
+int pjafilter2_encode(pja_read_fn read, void *read_ctx, pja_write_fn write_a, void *a_ctx,
+                      pja_write_fn write_b, void *b_ctx, int threads);
+int pjafilter2_decode(pja_read_fn read_a, void *a_ctx, pja_read_fn read_b, void *b_ctx,
+                      pja_write_fn write, void *write_ctx, int threads);
 
-static const char NAME[] = "PJA";
-static const uint64_t METHOD_ID = 0x037F01;
+/* The methods. PJA: the filter's version 2, two streams: the first (the
+   raw bytes and the records) goes on to the next coder of the chain, the
+   second (PJA's data, deduplicated by the filter itself) into the archive
+   as it is, so that LZMA2 or zstd does not spend its time on bytes it
+   cannot make smaller. PJA1: version 1, one stream, what 0.2.0 wrote; kept
+   so that those archives open, and still usable. */
+typedef struct { const char *name; uint64_t id; uint32_t streams; } method_t;
+static const method_t METHODS[] = {
+  {"PJA", 0x037F02, 2},
+  {"PJA1", 0x037F01, 1},
+};
+enum { NUM_METHODS = sizeof METHODS / sizeof METHODS[0] };
 
 /* {23170F69-40C1-278A-0000-00gg00ss0000}: 7-Zip's interfaces, group g and
    sub-id s; the coder classes: Data3 2790 (decoder) or 2791 (encoder) and
@@ -82,7 +98,7 @@ static int is_iunknown(const guid_t *g) {
   for (int k = 0; k < 8; k++) if (g->d4[k] != d4[k]) return 0;
   return 1;
 }
-enum { G_STREAM = 3, G_CODER = 4, S_CODER = 0x05, S_PROGRESS = 0x04, S_CODER_MT = 0x25 };
+enum { G_STREAM = 3, G_CODER = 4, S_CODER = 0x05, S_CODER2 = 0x18, S_PROGRESS = 0x04, S_CODER_MT = 0x25 };
 
 /* ---------- the streams 7-Zip hands in ---------- */
 
@@ -113,51 +129,70 @@ typedef struct {
 } progress_vt;
 struct progress { const progress_vt *vt; };
 
+/* one run of the coder: progress and the first error, shared by its
+   streams */
 typedef struct {
-  instream_t *in;
-  outstream_t *out;
   progress_t *progress;
   uint64_t in_pos, out_pos, next_report;
   HRESULT err;    /* the first error a stream or the progress gave */
+} run_t;
+typedef struct {
+  instream_t *in;
+  outstream_t *out;
+  run_t *run;
 } io_t;
 
 enum { REPORT_EVERY = 1 << 20 };
 
-static void report(io_t *io) {
-  if (!io->progress || io->in_pos + io->out_pos < io->next_report) return;
-  io->next_report = io->in_pos + io->out_pos + REPORT_EVERY;
-  HRESULT r = io->progress->vt->SetRatioInfo(io->progress, &io->in_pos, &io->out_pos);
-  if (r != S_OK && !io->err) io->err = r;
+static void report(run_t *r) {
+  if (!r->progress || r->in_pos + r->out_pos < r->next_report) return;
+  r->next_report = r->in_pos + r->out_pos + REPORT_EVERY;
+  HRESULT h = r->progress->vt->SetRatioInfo(r->progress, &r->in_pos, &r->out_pos);
+  if (h != S_OK && !r->err) r->err = h;
 }
 
 static ptrdiff_t PJA_CALL io_read(void *ctx, void *buf, size_t size) {
   io_t *io = ctx;
-  if (io->err) return -1;
+  run_t *r = io->run;
+  if (r->err) return -1;
   if (size > 0x40000000u) size = 0x40000000u;
   uint32_t got = 0;
-  HRESULT r = io->in->vt->Read(io->in, buf, (uint32_t)size, &got);
-  if (r != S_OK) { io->err = r; return -1; }
-  io->in_pos += got;
-  report(io);
-  return io->err ? -1 : (ptrdiff_t)got;
+  HRESULT h = io->in->vt->Read(io->in, buf, (uint32_t)size, &got);
+  if (h != S_OK) { r->err = h; return -1; }
+  r->in_pos += got;
+  report(r);
+  return r->err ? -1 : (ptrdiff_t)got;
 }
 
 static int PJA_CALL io_write(void *ctx, const void *buf, size_t size) {
   io_t *io = ctx;
+  run_t *r = io->run;
   const uint8_t *p = buf;
-  while (size && !io->err) {
+  while (size && !r->err) {
     uint32_t n = size > 0x40000000u ? 0x40000000u : (uint32_t)size, done = 0;
-    HRESULT r = io->out->vt->Write(io->out, p, n, &done);
-    if (r != S_OK) { io->err = r; break; }
-    if (!done) { io->err = E_FAIL; break; }
-    p += done; size -= done; io->out_pos += done;
+    HRESULT h = io->out->vt->Write(io->out, p, n, &done);
+    if (h != S_OK) { r->err = h; break; }
+    if (!done) { r->err = E_FAIL; break; }
+    p += done; size -= done; r->out_pos += done;
   }
-  report(io);
-  return io->err ? -1 : 0;
+  report(r);
+  return r->err ? -1 : 0;
+}
+
+static HRESULT result(const run_t *r, int res) {
+  if (r->err) return r->err;
+  switch (res) {
+    case 0: return S_OK;
+    case 3: return E_OUTOFMEMORY;
+    case 2: return S_FALSE;    /* 7-Zip's "data error" */
+    default: return E_FAIL;
+  }
 }
 
 /* ---------- the coder ---------- */
 
+/* ICompressCoder (PJA1) or ICompressCoder2 (PJA): the same object, its
+   first table one or the other */
 typedef struct coder coder_t;
 typedef struct {
   HRESULT (COMCALL *QueryInterface)(coder_t *, const guid_t *, void **);
@@ -167,16 +202,24 @@ typedef struct {
                           const uint64_t *out_size, progress_t *);
 } coder_vt;
 typedef struct {
+  HRESULT (COMCALL *QueryInterface)(coder_t *, const guid_t *, void **);
+  uint32_t (COMCALL *AddRef)(coder_t *);
+  uint32_t (COMCALL *Release)(coder_t *);
+  HRESULT (COMCALL *Code)(coder_t *, instream_t *const *ins, const uint64_t *const *in_sizes, uint32_t nin,
+                          outstream_t *const *outs, const uint64_t *const *out_sizes, uint32_t nout,
+                          progress_t *);
+} coder2_vt;
+typedef struct {
   HRESULT (COMCALL *QueryInterface)(void *, const guid_t *, void **);
   uint32_t (COMCALL *AddRef)(void *);
   uint32_t (COMCALL *Release)(void *);
   HRESULT (COMCALL *SetNumberOfThreads)(void *, uint32_t threads);
 } coder_mt_vt;
 struct coder {
-  const coder_vt *vt;
+  const void *vt;              /* coder_vt or coder2_vt */
   const coder_mt_vt *mt_vt;    /* ICompressSetCoderMt: a second table, at &c->mt_vt */
   int32_t refs;
-  int encode;
+  int encode, streams;
   int threads;
 };
 
@@ -196,16 +239,29 @@ static HRESULT COMCALL c_code(coder_t *c, instream_t *in, outstream_t *out, cons
                               const uint64_t *out_size, progress_t *progress) {
   (void)in_size; (void)out_size;
   if (!in || !out) return E_INVALIDARG;
-  io_t io = {in, out, progress, 0, 0, REPORT_EVERY, S_OK};
-  int r = c->encode ? pjafilter_encode(io_read, &io, io_write, &io, c->threads)
-                    : pjafilter_decode(io_read, &io, io_write, &io, c->threads);
-  if (io.err) return io.err;
-  switch (r) {
-    case 0: return S_OK;
-    case 3: return E_OUTOFMEMORY;
-    case 2: return S_FALSE;    /* 7-Zip's "data error" */
-    default: return E_FAIL;
+  run_t r = {progress, 0, 0, REPORT_EVERY, S_OK};
+  io_t io = {in, out, &r};
+  int res = c->encode ? pjafilter_encode(io_read, &io, io_write, &io, c->threads)
+                      : pjafilter_decode(io_read, &io, io_write, &io, c->threads);
+  return result(&r, res);
+}
+
+static HRESULT COMCALL c_code2(coder_t *c, instream_t *const *ins, const uint64_t *const *in_sizes, uint32_t nin,
+                               outstream_t *const *outs, const uint64_t *const *out_sizes, uint32_t nout,
+                               progress_t *progress) {
+  (void)in_sizes; (void)out_sizes;
+  run_t r = {progress, 0, 0, REPORT_EVERY, S_OK};
+  int res;
+  if (c->encode) {
+    if (nin != 1 || nout != 2 || !ins || !outs || !ins[0] || !outs[0] || !outs[1]) return E_INVALIDARG;
+    io_t in = {ins[0], 0, &r}, a = {0, outs[0], &r}, b = {0, outs[1], &r};
+    res = pjafilter2_encode(io_read, &in, io_write, &a, io_write, &b, c->threads);
+  } else {
+    if (nin != 2 || nout != 1 || !ins || !outs || !ins[0] || !ins[1] || !outs[0]) return E_INVALIDARG;
+    io_t a = {ins[0], 0, &r}, b = {ins[1], 0, &r}, out = {0, outs[0], &r};
+    res = pjafilter2_decode(io_read, &a, io_read, &b, io_write, &out, c->threads);
   }
+  return result(&r, res);
 }
 
 static HRESULT COMCALL m_query(void *p, const guid_t *iid, void **out) { return c_query(from_mt(p), iid, out); }
@@ -218,24 +274,28 @@ static HRESULT COMCALL m_threads(void *p, uint32_t threads) {
 }
 
 static const coder_vt CODER_VT = {c_query, c_addref, c_release, c_code};
+static const coder2_vt CODER2_VT = {c_query, c_addref, c_release, c_code2};
 static const coder_mt_vt CODER_MT_VT = {m_query, m_addref, m_release, m_threads};
 
 static HRESULT COMCALL c_query(coder_t *c, const guid_t *iid, void **out) {
   if (!out) return E_INVALIDARG;
   *out = 0;
-  if (is_iunknown(iid) || is_7zip_iid(iid, G_CODER, S_CODER)) *out = c;
+  if (is_iunknown(iid) || is_7zip_iid(iid, G_CODER, c->streams == 2 ? S_CODER2 : S_CODER)) *out = c;
   else if (is_7zip_iid(iid, G_CODER, S_CODER_MT)) *out = &c->mt_vt;
   else return E_NOINTERFACE;
   c_addref(c);
   return S_OK;
 }
 
-static HRESULT new_coder(int encode, const guid_t *iid, void **out) {
+static HRESULT new_coder(uint32_t index, int encode, const guid_t *iid, void **out) {
   if (!out) return E_INVALIDARG;
   *out = 0;
+  if (index >= NUM_METHODS) return CLASS_E_CLASSNOTAVAILABLE;
   coder_t *c = H7.alloc(sizeof *c);
   if (!c) return E_OUTOFMEMORY;
-  c->vt = &CODER_VT; c->mt_vt = &CODER_MT_VT; c->refs = 1; c->encode = encode;
+  c->streams = (int)METHODS[index].streams;
+  c->vt = c->streams == 2 ? (const void *)&CODER2_VT : (const void *)&CODER_VT;
+  c->mt_vt = &CODER_MT_VT; c->refs = 1; c->encode = encode;
   /* extracting, 7-Zip tells only the first coder of the chain that takes
      it (LZMA2 or zstd) how many threads to use; PJA uses the processors */
   c->threads = H7.threads > 0 ? H7.threads : 1;
@@ -248,7 +308,7 @@ static HRESULT new_coder(int encode, const guid_t *iid, void **out) {
 
 HRESULT pja7z_GetNumberOfMethods(uint32_t *n) {
   if (!n) return E_INVALIDARG;
-  *n = 1;
+  *n = NUM_METHODS;
   return S_OK;
 }
 
@@ -256,9 +316,9 @@ static void set_bstr(propvariant_t *v, const void *bytes, uint32_t len) {
   void *b = H7.bstr(bytes, len);
   if (b) { v->vt = VT_BSTR; v->v.p = b; }
 }
-static void class_id(uint16_t data3, guid_t *g) {
+static void class_id(uint32_t index, uint16_t data3, guid_t *g) {
   g->d1 = 0x23170F69u; g->d2 = 0x40C1; g->d3 = data3;
-  for (int k = 0; k < 8; k++) g->d4[k] = (uint8_t)(METHOD_ID >> (8 * k));
+  for (int k = 0; k < 8; k++) g->d4[k] = (uint8_t)(METHODS[index].id >> (8 * k));
 }
 
 enum { P_ID, P_NAME, P_DECODER, P_ENCODER, P_PACK_STREAMS, P_UNPACK_STREAMS, P_DESCRIPTION,
@@ -266,20 +326,26 @@ enum { P_ID, P_NAME, P_DECODER, P_ENCODER, P_PACK_STREAMS, P_UNPACK_STREAMS, P_D
 
 HRESULT pja7z_GetMethodProperty(uint32_t index, uint32_t prop, propvariant_t *v) {
   if (!v) return E_INVALIDARG;
-  if (index != 0) return E_INVALIDARG;
+  if (index >= NUM_METHODS) return E_INVALIDARG;
   v->vt = VT_EMPTY;
   guid_t g;
+  const method_t *m = &METHODS[index];
   switch (prop) {
-    case P_ID: v->vt = VT_UI8; v->v.u64 = METHOD_ID; break;
+    case P_ID: v->vt = VT_UI8; v->v.u64 = m->id; break;
     case P_NAME: {
       /* a BSTR holds wchar_t: 2 bytes on Windows, 4 on Linux and macOS */
-      __WCHAR_TYPE__ w[sizeof NAME];
-      for (unsigned k = 0; k < sizeof NAME; k++) w[k] = (__WCHAR_TYPE__)(uint8_t)NAME[k];
-      set_bstr(v, w, (uint32_t)(sizeof w[0] * (sizeof NAME - 1)));
+      __WCHAR_TYPE__ w[8];
+      unsigned n = 0;
+      while (m->name[n] && n < 7) { w[n] = (__WCHAR_TYPE__)(uint8_t)m->name[n]; n++; }
+      w[n] = 0;
+      set_bstr(v, w, (uint32_t)(sizeof w[0] * n));
       break;
     }
-    case P_DECODER: class_id(0x2790, &g); set_bstr(v, &g, sizeof g); break;
-    case P_ENCODER: class_id(0x2791, &g); set_bstr(v, &g, sizeof g); break;
+    case P_DECODER: class_id(index, 0x2790, &g); set_bstr(v, &g, sizeof g); break;
+    case P_ENCODER: class_id(index, 0x2791, &g); set_bstr(v, &g, sizeof g); break;
+    case P_PACK_STREAMS:
+      if (m->streams != 1) { v->vt = VT_UI4; v->v.u32 = m->streams; }
+      break;
     case P_DECODER_ASSIGNED: case P_ENCODER_ASSIGNED: v->vt = VT_BOOL; v->v.b = -1; break;
     case P_IS_FILTER: v->vt = VT_BOOL; v->v.b = 0; break;
     default: break;
@@ -288,24 +354,24 @@ HRESULT pja7z_GetMethodProperty(uint32_t index, uint32_t prop, propvariant_t *v)
 }
 
 HRESULT pja7z_CreateDecoder(uint32_t index, const guid_t *iid, void **out) {
-  if (index != 0) return CLASS_E_CLASSNOTAVAILABLE;
-  return new_coder(0, iid, out);
+  return new_coder(index, 0, iid, out);
 }
 HRESULT pja7z_CreateEncoder(uint32_t index, const guid_t *iid, void **out) {
-  if (index != 0) return CLASS_E_CLASSNOTAVAILABLE;
-  return new_coder(1, iid, out);
+  return new_coder(index, 1, iid, out);
 }
 /* CreateObject / CreateCoder: by class ID */
 HRESULT pja7z_CreateObject(const guid_t *clsid, const guid_t *iid, void **out) {
   if (out) *out = 0;
   if (!clsid) return E_INVALIDARG;
-  guid_t d, e;
-  class_id(0x2790, &d); class_id(0x2791, &e);
-  int isd = 1, ise = 1;
-  const uint8_t *a = (const uint8_t *)clsid, *bd = (const uint8_t *)&d, *be = (const uint8_t *)&e;
-  for (unsigned k = 0; k < sizeof d; k++) { if (a[k] != bd[k]) isd = 0; if (a[k] != be[k]) ise = 0; }
-  if (!isd && !ise) return CLASS_E_CLASSNOTAVAILABLE;
-  return new_coder(ise, iid, out);
+  for (uint32_t i = 0; i < NUM_METHODS; i++) {
+    guid_t d, e;
+    class_id(i, 0x2790, &d); class_id(i, 0x2791, &e);
+    int isd = 1, ise = 1;
+    const uint8_t *a = (const uint8_t *)clsid, *bd = (const uint8_t *)&d, *be = (const uint8_t *)&e;
+    for (unsigned k = 0; k < sizeof d; k++) { if (a[k] != bd[k]) isd = 0; if (a[k] != be[k]) ise = 0; }
+    if (isd || ise) return new_coder(i, ise, iid, out);
+  }
+  return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 enum { M_INTERFACE_TYPE = 0, M_VERSION = 1 };

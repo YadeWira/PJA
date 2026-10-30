@@ -42,14 +42,18 @@ type
     size, expected: SizeUInt;
     output: PByte;
     outSize: SizeUInt;
-    ok: LongInt;
+    ok, threads: LongInt;
+    done: LongInt;
   end;
   PJob = ^TJob;
   { pjafilter.c's host_t }
   THost = record
     alloc: function(size: SizeUInt): Pointer; cdecl;
     release: procedure(p: Pointer); cdecl;
-    run: procedure(jobs: PJob; n, encode, threads: LongInt); cdecl;
+    poolOpen: function(threads, encode: LongInt): Pointer; cdecl;
+    poolSubmit: procedure(pool: Pointer; job: PJob); cdecl;
+    poolWait: procedure(pool: Pointer; job: PJob); cdecl;
+    poolClose: procedure(pool: Pointer); cdecl;
   end;
   {$packrecords default}
   TReadFn = function(ctx, buf: Pointer; size: SizeUInt): PtrInt; cdecl;
@@ -60,6 +64,10 @@ function pjafilter_encode(read: TReadFn; readCtx: Pointer; write: TWriteFn; writ
   threads: LongInt): LongInt; cdecl; external;
 function pjafilter_decode(read: TReadFn; readCtx: Pointer; write: TWriteFn; writeCtx: Pointer;
   threads: LongInt): LongInt; cdecl; external;
+function pjafilter2_encode(read: TReadFn; readCtx: Pointer; writeA: TWriteFn; aCtx: Pointer;
+  writeB: TWriteFn; bCtx: Pointer; threads: LongInt): LongInt; cdecl; external;
+function pjafilter2_decode(readA: TReadFn; aCtx: Pointer; readB: TReadFn; bCtx: Pointer;
+  write: TWriteFn; writeCtx: Pointer; threads: LongInt): LongInt; cdecl; external;
 
 type
   { pja7z.c's host7z_t }
@@ -155,50 +163,104 @@ begin
 end;
 
 type
-  { the batch's workers: each takes the next job until none is left }
-  TBatch = class(TThread)
-    jobs: PJob;
-    n, threads: Integer;
-    encode: Boolean;
-    next: PLongInt;
+  { the filter's pool: threads that take the jobs in the order they come
+    and run them; the filter waits for each one in its own order }
+  TPool = class;
+  TPoolThread = class(TThread)
+    pool: TPool;
     procedure Execute; override;
   end;
+  TPool = class
+    lock: TRTLCriticalSection;
+    work, finished: PRTLEvent;
+    queue: array of PJob;
+    head, count: Integer;
+    stop, encode: Boolean;
+    workers: array of TPoolThread;
+    function Take(out j: PJob): Boolean;
+  end;
 
-procedure TBatch.Execute;
-var k: LongInt;
+{ the next job, or nil; False when the pool is closing and nothing is left }
+function TPool.Take(out j: PJob): Boolean;
 begin
-  repeat
-    k := InterLockedIncrement(next^) - 1;
-    if k >= n then Break;
-    RunJob(jobs[k], encode, threads);
-  until False;
+  EnterCriticalSection(lock);
+  j := nil;
+  if head < count then begin j := queue[head]; Inc(head); end;
+  if head = count then begin head := 0; count := 0; end;
+  Result := (j <> nil) or not stop;
+  LeaveCriticalSection(lock);
 end;
 
-{ the jobs on up to `threads` threads at once; when there are fewer jobs
-  than threads, each file's bands share what is left }
-procedure RunJobs(jobs: PJob; n, encode, threads: LongInt); cdecl;
-var w: array of TBatch; k, nw, per: Integer; next: LongInt;
+procedure TPoolThread.Execute;
+var j: PJob;
 begin
-  if n <= 0 then Exit;
-  if threads < 1 then threads := 1;
-  nw := n; if nw > threads then nw := threads;
-  per := threads div nw;
-  if nw = 1 then begin
-    for k := 0 to n - 1 do RunJob(jobs[k], encode <> 0, per);
-    Exit;
+  while pool.Take(j) do
+    if j = nil then RTLEventWaitFor(pool.work, 20)
+    else begin
+      RunJob(j^, pool.encode, j^.threads);
+      InterLockedExchange(j^.done, 1);
+      RTLEventSetEvent(pool.finished);
+    end;
+end;
+
+function OpenPool(threads, encode: LongInt): Pointer; cdecl;
+var p: TPool; k: Integer;
+begin
+  Result := nil;
+  try
+    if threads < 1 then threads := 1;
+    p := TPool.Create;
+    InitCriticalSection(p.lock);
+    p.work := RTLEventCreate;
+    p.finished := RTLEventCreate;
+    p.encode := encode <> 0;
+    SetLength(p.queue, 64);
+    SetLength(p.workers, threads);
+    for k := 0 to threads - 1 do begin
+      p.workers[k] := TPoolThread.Create(True);
+      p.workers[k].pool := p;
+      p.workers[k].Start;
+    end;
+    Result := p;
+  except
+    Result := nil;
   end;
-  next := 0;
-  SetLength(w, nw);
-  for k := 0 to nw - 1 do begin
-    w[k] := TBatch.Create(True);
-    w[k].jobs := jobs; w[k].n := n; w[k].threads := per; w[k].encode := encode <> 0;
-    w[k].next := @next;
-    w[k].Start;
+end;
+
+procedure SubmitJob(pool: Pointer; job: PJob); cdecl;
+var p: TPool;
+begin
+  p := TPool(pool);
+  EnterCriticalSection(p.lock);
+  if p.count = Length(p.queue) then SetLength(p.queue, 2 * Length(p.queue));
+  p.queue[p.count] := job;
+  Inc(p.count);
+  LeaveCriticalSection(p.lock);
+  RTLEventSetEvent(p.work);
+end;
+
+procedure WaitJob(pool: Pointer; job: PJob); cdecl;
+begin
+  while InterLockedCompareExchange(job^.done, 1, 1) = 0 do
+    RTLEventWaitFor(TPool(pool).finished, 20);
+end;
+
+procedure ClosePool(pool: Pointer); cdecl;
+var p: TPool; k: Integer;
+begin
+  p := TPool(pool);
+  EnterCriticalSection(p.lock);
+  p.stop := True;
+  LeaveCriticalSection(p.lock);
+  for k := 0 to High(p.workers) do begin
+    RTLEventSetEvent(p.work);
+    p.workers[k].WaitFor;
+    p.workers[k].Free;
   end;
-  for k := 0 to nw - 1 do begin
-    w[k].WaitFor;
-    w[k].Free;
-  end;
+  RTLEventDestroy(p.work);
+  RTLEventDestroy(p.finished);
+  DoneCriticalSection(p.lock);
+  p.Free;
 end;
 
 function pja_version: PChar; cdecl;
@@ -266,6 +328,26 @@ begin
   end;
 end;
 
+function pja_filter2_encode(read: TReadFn; readCtx: Pointer; writeA: TWriteFn; aCtx: Pointer;
+                            writeB: TWriteFn; bCtx: Pointer; threads: LongInt): LongInt; cdecl;
+begin
+  try
+    Result := pjafilter2_encode(read, readCtx, writeA, aCtx, writeB, bCtx, threads);
+  except
+    Result := PJA_E_MEMORY;
+  end;
+end;
+
+function pja_filter2_decode(readA: TReadFn; aCtx: Pointer; readB: TReadFn; bCtx: Pointer;
+                            write: TWriteFn; writeCtx: Pointer; threads: LongInt): LongInt; cdecl;
+begin
+  try
+    Result := pjafilter2_decode(readA, aCtx, readB, bCtx, write, writeCtx, threads);
+  except
+    Result := PJA_E_MEMORY;
+  end;
+end;
+
 { the 7-Zip plugin's exports: STDAPI, __stdcall on Windows x86 }
 function GetNumberOfMethods(n: PLongWord): HRESULT; {$ifdef windows}stdcall{$else}cdecl{$endif};
 begin
@@ -301,13 +383,17 @@ var host: THost; host7z: THost7z;
 
 exports
   pja_version, pja_compress, pja_decompress, pja_free, pja_filter_encode, pja_filter_decode,
+  pja_filter2_encode, pja_filter2_decode,
   GetNumberOfMethods, GetMethodProperty, CreateDecoder, CreateEncoder, CreateObject, GetModuleProp;
 
 begin
   IsMultiThread := True;
   host.alloc := @HostAlloc;
   host.release := @HostRelease;
-  host.run := @RunJobs;
+  host.poolOpen := @OpenPool;
+  host.poolSubmit := @SubmitJob;
+  host.poolWait := @WaitJob;
+  host.poolClose := @ClosePool;
   pjafilter_host(host);
   host7z.bstr := @MakeBstr;
   host7z.alloc := @HostAlloc;

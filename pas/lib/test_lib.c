@@ -107,6 +107,40 @@ int main(int argc, char **argv) {
     if (s == 0) enc = e; else free(e.d);
     free(b.d);
   }
+  /* version 2: two streams; the stream twice over, so that the second
+     copy's files come out as matches against the first's */
+  {
+    size_t n2 = 2 * alln;
+    unsigned char *two = malloc(n2);
+    memcpy(two, all, alln); memcpy(two + alln, all, alln);
+    for (unsigned s = 0; s < 3; s++) {
+      static const size_t st2[] = {1 << 20, 4096, 7};
+      src_t in = {two, n2, 0, st2[s]};
+      dst_t a = {0}, b = {0}, back = {0};
+      int r = pja_filter2_encode(rd, &in, wr, &a, wr, &b, 4);
+      check(r == PJA_OK, "filter2 encode", "");
+      src_t ia = {a.d, a.n, 0, st2[s]}, ib = {b.d, b.n, 0, st2[s]};
+      r = pja_filter2_decode(rd, &ia, rd, &ib, wr, &back, 4);
+      check(r == PJA_OK && back.n == n2 && memcmp(back.d, two, n2) == 0, "filter2 round trip", "");
+      check(b.n < enc.n, "filter2: the second copy deduplicated", "");
+      printf("filter2, reads of %zu: %zu -> %zu + %zu bytes, %s\n", st2[s], n2, a.n, b.n,
+             r == PJA_OK && back.n == n2 ? "back" : "NOT back");
+      if (s == 0 && b.n > 20) {                   /* damaged B: an error or other bytes */
+        int refused = 0;
+        for (size_t k = 5; k < b.n; k += b.n / 100 + 1) {
+          b.d[k] ^= 0x41;
+          src_t ja = {a.d, a.n, 0, 1 << 20}, jb = {b.d, b.n, 0, 1 << 20};
+          dst_t o2 = {0};
+          refused += pja_filter2_decode(rd, &ja, rd, &jb, wr, &o2, 1) != PJA_OK;
+          free(o2.d);
+          b.d[k] ^= 0x41;
+        }
+        printf("damaged filter2 B streams: %d refused of about 100, no crash\n", refused);
+      }
+      free(a.d); free(b.d); free(back.d);
+    }
+    free(two);
+  }
   /* damaged filter streams: about 300 bytes spread over the stream
      flipped, one at a time, and cut short at a few places */
   int bad = 0, same = 0;

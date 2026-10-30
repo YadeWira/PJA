@@ -74,6 +74,14 @@ int PJA_CALL pja_filter_encode(pja_read_fn read, void *read_ctx, pja_write_fn wr
 int PJA_CALL pja_filter_decode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *write_ctx,
                                int threads);
 
+/* Version 2, for an archiver that stores two streams apart: A (the records
+   and the raw bytes) for its compressor, B (PJA's data, deduplicated
+   across files) stored as it is. */
+int PJA_CALL pja_filter2_encode(pja_read_fn read, void *read_ctx, pja_write_fn write_a, void *a_ctx,
+                                pja_write_fn write_b, void *b_ctx, int threads);
+int PJA_CALL pja_filter2_decode(pja_read_fn read_a, void *a_ctx, pja_read_fn read_b, void *b_ctx,
+                                pja_write_fn write, void *write_ctx, int threads);
+
 #ifdef __cplusplus
 }
 #endif

@@ -93,20 +93,21 @@ for [7-Zip](https://7-zip.org) and
 
 PJA goes first in the chain as a filter: it recompresses the JPEG and
 JPEG-LS files it finds in the solid block and passes every other byte on
-to LZMA2 or zstd. The two help each other: LZMA2 matches what PJA cannot
-(EXIF, other files, and one image saved several times at the same quality,
-progressive or not, with or without restarts, which PJA turns into the same
-coefficient stream). Extracting needs the plugin too
+to LZMA2 or zstd, which match what PJA leaves (EXIF, other files); its
+own data goes into the archive by a second stream, with what repeats
+between files taken out (one image saved several times, progressive or
+not, with or without restarts, gives the same coefficients). Extracting
+needs the plugin too
 ([doc/LIBRARY.md](doc/LIBRARY.md)). With 7-Zip 25 on Linux, 8 threads, one
 archive per set:
 
-| set | 7-Zip + PJA + LZMA2 | Aqueous | zpaq-std + PJA 0.0.8 |
+| set | 7-Zip + PJA | Aqueous | zpaq-std + PJA 0.0.8 |
 |---|---|---|---|
-| photos (151) | **72.60%**, 21 / 7.8 s | 80.46%, 2.3 / 0.7 s | 75.50%, 33.1 / 15.0 s |
-| corpus (78) | **66.90%**, 15 / 6.2 s | 71.91%, 1.6 / 0.3 s | 71.29%, 40.7 / 12.8 s |
-| MPO (6) | **73.40%** | 78.94% | 80.68% |
-| arithmetic-coded (244) | **17.37%** | 85.71% | 81.89% |
-| generated (640) | **16.52%** | 33.96% | 83.60% |
+| photos (151) | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 75.50%, 33.1 / 15.0 s |
+| corpus (78) | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 71.29%, 40.7 / 12.8 s |
+| MPO (6) | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 80.68%, 26.8 / 8.7 s |
+| arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 81.89%, 1.4 / 0.1 s |
+| generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 83.60%, 16.2 / 6.6 s |
 
 It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
 8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),

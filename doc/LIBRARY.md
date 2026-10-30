@@ -68,9 +68,37 @@ Raw bytes are cut into records of 262,144 bytes counted from the end of the
 last file, so the stream depends only on the input: not on how it was read,
 not on the number of threads.
 
-Files are compressed in batches, several at once (up to eight per thread,
-or 64 MiB), and decompressed the same way; with fewer files than threads,
-each file's bands share the rest.
+### Version 2: two streams, PJA's data deduplicated
+
+For an archiver that can store several streams apart (7-Zip's method `PJA`
+below), version 2 splits the output:
+
+```
+A: "PJAF" 02, the same records, but a file's record is only 01 size n:
+   its codec stream goes to B
+B: "PJAB" 01, then each file's n bytes, in A's order, as
+   L, L literal bytes, [M, D, L, L literal bytes]...
+   (L, M, D LEB128 numbers; a match copies M >= 32 bytes from D bytes back
+   in the streams written so far; it ends when the n bytes are there)
+```
+
+A holds the raw bytes and goes on to the archiver's compressor; B holds
+PJA's data, which no compressor makes smaller, and skips it. What a
+compressor would still have found in B — the same coefficients in several
+files — is taken out by the filter itself: each file's stream is coded
+against the ones before it (up to 128 MiB of them, then the history starts
+again on both sides), its matches found through a hash of 32 bytes at
+every position against the history's positions every 8 bytes. LZMA2 found
+those repeats too, but had to read all of PJA's data to do it, and that
+was most of 7-Zip's time.
+
+### Threads
+
+Files go to a pool of threads as the filter finds them, up to eight per
+thread (or 64 MiB) ahead of the oldest, which is written as soon as it is
+done; so reading, compressing and writing overlap, and extracting works the
+same way. A file alone gets the threads for its bands. None of this
+changes the stream.
 
 ## The C interface
 
@@ -84,20 +112,24 @@ and no exception or signal leaves the library: errors are return codes.
 | `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash |
 | `pja_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
 | `pja_filter_decode(read, ctx, write, ctx, threads)` | its stream → the bytes |
+| `pja_filter2_encode(read, ctx, write_a, ctx, write_b, ctx, threads)` | version 2: two streams, A for the archiver's compressor and B (PJA's data, deduplicated) to store as it is |
+| `pja_filter2_decode(read_a, ctx, read_b, ctx, write, ctx, threads)` | both streams → the bytes |
 | `pja_free(p)` | frees what the library returned |
 
 `pas/lib/test_lib.c` is the test, and an example: each file through
 `pja_compress`/`pja_decompress`, all of them in one stream with bytes
 between them through the filter, read 1 byte to 1 MiB at a time (the same
-stream every time), and damaged and cut filter streams.
+stream every time), the stream twice over through version 2 (the second
+copy deduplicated), and damaged and cut filter streams.
 
 ## The 7-Zip plugin
 
 Put the library in the `Codecs` folder next to 7-Zip: `7z.exe` on Windows
-(7-Zip or 7-Zip-zstd), `7z` and `7z.so` on Linux. `7z i` lists it:
+(7-Zip or 7-Zip-zstd), `7z` and `7z.so` on Linux. `7z i` lists two methods:
 
 ```
- 1  ED     37F01 PJA
+ 1 2ED     37F02 PJA
+ 1  ED     37F01 PJA1
 ```
 
 ```sh
@@ -105,6 +137,12 @@ Put the library in the `Codecs` folder next to 7-Zip: `7z.exe` on Windows
 7z a -m0=PJA -m1=zstd  photos.7z photos/        # 7-Zip-zstd
 7z x photos.7z
 ```
+
+`PJA` is the filter's version 2: its first stream (the records and the raw
+bytes) goes to the next coder, its second (PJA's data) straight into the
+archive; 7-Zip binds them that way by itself. `PJA1` is version 1, one
+stream, what 0.2.0 wrote as `PJA`: it is there so that those archives
+open.
 
 `-mmt` sets the filter's threads when compressing; extracting, 7-Zip
 gives its thread count only to the first coder of the chain that takes one
@@ -114,33 +152,35 @@ opens it. It works with 7-Zip on Windows and with 7-Zip 23 or later on
 Linux and macOS; p7zip (the old port, `7z` 16.02) builds its interfaces
 differently and does not load it.
 
-Measured on 29/10/2026 with 7-Zip 25.01 on Linux (`-mmt=8`, one archive per
-set, every file extracted and compared): the input's size, the archive
-against it, and the times to write it and to extract it.
+Measured on 29/10/2026 with 7-Zip 25.01 on Linux (`-m0=PJA -m1=LZMA2
+-mmt=8`, one archive per set, every file extracted and compared, on a busy
+machine): the archive against the input, and the times to write it and to
+extract it. zstd (7-Zip-zstd 26.02) gives the same sizes within 0.1%.
 
-| set | files | 7-Zip + PJA + LZMA2 | 7-Zip-zstd + PJA + zstd | Aqueous | `pja` alone |
-|---|---|---|---|---|---|
-| photos | 151 | **72.60%**, 20.9 / 7.8 s | 72.60%, 15.5 / 7.7 s | 80.46%, 2.3 / 0.7 s | 72.61% |
-| corpus of JPEGs of every kind | 78 | **66.90%**, 15.3 / 6.2 s | 69.99%, 12.9 / 6.2 s | 71.91% | 70.39% |
-| MPO | 6 | **73.40%** | | 78.94% | 73.38% |
-| arithmetic-coded JPEG | 244 | **17.37%** | | 85.71% | 74.59% |
-| generated JPEGs | 640 | **16.52%**, 4.7 / 2.7 s | 16.58%, 4.3 / 2.5 s | 33.96% | 73.73% |
+| set | files | 7-Zip + PJA | Aqueous | `pja` alone |
+|---|---|---|---|---|
+| photos | 151 | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 72.61%, 10.8 / 5.3 s |
+| corpus of JPEGs of every kind | 78 | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 70.39% |
+| MPO | 6 | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 73.38% |
+| arithmetic-coded JPEG | 244 | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 74.59% |
+| generated JPEGs | 640 | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 73.73% |
 
-On the photos the archive is as small as the `pja` command's files: there
-is little for LZMA2 to add. Where files repeat an image's coefficients (the
-arithmetic-coded and generated sets hold the same images in several
-encodings), the
-pair is four times smaller than PJA alone and half the size of Aqueous.
-LZMA2 is the slower half of the chain: PJA's output does not compress
-further, and LZMA2 goes through it on one or two threads; zstd is faster.
+7-Zip with PJA takes as long as the `pja` command on its own. On the photos
+the archive is as small as the command's files. Where files repeat an
+image's coefficients (the arithmetic-coded and generated sets hold the same
+images in several encodings) it is four times smaller than PJA alone and
+half the size of Aqueous. Aqueous stays several times faster.
+
+With 0.2.0's one stream (now `PJA1`), LZMA2 had to go through all of PJA's
+data: 20.9 / 7.8 s on the photos, for 72.60%.
 
 Tested on Windows 10 with 7-Zip 26.05 and 7-Zip-zstd 26.02, 64 and 32
 bits: the plugin listed, archives written, tested and extracted byte for
 byte, and an archive written on Linux extracted.
 
-The method ID, `03 7F 01`, is the one 7-Zip's `DOC/Methods.txt` keeps for
-an experimental method; PJA will move to an ID of its own once 7-Zip
-assigns one, and stay able to read `03 7F 01`.
+The method IDs, `03 7F 02` and `03 7F 01`, are in the slot 7-Zip's
+`DOC/Methods.txt` keeps for an experimental method; PJA will move to IDs
+of its own once 7-Zip assigns them, and stay able to read these.
 
 How it is made: 7-Zip's interfaces are C++ classes with only virtual
 methods, which is a table of function pointers at the start of the object,
