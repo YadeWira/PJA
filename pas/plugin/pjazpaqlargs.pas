@@ -105,10 +105,12 @@ begin
   Inc(Result, 12 + 8 * 8);
 end;
 
-function ZpaqlWords(const j: TJpeg): Int64;
+{ ZpaqlWords with rawLen raw bytes instead of j's: a pjax host, whose
+  stream has its parts after the EOI cut out of them }
+function ZpaqlWordsRaw(const j: TJpeg; rawLen: Int64): Int64;
 var c: Integer; maxbw: SizeInt;
 begin
-  Result := ZPAQL_STATIC_WORDS + RawWords(Length(j.raw));
+  Result := ZPAQL_STATIC_WORDS + RawWords(rawLen);
   Inc(Result, DhtTables(j.raw) * 512);
   maxbw := 0;
   for c := 0 to High(j.comp) do begin
@@ -118,6 +120,11 @@ begin
   end;
   Inc(Result, Int64(maxbw) * 16);
   Inc(Result, Int64(BandCount(j)) * 2 * ZPAQL_MODEL_WORDS);
+end;
+
+function ZpaqlWords(const j: TJpeg): Int64;
+begin
+  Result := ZpaqlWordsRaw(j, Length(j.raw));
 end;
 
 function Log2Words(w: Int64): Integer;
@@ -212,7 +219,7 @@ function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64): 
 var k, len: SizeInt; sj: TJpeg;
 begin
   after := 0;
-  Result := ZPAQL_X_STATIC_WORDS + ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
+  Result := ZPAQL_X_STATIC_WORDS - ZPAQL_STATIC_WORDS;
   { as pjacodec.CompressAt looks for them: FF D8 FF from the third byte on,
     a Huffman JPEG inside the host's segments or after its end }
   k := 2;
@@ -229,6 +236,11 @@ begin
     end;
     Inc(k);
   end;
+  { the host: its raw bytes without the parts after its EOI, which its
+    stream cuts out (the parts inside its segments are zeroed, and stay);
+    until 0.5.0 they were counted here as well, twice with the parts, and
+    a camera's MPO of 10 MB asked for 2^27 words, its stream for 2^25 }
+  Result := Result + ZpaqlWordsRaw(j, Length(j.raw) - after);
 end;
 
 function ZpaqlPjaxArgs(const stream: TBytes): Int64;

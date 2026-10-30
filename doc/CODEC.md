@@ -1716,3 +1716,28 @@ other 12 (scans that end early, bad codes, an SOS that does not add up)
 look damaged or cut wrong, and still go as bytes. New samples
 `restarts_misnumbered.jpg` and `byte_before_eoi.jpg`.
 
+
+## The zpaq-std plugin: MPO and speed (30/10/2026)
+
+zpaq-std + PJA was still behind on MPO (80.53% against Aqueous' 78.94%)
+and slower than 7-Zip + PJA. Two of the four camera MPO, DSCF0039 and
+DSCF0075, did not go to pjax: its detection put their decoder at 2^27
+words of H, over the 2^26 the plugin allows, where their streams ask for
+2^25. The estimate counted the second image twice: in the host's raw
+bytes (TJpeg.raw keeps everything after the EOI) and as a part. The host
+now counts its raw bytes without the parts after its EOI, which its
+stream cuts out; pjax takes all four, 85.5% and 84.8% -> 75.0% and 73.1%.
+Only the detection changed: no stream and no ZPAQL.
+
+Measured through the plugin as zpaq-std calls it, one thread, the 151
+photos: detecting pjax 7.8 s, pja 7.4 s, compressing 59.3 s,
+decompressing 55.6 s. Each detection verified the whole JPEG again, and
+compress did it a third time. The detections now keep what they found (64
+entries, by the bytes' size and a 64-bit hash) and pja's compress takes
+the JPEG apart only (pjacodec.CompressVerified): pja's detection 7.4 s ->
+0, the same streams. And a call gave a file's bands one thread, whatever
+zpaq-std ran, so four MPO of 10 MB kept half the machine idle: an optional
+export, zpaqstd_threads_v1(n), tells the plugin how many threads zpaq-std
+runs, and each call takes n / (the calls running) for its bands. The four
+MPO through pjax, one call at a time: 27.2 -> 12.6 s to compress, 23.9 ->
+9.3 s to decompress with n = 8; the same streams.

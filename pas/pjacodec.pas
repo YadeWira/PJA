@@ -98,6 +98,12 @@ type
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True;
                   threads: Integer = 1; fast: Boolean = False; parts: Boolean = True;
                   v7: Boolean = False): TCodecResult;
+{ What CompressOne writes (version 5, the full model) for a JPEG whose
+  round trip the caller has verified on these very bytes already
+  (VerifyRoundTrip): j as Decompose leaves it, not rebuilt and compared
+  again. The zpaq-std plugin's compress after its detection; zpaq-std then
+  decodes the block and compares it. }
+function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer = 1): TCodecResult;
 { What the zpaq-std plugin's pjax codec writes: version 5 or 6 for a
   Huffman JPEG (8 or 12 bits, DNL, quirks), its parts version 5 and Huffman
   too, nothing as bytes: what pjax's ZPAQL decodes. }
@@ -529,6 +535,21 @@ begin
     end;
     Result := CompressJpeg(jpeg, j, stream, verify, threads, model);
   end;
+end;
+
+function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer): TCodecResult;
+begin
+  stream := nil;
+  { what CompressOne refuses for version 5 }
+  if HasIgnoredRestarts(j) then begin
+    Result := CodecFail(ceJpeg); Result.jpeg.err := jeBadRst;
+    Exit;
+  end;
+  if HasCorrectionLimits(j) then begin
+    Result := CodecFail(ceJpeg); Result.jpeg.err := jeNoRoundTrip;
+    Exit;
+  end;
+  Result := CompressJpeg(jpeg, j, stream, False, threads, mkFull);
 end;
 
 function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;

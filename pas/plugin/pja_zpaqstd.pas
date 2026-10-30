@@ -40,6 +40,15 @@
     comes back byte for byte (pjajls.VerifyJls) and fits its decoder's
     memory with either model. No global state, so several threads can ask
     at once.
+  - zpaqstd_threads_v1(n), optional (0.5.1): how many threads zpaq-std
+    runs; each compress() and decompress() then gives a file's bands
+    n / (the calls running at that moment) threads, so that a few large
+    files (an MPO of 10 MB) do not leave the rest idle. Without it, one
+    thread a call, as before. The streams are the same with any number.
+  - The detections of pja, pjax and pjall verify the same JPEG the same
+    way: the first one keeps what it found (a few entries, by the bytes'
+    size and hash), the others and pja's compress() use it, which then
+    does not rebuild the JPEG a third time (pjacodec.CompressVerified).
 
   Levels: 2 = the full model, the stream frozen as pja5-full (stream version
   5, model byte 0). The fast model (level 1) joins once its stream is frozen.
@@ -103,6 +112,98 @@ type
   end;
   PZsCodec = ^TZsCodec;
 
+var
+  { zpaqstd_threads_v1's n, and the calls running }
+  ThreadsGiven: LongInt = 1;
+  Running: LongInt = 0;
+
+{ a call starts: the threads its file's bands get; Leave when it ends }
+function Enter: Integer;
+var k: LongInt;
+begin
+  k := InterLockedIncrement(Running);
+  if k < 1 then k := 1;
+  Result := ThreadsGiven div k;
+  if Result < 1 then Result := 1;
+end;
+
+procedure Leave;
+begin
+  InterLockedDecrement(Running);
+end;
+
+procedure zpaqstd_threads_v1(n: LongInt); cdecl;
+begin
+  if n < 1 then n := 1;
+  if n > 256 then n := 256;
+  ThreadsGiven := n;
+end;
+
+type
+  { what the detections found for one JPEG: its round trip, and whether
+    pja, pjax and pjall take it }
+  TVerdict = record
+    size: SizeUInt;
+    hash: QWord;
+    used, rt, pja, pjax, pjall: Boolean;
+  end;
+
+const
+  VERDICT_SLOTS = 64;
+
+var
+  KeptVerdicts: array[0..VERDICT_SLOTS - 1] of TVerdict;
+  VerdictNext: Integer = 0;
+  VerdictLock: TRTLCriticalSection;
+
+{ the bytes' hash: 8 at a time, then the rest; only to find a verdict
+  again (a collision costs one block that zpaq-std's own check refuses) }
+function BytesHash(src: PByte; n: SizeUInt): QWord;
+var i: SizeUInt; w: QWord;
+begin
+  Result := QWord($CBF29CE484222325) xor n;
+  i := 0;
+  {$push}{$Q-}{$R-}
+  while i + 8 <= n do begin
+    Move(src[i], w, 8);
+    Result := (Result xor w) * QWord($100000001B3);
+    Result := Result xor (Result shr 29);
+    Inc(i, 8);
+  end;
+  while i < n do begin
+    Result := (Result xor src[i]) * QWord($100000001B3);
+    Inc(i);
+  end;
+  {$pop}
+end;
+
+function FindVerdict(size: SizeUInt; hash: QWord; out v: TVerdict): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  EnterCriticalSection(VerdictLock);
+  try
+    for i := 0 to VERDICT_SLOTS - 1 do
+      if KeptVerdicts[i].used and (KeptVerdicts[i].size = size) and (KeptVerdicts[i].hash = hash) then begin
+        v := KeptVerdicts[i];
+        Exit(True);
+      end;
+  finally
+    LeaveCriticalSection(VerdictLock);
+  end;
+end;
+
+procedure KeepVerdict(const v: TVerdict);
+begin
+  EnterCriticalSection(VerdictLock);
+  try
+    KeptVerdicts[VerdictNext] := v;
+    VerdictNext := (VerdictNext + 1) mod VERDICT_SLOTS;
+  finally
+    LeaveCriticalSection(VerdictLock);
+  end;
+end;
+
 function Bytes(src: Pointer; n: SizeUInt): TBytes;
 begin
   Result := nil;
@@ -122,16 +223,20 @@ end;
 { compress() of either codec: pja takes no JPEG-LS file and pjals nothing
   else, so that each block's stream is the one its ZPAQL decodes }
 function CompressAs(ls: Boolean; src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt): Int64;
-var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean;
+  level: LongInt; threads: Integer): Int64;
+var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean; v: TVerdict;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
     d := Bytes(src, n);
     if IsJls(d) <> ls then Exit(ZS_ERR_DATA);
     { no verification here: zpaq-std decodes every block and compares }
-    { version 5 only: the stream its ZPAQL reads }
-    r := Compress(d, stream, False, 1, False, False);
+    { version 5 only: the stream its ZPAQL reads; a JPEG pja's detection
+      verified already is only taken apart }
+    if not ls and FindVerdict(n, BytesHash(src, n), v) and v.rt and v.pja and Decompose(d, j).Ok then
+      r := CompressVerified(d, j, stream, threads)
+    else
+      r := Compress(d, stream, False, threads, False, False);
     if not r.Ok then Exit(ZS_ERR_DATA);
     { a 12-bit or a lossless JPEG: PJA takes it, the frozen ZPAQL would not }
     if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl) then Exit(ZS_ERR_DATA);
@@ -148,25 +253,29 @@ end;
 
 function CodecCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64; cdecl;
+var t: Integer;
 begin
-  Result := CompressAs(False, src, n, dst, cap, level);
+  t := Enter;
+  try Result := CompressAs(False, src, n, dst, cap, level, t); finally Leave; end;
 end;
 
 function LsCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64; cdecl;
+var t: Integer;
 begin
-  Result := CompressAs(True, src, n, dst, cap, level);
+  t := Enter;
+  try Result := CompressAs(True, src, n, dst, cap, level, t); finally Leave; end;
 end;
 
 { pjax: what CompressPjax writes, version 5 or 6, its ZPAQL's }
-function XCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt): Int64; cdecl;
+function XCompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt; threads: Integer): Int64;
 var stream: TBytes;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
     { no verification here: zpaq-std decodes every block and compares }
-    if not CompressPjax(Bytes(src, n), stream, False, 1).Ok then Exit(ZS_ERR_DATA);
+    if not CompressPjax(Bytes(src, n), stream, False, threads).Ok then Exit(ZS_ERR_DATA);
     if ZpaqlPjaxArgs(stream) < 0 then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
@@ -177,10 +286,18 @@ begin
   end;
 end;
 
+function XCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := XCompressIn(src, n, dst, cap, level, t); finally Leave; end;
+end;
+
 { pjalsx: a JPEG-LS file with subsampled components, its version 5 stream
   (the smaller of the two models), its ZPAQL's }
-function LsxCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt): Int64; cdecl;
+function LsxCompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt; threads: Integer): Int64;
 var stream, d: TBytes;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
@@ -188,7 +305,7 @@ begin
     d := Bytes(src, n);
     if not IsJls(d) then Exit(ZS_ERR_DATA);
     { no verification here: zpaq-std decodes every block and compares }
-    if not Compress(d, stream, False, 1, False, False).Ok then Exit(ZS_ERR_DATA);
+    if not Compress(d, stream, False, threads, False, False).Ok then Exit(ZS_ERR_DATA);
     if ZpaqlJlsxArgs(stream) < 0 then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
@@ -197,6 +314,14 @@ begin
     on EOutOfMemory do Result := ZS_ERR_MEMORY;
     on Exception do Result := ZS_ERR_DATA;
   end;
+end;
+
+function LsxCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := LsxCompressIn(src, n, dst, cap, level, t); finally Leave; end;
 end;
 
 function LsxQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
@@ -212,14 +337,14 @@ begin
 end;
 
 { pjall: a lossless JPEG's version 5 stream, its ZPAQL's }
-function LlCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt): Int64; cdecl;
+function LlCompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt; threads: Integer): Int64;
 var stream: TBytes;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
     { no verification here: zpaq-std decodes every block and compares }
-    if not Compress(Bytes(src, n), stream, False, 1, False, False).Ok then Exit(ZS_ERR_DATA);
+    if not Compress(Bytes(src, n), stream, False, threads, False, False).Ok then Exit(ZS_ERR_DATA);
     if ZpaqlLjpegArgs(stream) < 0 then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
@@ -228,6 +353,14 @@ begin
     on EOutOfMemory do Result := ZS_ERR_MEMORY;
     on Exception do Result := ZS_ERR_DATA;
   end;
+end;
+
+function LlCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := LlCompressIn(src, n, dst, cap, level, t); finally Leave; end;
 end;
 
 function LlQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
@@ -242,8 +375,8 @@ begin
   end;
 end;
 
-function XDecompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  param: LongInt): Int64; cdecl;
+function XDecompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  param: LongInt; threads: Integer): Int64;
 var jpeg: TBytes; r: TCodecResult;
 begin
   if (n > MAX_BLOCK) or (cap > MAX_BLOCK) or (n < 2) then Exit(ZS_ERR_DATA);
@@ -251,7 +384,7 @@ begin
     { version 5 of the full model, or 6 without bytes }
     if not (((PByte(src)[0] = STREAM_VERSION) and (PByte(src)[1] = 0)) or
             ((PByte(src)[0] = STREAM_PARTS) and (PByte(src)[1] <= 1))) then Exit(ZS_ERR_DATA);
-    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), 1, SizeInt(cap));
+    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), threads, SizeInt(cap));
     if not r.Ok or (SizeUInt(Length(jpeg)) <> cap) then Exit(ZS_ERR_DATA);
     if Length(jpeg) > 0 then Move(jpeg[0], dst^, Length(jpeg));
     Result := Length(jpeg);
@@ -259,6 +392,14 @@ begin
     on EOutOfMemory do Result := ZS_ERR_MEMORY;
     on Exception do Result := ZS_ERR_DATA;
   end;
+end;
+
+function XDecompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  param: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := XDecompressIn(src, n, dst, cap, param, t); finally Leave; end;
 end;
 
 function XQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
@@ -273,8 +414,8 @@ begin
   end;
 end;
 
-function CodecDecompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  param: LongInt): Int64; cdecl;
+function CodecDecompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  param: LongInt; threads: Integer): Int64;
 var jpeg: TBytes; r: TCodecResult;
 begin
   if (n > MAX_BLOCK) or (cap > MAX_BLOCK) then Exit(ZS_ERR_DATA);
@@ -282,7 +423,7 @@ begin
     { the full model only: a stream of another model is not this codec's }
     if (n >= 2) and (PByte(src)[1] <> 0) then Exit(ZS_ERR_DATA);
     { cap is the original's exact size: the raw part cannot be larger }
-    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), 1, SizeInt(cap));
+    r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), threads, SizeInt(cap));
     if not r.Ok or (SizeUInt(Length(jpeg)) <> cap) then Exit(ZS_ERR_DATA);
     if Length(jpeg) > 0 then Move(jpeg[0], dst^, Length(jpeg));
     Result := Length(jpeg);
@@ -290,6 +431,14 @@ begin
     on EOutOfMemory do Result := ZS_ERR_MEMORY;
     on Exception do Result := ZS_ERR_DATA;
   end;
+end;
+
+function CodecDecompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  param: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := CodecDecompressIn(src, n, dst, cap, param, t); finally Leave; end;
 end;
 
 { 1 if PJA takes the file: what its ZPAQL decoder covers (stage 3), so that
@@ -326,7 +475,7 @@ begin
 end;
 
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
-var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt;
+var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt; h: QWord; v: TVerdict;
 begin
   Result := 0;
   if (codecName = nil) or (n < 4) or (n > MAX_BLOCK) then Exit;
@@ -340,39 +489,44 @@ begin
     Exit;
   end;
   try
-    if StrComp(codecName, 'pja') = 0 then begin
-      d := Bytes(src, n);
-      { 8-bit DCT with its height in the frame and its restarts where its DRI
-        says: the ZPAQL decoder is frozen as v0.0.1 left it, which had
-        neither 12-bit nor lossless JPEG nor DNL nor ignored DRIs, nor
-        another encoder's correction bits' limit (0.0.8) }
-      if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and
-         not HasCorrectionLimits(j) and
-         (Length(j.scans) <= ZPAQL_MAX_SCANS) and
-         (ZpaqlPh(j) <= ZPAQL_MAX_PH) then Result := 1;
-    end else if StrComp(codecName, 'pjax') = 0 then begin
-      { a Huffman JPEG with what only version 6 holds: 12 bits, a DNL, a DRI
-        with no restarts (pja takes none of them), or JPEGs after its EOI of
-        PJAX_MIN_AFTER bytes or more. A camera's thumbnails gain a few KB,
-        which do not pay pjax's ZPAQL nor the pja block they would split:
-        those files are pja's }
-      d := Bytes(src, n);
-      if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         not j.arithmetic and not j.lossless and not HasCorrectionLimits(j) and
-         (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
-        w := ZpaqlPjaxFileWords(d, j, after);
-        if ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and (Log2Words(w) <= ZPAQL_MAX_PH) then
-          Result := 1;
+    if (StrComp(codecName, 'pja') = 0) or (StrComp(codecName, 'pjax') = 0) or (StrComp(codecName, 'pjall') = 0) then begin
+      { the three verify the JPEG the same way: once for all of them }
+      h := BytesHash(src, n);
+      if not FindVerdict(n, h, v) then begin
+        v := Default(TVerdict);
+        v.size := n; v.hash := h; v.used := True;
+        d := Bytes(src, n);
+        v.rt := (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok;
+        if v.rt then begin
+          { pja: 8-bit DCT with its height in the frame and its restarts
+            where its DRI says: the ZPAQL decoder is frozen as v0.0.1 left
+            it, which had neither 12-bit nor lossless JPEG nor DNL nor
+            ignored DRIs, nor another encoder's correction bits' limit
+            (0.0.8) }
+          v.pja := (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and
+                   not HasCorrectionLimits(j) and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+                   (ZpaqlPh(j) <= ZPAQL_MAX_PH);
+          { pjax: a Huffman JPEG with what only version 6 holds: 12 bits, a
+            DNL, a DRI with no restarts (pja takes none of them), or JPEGs
+            after its EOI of PJAX_MIN_AFTER bytes or more. A camera's
+            thumbnails gain a few KB, which do not pay pjax's ZPAQL nor the
+            pja block they would split: those files are pja's }
+          if not j.arithmetic and not j.lossless and not HasCorrectionLimits(j) and
+             (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
+            w := ZpaqlPjaxFileWords(d, j, after);
+            v.pjax := ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and
+                      (Log2Words(w) <= ZPAQL_MAX_PH);
+          end;
+          { pjall: a lossless JPEG (SOF3), its restarts where its DRI says:
+            no other codec takes it }
+          v.pjall := j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
+                     (Length(j.scans) <= ZPAQL_MAX_SCANS) and (Log2Words(ZpaqlLjpegWords(j)) <= ZPAQL_MAX_PH);
+        end;
+        KeepVerdict(v);
       end;
-    end else if StrComp(codecName, 'pjall') = 0 then begin
-      { a lossless JPEG (SOF3), its restarts where its DRI says: no other
-        codec takes it }
-      d := Bytes(src, n);
-      if (d[0] = $FF) and (d[1] = $D8) and not IsJls(d) and VerifyRoundTrip(d, j).Ok and
-         j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
-         (Length(j.scans) <= ZPAQL_MAX_SCANS) and
-         (Log2Words(ZpaqlLjpegWords(j)) <= ZPAQL_MAX_PH) then Result := 1;
+      if StrComp(codecName, 'pja') = 0 then Result := Ord(v.pja)
+      else if StrComp(codecName, 'pjax') = 0 then Result := Ord(v.pjax)
+      else Result := Ord(v.pjall);
     end else if StrComp(codecName, 'pjalsx') = 0 then begin
       { JPEG-LS with subsampled components, which pjals' frozen ZPAQL has
         not; compress() keeps the smaller of the two models: either has to
@@ -653,16 +807,19 @@ end;
 exports
   zpaqstd_codec_v1 name '_zpaqstd_codec_v1',
   zpaqstd_codecs_v1 name '_zpaqstd_codecs_v1',
-  zpaqstd_detect_v1 name '_zpaqstd_detect_v1';
+  zpaqstd_detect_v1 name '_zpaqstd_detect_v1',
+  zpaqstd_threads_v1 name '_zpaqstd_threads_v1';
 {$else}
 exports
   zpaqstd_codec_v1 name 'zpaqstd_codec_v1',
   zpaqstd_codecs_v1 name 'zpaqstd_codecs_v1',
-  zpaqstd_detect_v1 name 'zpaqstd_detect_v1';
+  zpaqstd_detect_v1 name 'zpaqstd_detect_v1',
+  zpaqstd_threads_v1 name 'zpaqstd_threads_v1';
 {$endif}
 
 begin
   IsMultiThread := True;
+  InitCriticalSection(VerdictLock);
   InfoZ := ZCard('pjaz', 'pja', 'stream v5 full');
   InfoLsZ := ZCard('pjalsz', 'pjals', 'stream v5');
   InfoXZ := ZCard('pjaxz', 'pjax', 'stream v6');
