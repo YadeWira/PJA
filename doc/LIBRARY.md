@@ -107,7 +107,7 @@ and no exception or signal leaves the library: errors are return codes.
 
 | function | does |
 |---|---|
-| `pja_version()` | `"pja 0.3.0"` |
+| `pja_version()` | `"pja 0.4.0"` |
 | `pja_compress(in, size, &out, &out_size, threads)` | a JPEG or JPEG-LS file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
 | `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash |
 | `pja_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |

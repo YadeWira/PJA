@@ -47,7 +47,7 @@ enum {
   PJA_E_ARG = 6         /* a null pointer or a bad argument */
 };
 
-/* "pja 0.3.0" */
+/* "pja 0.4.0" */
 const char *PJA_CALL pja_version(void);
 
 /* A JPEG or JPEG-LS file -> a .pja. threads: how many at once (1 or more).

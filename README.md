@@ -76,9 +76,17 @@ zpaq-std + PJA is smaller on photos, the corpus and arithmetic-coded
 JPEG; Aqueous is 10 to 20 times faster, and far smaller on the generated
 set, whose 640 files are variants of 12 images that it codes against each
 other. Inside zpaq-std, PJA decodes through its ZPAQL program, which is
-what makes it slower, and on MPO, arithmetic-coded and generated JPEG some
-files are still not taken the way `pja` alone takes them (being looked
-into with zpaq-std).
+what makes it slower.
+
+Since 0.4.0 the plugin also has z codecs (`pjaz`, `pjalsz`, `pjaxz`,
+`pjallz`, `pjalsxz`): zpaq-std passes the PJA streams of a block's files
+through an LZ77 that reaches back into the files before, and the z
+decoder undoes it, so what one file shares with another (the same image
+saved progressive and baseline, with and without restarts) is stored
+once. Measured by zpaq-std with them (`-sat`, a z codec only where it
+wins): the arithmetic-coded set down to 18.8% and the generated one to
+17.9%, from 71.3% and 72.3%; photos, corpus and MPO a little smaller
+([doc/CODEC.md](doc/CODEC.md#the-z-codecs-lz77-across-a-blocks-files-for-zpaq-std-30102026)).
 
 ## In 7-Zip and 7-Zip-zstd
 
