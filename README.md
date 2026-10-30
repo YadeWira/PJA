@@ -60,31 +60,30 @@ Aqueous is an archiver; PJA reaches one through the
 [zpaq-std](https://github.com/YadeWira/zpaq-std) plugin (`-sa`). Each
 writing one archive per set, 8 threads: Aqueous (commit `4117140`,
 `aqr -c -T 8 -l high`, 29/10/2026), and on 30/10/2026 zpaq-std 1.9.4 with
-PJA 0.4.0's plugin (`zpaq-std a set.zpaq FILES -sa -threads 8`) and the
-same with zpaq-std's next version, not released yet (its `exp/sa5`
-branch), the first to use the plugin's z codecs: the PJA streams of a
+PJA 0.4.0's plugin (`zpaq-std a set.zpaq FILES -sa -threads 8`) and
+zpaq-std 1.10.0, the first to use the plugin's z codecs (the same
+command, with the plugin it ships, PJA 0.4.0's): the PJA streams of a
 block's files go through an LZ77 that reaches back into the files
 before, so what one file shares with another (the same image saved
 progressive and baseline, with and without restarts) is stored once.
 Every file came back byte for byte from zpaq-std; every Aqueous archive
 passed `aqr -t`. Times are to write the archive / to get it back:
 
-| set | Aqueous | zpaq-std 1.9.4 + PJA 0.4.0 | zpaq-std with the z codecs (not released yet) | `pja` alone, 0.4.0 |
+| set | Aqueous | zpaq-std 1.9.4 + PJA 0.4.0 | zpaq-std 1.10.0, z codecs | `pja` alone, 0.4.0 |
 |---|---|---|---|---|
-| photos (151) | 80.46%, 2.3 / 0.7 s | 75.50%, 32.5 / 16.0 s | **75.34%**, 35.4 / 15.0 s | 72.61% |
-| corpus (78) | 71.91%, 1.6 / 0.3 s | 71.29%, 29.6 / 11.0 s | **70.66%**, 31.5 / 11.3 s | 70.39% |
-| MPO (6) | **78.94%**, 1.2 / 0.4 s | 80.68%, 22.8 / 7.4 s | 80.62%, 24.1 / 7.2 s | 73.38% |
-| arithmetic-coded (244) | 85.71%, 0.2 / 0.01 s | 71.26%, 7.7 / 3.0 s | **18.59%**, 14.0 / 5.5 s | 74.59% |
-| generated (640) | 33.96%, 0.6 / 0.2 s | 72.31%, 18.3 / 6.9 s | **17.69%**, 29.0 / 13.1 s | 73.73% |
+| photos (151) | 80.46%, 2.3 / 0.7 s | 75.50%, 32.5 / 16.0 s | **75.34%**, 36.6 / 14.9 s | 72.61% |
+| corpus (78) | 71.91%, 1.6 / 0.3 s | 71.29%, 29.6 / 11.0 s | **70.66%**, 38.6 / 12.4 s | 70.39% |
+| MPO (6) | **78.94%**, 1.2 / 0.4 s | 80.68%, 22.8 / 7.4 s | 80.53%, 58.9 / 10.5 s | 73.38% |
+| arithmetic-coded (244) | 85.71%, 0.2 / 0.01 s | 71.26%, 7.7 / 3.0 s | **18.59%**, 15.8 / 6.2 s | 74.59% |
+| generated (640) | 33.96%, 0.6 / 0.2 s | 72.31%, 18.3 / 6.9 s | **17.69%**, 34.6 / 16.6 s | 73.73% |
 
 With the z codecs zpaq-std + PJA is the smallest archive on every set but
 the MPO, and on the arithmetic-coded and generated sets, whose files are
 variants of a few images, it stores each image about once. Aqueous is 10
 to 50 times faster. Inside zpaq-std, PJA decodes through its ZPAQL
 program, which is what makes it slower; `pja` alone (each file on its
-own, nothing shared) is still the smallest on photos and MPO. The z
-codecs' numbers will be measured again with zpaq-std's release
-([how they work](doc/CODEC.md#the-z-codecs-lz77-across-a-blocks-files-for-zpaq-std-30102026)).
+own, nothing shared) is still the smallest on photos and MPO
+([how the z codecs work](doc/CODEC.md#the-z-codecs-lz77-across-a-blocks-files-for-zpaq-std-30102026)).
 
 ## In 7-Zip and 7-Zip-zstd
 
@@ -107,13 +106,13 @@ needs the plugin too
 ([doc/LIBRARY.md](doc/LIBRARY.md)). With 7-Zip 25 on Linux, 8 threads, one
 archive per set:
 
-| set | 7-Zip + PJA | Aqueous | zpaq-std + PJA 0.4.0, z codecs (not released yet) |
+| set | 7-Zip + PJA | Aqueous | zpaq-std 1.10.0 + PJA, z codecs |
 |---|---|---|---|
-| photos (151) | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 75.34%, 35.4 / 15.0 s |
-| corpus (78) | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 70.66%, 31.5 / 11.3 s |
-| MPO (6) | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 80.62%, 24.1 / 7.2 s |
-| arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 18.59%, 14.0 / 5.5 s |
-| generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 17.69%, 29.0 / 13.1 s |
+| photos (151) | **72.57%**, 10.9 / 5.6 s | 80.46%, 2.3 / 0.7 s | 75.34%, 36.6 / 14.9 s |
+| corpus (78) | **66.86%**, 11.7 / 5.1 s | 71.91%, 1.6 / 0.3 s | 70.66%, 38.6 / 12.4 s |
+| MPO (6) | **73.39%**, 5.1 / 2.5 s | 78.94%, 1.2 / 0.4 s | 80.53%, 58.9 / 10.5 s |
+| arithmetic-coded (244) | **17.25%**, 1.9 / 0.9 s | 85.71%, 0.2 / 0.0 s | 18.59%, 15.8 / 6.2 s |
+| generated (640) | **16.40%**, 3.2 / 1.6 s | 33.96%, 0.6 / 0.2 s | 17.69%, 34.6 / 16.6 s |
 
 Since 0.5.0 the filter also takes the JPEGs that FlashPix, Picture It's
 and PhotoDraw's `.mix` and TIFF keep as tiles without their tables: 34
