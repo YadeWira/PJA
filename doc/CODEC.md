@@ -1595,3 +1595,77 @@ luma's coefficients only when the vertical sampling divides (above); PTH
 and PTH2 are enum constants, not build flags; the per-coefficient
 reciprocals `rq[]` and `divround` that predictions left unused are gone,
 and the `PJA_V7_STATS` debugging block (C library calls) was not merged.
+
+## The z codecs: LZ77 across a block's files, for zpaq-std (30/10/2026)
+
+Inside a zpaq-std block the files are coded one by one, and what one shares
+with another is lost: the same image saved progressive and baseline, or
+with and without restarts, gives the same coefficients and much the same
+PJA stream. 7-Zip with PJA gets that back with LZMA2 after the filter (and,
+since 0.3.0, the filter's own dedup); zpaq-std now does it with zpaq's
+level 1 LZ77 (the `-m1` method, `rb` = 0) across the block's segments, and
+five new codecs carry a decoder that undoes it: pjaz, pjalsz, pjaxz,
+pjallz and pjalsxz, each its codec without the z (the same files, the same
+streams, the same detect, compress, decompress and query) with another
+ZPAQL.
+
+That ZPAQL is its codec's decoder with `pas/plugin/zpaql/lz.zl` in front.
+Each byte of a segment goes to zpaqlc's `onbyte(c)` instead of into M: a
+state machine over the codes (literal runs and matches, Elias gamma lengths,
+LSB first) that writes the segment out into M, where the decoder then reads
+it as it always did. Each segment's codes start afresh, padded to a byte
+at its end, but a match may reach back into the segments before it: M is a
+ring of 2^$1 bytes that `reset()` no longer starts over, but moves past the
+segment (zpaqlc's `mbase()`). The config is `comp 0 0 $3 $1 0`: $3 is H as
+the codec's query gives it (the largest of the block), $1 the window's bits
+(zpaq-std uses 16 to 24); no distance may reach 2^$1, and no segment come out
+larger than it. The ZPAQL stops with an error on a match before the block's
+first byte or with more than 23 bits of distance, and on whatever its codec's
+decoder already refuses. H is its codec's to the word (gen_pjadec checks
+it), so the codec's query serves for both.
+
+The expander costs about 1.6 KB of program, and pjaz had 1.6 KB left
+under ZPAQL's 65,535. zpaq-std's issue #4 (kaitz) pointed at two wastes
+in zpaqlc's output, and for programs not yet frozen zpaqlc now has `opt`:
+each constant as the shortest sequence of instructions it finds instead
+of a byte at a time (`a= 255 a+= 5` for 260), checked by running it, and
+in the start-up code a constant near the one before built from it, kept in
+A or B. Then Wira saw that a third of pjaz's program built addresses of H
+above 255 before a `d=a` (3,078 times): variables that did not fit in R
+went to H in the order they were declared. With `opt` the program is now
+compiled twice more, the variables placed by how often the code named
+them: the most named in R, the next 256 in H[0 .. 255], which `d= N`
+reaches in one instruction, the rest above. The frozen programs are
+compiled without `opt` and do not change.
+
+| codec | its codec (frozen) | with lz.zl | shortest constants | and places by use |
+|---|---|---|---|---|
+| pjaz | 62,294 | 63,925 | 56,635 | **39,458** |
+| pjalsz | 55,989 | 57,678 | 51,290 | **32,984** |
+| pjaxz | 57,709 | 59,398 | 52,547 | **37,476** |
+| pjallz | 30,508 | 32,117 | 28,051 | **18,003** |
+| pjalsxz | 60,776 | 62,329 | 55,061 | **36,110** |
+
+With libzpaq (zpaq 7.15's), each set as one block of its codec's segments
+through a test LZ77 encoder (`tools/zpaql/lz77.py`, and the same in C):
+every file back byte for byte, with a window of 2^24 and with the smallest
+that holds the largest segment (M wraps several times); 150 damaged segments
+per codec (a bit changed or the segment cut) never hung: 144 to 150 errors,
+the rest the same file or another without an error, as without the LZ77
+(zpaq's SHA-1 of each segment catches those).
+
+| codec | set | its streams | in one block, after the LZ77 |
+|---|---|---|---|
+| pjaz | 244 arithmetic-coded JPEGs | 76.36% | **17.70%** |
+| pjaz | 640 generated variants | 75.49% | **16.77%** |
+| pjalsz | 73 JPEG-LS files | 92.21% | 79.24% |
+| pjaxz | 66 JPEGs and 6 MPO | 73.09% | 71.73% |
+| pjallz | 36 lossless JPEGs | 95.75% | **19.84%** |
+| pjalsxz | 76 subsampled JPEG-LS files | 88.42% | 69.96% |
+
+zpaq-std's own build (`-sat`, a z codec only where it wins, decoded and
+compared before writing; with the decoders of the shortest constants, each
+block now carries some 17 KB less): arithmetic 4,763,128 -> 1,259,556 bytes, generated
+13,217,825 -> 3,268,732; the MPO, the corpus and the photos a little smaller,
+none larger. The suite runs each z decoder on a block of two files and the
+first again, the third all matches into the first.

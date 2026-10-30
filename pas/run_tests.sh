@@ -34,7 +34,7 @@ echo "== tests"
 rm -rf "$OUT/tmp_pjafs"; mkdir -p "$OUT/tmp_pjafs"; "$OUT/test_pjafs" "$(realpath "$OUT/tmp_pjafs")" | tail -1
 "$PAS/tests/cli.sh" "$OUT/pja" "$OUT/tmp_cli" "$PJA/tests/jpg" "$PJA/tests/jls" | tail -1
 
-echo "== the zpaq-std plugin's ZPAQL decoder"
+echo "== the zpaq-std plugin's ZPAQL decoders (each also as its z codec's, --lz)"
 python3 "$PJA/tools/zpaql/gen_pjadec.py" --check
 rm -rf "$OUT/zpaql"; mkdir -p "$OUT/zpaql"
 ZS=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/solid_color.jpg" "$PJA/tests/jpg/prog_huffman.jpg"
@@ -43,18 +43,22 @@ ZS=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/solid_color.jpg" "$PJA/tests/
     "$PJA/tests/jls/plasma17x13_line_rst4.jls")
 "$OUT/zpaql_segments" "$OUT/zpaql" "${ZS[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" "$OUT/zpaql" "${ZS[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz "$OUT/zpaql" "${ZS[@]}" | tail -1
 # pjax: a DNL (version 5), and a JPEG after the EOI (version 6)
 rm -rf "$OUT/zpaqlx"; mkdir -p "$OUT/zpaqlx"
 ZX=("$PJA/tests/jpg/dnl_baseline.jpg" "$PJA/tests/jpg/image_after_eoi.jpg")
 "$OUT/zpaql_segments" --pjax "$OUT/zpaqlx" "${ZX[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjax "$OUT/zpaqlx" "${ZX[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjax "$OUT/zpaqlx" "${ZX[@]}" | tail -1
 # pjall's decoder: lossless JPEG, with restarts and with a DNL
 rm -rf "$OUT/zpaqlll"; mkdir -p "$OUT/zpaqlll"
 ZL=("$PJA/tests/jpg/lossless_restart.jpg" "$PJA/tests/jpg/dnl_lossless.jpg")
 "$OUT/zpaql_segments" --pjall "$OUT/zpaqlll" "${ZL[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjall "$OUT/zpaqlll" "${ZL[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjall "$OUT/zpaqlll" "${ZL[@]}" | tail -1
 # pjalsx's: subsampled JPEG-LS, without interleave and in groups of lines
 rm -rf "$OUT/zpaqlsx"; mkdir -p "$OUT/zpaqlsx"
 ZSX=("$PJA/tests/jls/plasma33x17_none_sub.jls" "$PJA/tests/jls/color_line_subsampled.jls")
 "$OUT/zpaql_segments" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1

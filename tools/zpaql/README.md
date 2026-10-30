@@ -11,8 +11,9 @@ build time only; nothing of them goes into PJA itself.
 | `zpaqlc.py` | compiles a small language (a subset of Python: 32-bit unsigned values, arrays in ZPAQL's H, functions without recursion, signed comparisons and shifts) to a ZPAQL PCOMP program |
 | `zpaqlvm.py` | runs a PCOMP program as libzpaq does, one instruction at a time, to test and debug it |
 | `test_zpaqlc.py` | random expressions against exact 32-bit arithmetic, and programs for control flow, calls, arrays, signed helpers, long jumps and variables spilled to H |
-| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`) and `pas/plugin/pjalsxzpaql.inc` (pjalsx, subsampled JPEG-LS, with `jls.zl` and `jlsx.zl`); `--check` only verifies all six are current |
+| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`) and `pas/plugin/pjalsxzpaql.inc` (pjalsx, subsampled JPEG-LS, with `jls.zl` and `jlsx.zl`), and the z codecs' five decoders (each its codec's with `lz.zl` in front, compiled with `opt`) into `pas/plugin/lzzpaql.inc`; `--check` only verifies all seven are current |
 | `test_pjadec.py` | those decoders run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG or JPEG-LS file back byte for byte |
+| `lz77.py` | a test encoder for the z codecs' blocks: zpaq's level 1 LZ77 (`rb` = 0), matches reaching back into the segments before; `test_pjadec.py --lz` runs each z decoder on its output |
 
 ```sh
 python3 tools/zpaql/gen_pjadec.py        # after changing pas/plugin/zpaql/ or the model
@@ -43,6 +44,23 @@ zeros, and goes on: pjax decodes several JPEGs in one segment with it.
 starts as the first did: libzpaq keeps H, M and the registers between
 them, so H below `n` and every register in use go back to zero.
 `zpaqlvm.run_segments` runs several segments on one machine.
+
+`def onbyte(c)` makes an unpacker: each byte of a segment goes to it
+instead of into M, and it writes M itself (`setinlen(n)` says how long the
+segment came out). M[i] is then M[mbase() + i], and `reset()` moves
+`mbase()` past the segment instead of starting M over, so the segments of
+a block follow one another in M (a ring) and each can refer to the ones
+before: `pas/plugin/zpaql/lz.zl`, the z codecs' LZ77 expander.
+
+`compile_source(..., opt=True)`, for programs not frozen yet: each
+constant as the shortest sequence of instructions found (`a= 255 a+= 5`
+for 260, `a= 255 a+=a a++` for 511), checked by running it, and in the
+start-up code a constant near the one before built from it, kept in A or
+B; and the variables placed by use: compiled twice more, each time with
+the variables the code named most in R8 .. R255, then in H[0 .. 255]
+(`d= N`, one instruction, where a higher address takes a constant first),
+the smallest of the three kept. Without it the output is what it always
+was.
 
 How a program looks inside: variables live in R (in H once R is full), each
 function in fixed places of its own; a call stores a call-site number and

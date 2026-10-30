@@ -22,6 +22,17 @@
     query(ZS_QUERY_SEGMENTS) says 1: several files may share a block. data(ZS_DATA_INFO) is the card zpaq-std shows in
     codecinfoex. pjals is the same for JPEG-LS, with its own ZPAQL
     (pjalszpaql.inc, PJALS_ZPAQL) and query (ZpaqlJlsArgs).
+  - The z codecs (5 .. 9): pjaz, pjalsz, pjaxz, pjallz, pjalsxz. Each is its
+    codec without the z (detect, compress, decompress, query: the same
+    functions) with another ZPAQL (lzzpaql.inc): zpaq-std passes each
+    segment of a block, the codec's stream, through zpaq's level 1 LZ77
+    (the -m1 method, rb = 0), whose matches may reach back into the
+    segments before it in the block; the ZPAQL expands them into M, a ring
+    of 2^$1 bytes, and decodes. Its config is comp 0 0 $3 $1 0: $3 is the
+    codec's query's (the largest of the block), $1 the window's bits; no
+    distance reaches 2^$1 and no segment comes out larger than 2^$1 bytes.
+    zpaq-std makes the LZ77 and its native path (the expansion in C, then
+    this plugin's decompress); the plugin never sees it.
   - zpaqstd_detect_v1: 1 if the codec named takes the file, looking only at
     its bytes: only what its ZPAQL decoder covers. pja: a JPEG, Huffman or
     arithmetic, sequential or progressive, that PJA's layer 1 rebuilds byte
@@ -43,6 +54,8 @@ library pja_zpaqstd;
 uses
   {$ifdef unix}cthreads,{$endif}
   SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs;
+
+{$I lzzpaql.inc}
 
 const
   ZS_DATA_ZPAQL = 2;
@@ -313,10 +326,19 @@ begin
 end;
 
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
-var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64;
+var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt;
 begin
   Result := 0;
   if (codecName = nil) or (n < 4) or (n > MAX_BLOCK) then Exit;
+  { a z codec takes what its codec does: pjaz, pja's files, and so on }
+  k := StrLen(codecName);
+  if (k >= 2) and (k < Length(base)) and (codecName[k - 1] = 'z') then begin
+    StrLCopy(@base[0], codecName, k - 1);
+    if (StrComp(@base[0], 'pja') = 0) or (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjax') = 0) or
+       (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) then
+      Exit(zpaqstd_detect_v1(@base[0], src, n));
+    Exit;
+  end;
   try
     if StrComp(codecName, 'pja') = 0 then begin
       d := Bytes(src, n);
@@ -420,6 +442,24 @@ const
     'format=PJA codec stream v5 of a JPEG-LS file (samples or symbols model)'#10 +
     'notes=lossless: the original rebuilt byte for byte; JPEG-LS lossless and near-lossless, any interleave, LSE presets and restarts'#10;
 
+  { the z codecs' cards: their codec's, with what the block holds }
+  Z_FORMAT = 'format=its codec''s stream (%s) through zpaq''s level 1 LZ77 (-m1, rb 0), matches reaching back into the block''s segments before it'#10;
+  Z_NOTES = 'notes=lossless; the same files and streams as %s: zpaq-std makes the LZ77 across a block''s files; ZPAQL config comp 0 0 $3 $1 0, $1 the window''s bits'#10;
+
+function ZCard(const name, base, stream: AnsiString): AnsiString;
+begin
+  Result := 'name=' + name + #10 +
+    'version=' + PJA_VERSION + ' (' + stream + ', LZ77)'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    Format(Z_FORMAT, [base]) + Format(Z_NOTES, [base]);
+end;
+
+var
+  InfoZ, InfoLsZ, InfoXZ, InfoLlZ, InfoLsxZ: AnsiString;
+
 { data(): the ZPAQL decoder (as ZS_DATA_ZPAQL_ARGS: its H comes from the
   query) and the card; anything else, ZS_DATA_ZPAQL included, nil }
 function DataOf(const zpaql, card: AnsiString; what: LongInt; size: PSizeUInt): Pointer;
@@ -460,6 +500,31 @@ end;
 function LsData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
   Result := DataOf(PJALS_ZPAQL, INFO_LS, what, size);
+end;
+
+function ZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJAZ_ZPAQL, InfoZ, what, size);
+end;
+
+function LsZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSZ_ZPAQL, InfoLsZ, what, size);
+end;
+
+function XZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJAXZ_ZPAQL, InfoXZ, what, size);
+end;
+
+function LlZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALLZ_ZPAQL, InfoLlZ, what, size);
+end;
+
+function LsxZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSXZ_ZPAQL, InfoLsxZ, what, size);
 end;
 
 const
@@ -528,6 +593,37 @@ const
     data: @LsxData
   );
 
+  { the z codecs: the library field is their codec's with ", lz77" }
+  ZsCodecZ: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjaz'; library_: 'pja stream v5 full, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @CodecCompress; decompress_: @CodecDecompress;
+    query: @CodecQuery; data: @ZData);
+
+  ZsCodecLsZ: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalsz'; library_: 'pja stream v5 jpeg-ls, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsCompress; decompress_: @CodecDecompress;
+    query: @LsQuery; data: @LsZData);
+
+  ZsCodecXZ: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjaxz'; library_: 'pja stream v6 pjax, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @XCompress; decompress_: @XDecompress;
+    query: @XQuery; data: @XZData);
+
+  ZsCodecLlZ: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjallz'; library_: 'pja stream v5 lossless jpeg, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LlCompress; decompress_: @CodecDecompress;
+    query: @LlQuery; data: @LlZData);
+
+  ZsCodecLsxZ: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalsxz'; library_: 'pja stream v5 jpeg-ls subsampled, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsxCompress; decompress_: @CodecDecompress;
+    query: @LsxQuery; data: @LsxZData);
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -541,6 +637,11 @@ begin
     2: Result := @ZsCodecX;
     3: Result := @ZsCodecLl;
     4: Result := @ZsCodecLsx;
+    5: Result := @ZsCodecZ;
+    6: Result := @ZsCodecLsZ;
+    7: Result := @ZsCodecXZ;
+    8: Result := @ZsCodecLlZ;
+    9: Result := @ZsCodecLsxZ;
   else Result := nil;
   end;
 end;
@@ -562,4 +663,9 @@ exports
 
 begin
   IsMultiThread := True;
+  InfoZ := ZCard('pjaz', 'pja', 'stream v5 full');
+  InfoLsZ := ZCard('pjalsz', 'pjals', 'stream v5');
+  InfoXZ := ZCard('pjaxz', 'pjax', 'stream v6');
+  InfoLlZ := ZCard('pjallz', 'pjall', 'stream v5');
+  InfoLsxZ := ZCard('pjalsxz', 'pjalsx', 'stream v5');
 end.

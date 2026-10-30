@@ -46,7 +46,11 @@ compile_source(..., opt=True), for programs not frozen yet: each constant
 as the shortest sequence found (a= 255 a+= 5 for 260, a= 255 a+=a a++ for
 511), and in the start-up code the constants that are near the one before
 are built from it, kept in A or B (the arrays' places, one after another).
-Without it the output is byte for byte what it always was."""
+And the variables' places by use: the program is compiled twice more, the
+variables placed by how often the code before named them (R8 .. R255
+first, then H[0 .. 255], which d= N reaches in one instruction, then the
+rest), and the smallest of the three is kept. Without opt the output is
+byte for byte what it always was."""
 import ast, sys
 
 M32 = 0xFFFFFFFF
@@ -179,8 +183,16 @@ class Asm:
 # ---------------------------------------------------------------- storage
 
 class Slot:
-    def __init__(self, kind, n):
-        self.kind, self.n = kind, n      # 'r' register n, 'h' word n of H
+    def __init__(self, kind, n, key=None, uses=None):
+        self.kind, self._n = kind, n     # 'r' register n, 'h' word n of H
+        self.key, self.uses = key, uses  # with opt: what it is, and a count of its uses
+
+    @property
+    def n(self):
+        # each place the code names it reads n: opt's first pass counts them
+        if self.uses is not None:
+            self.uses[self.key] = self.uses.get(self.key, 0) + 1
+        return self._n
 
     def __repr__(self):
         return '%s%d' % self.kind, self.n
@@ -193,11 +205,27 @@ class Alloc:
     region of their own."""
     RFIRST = 8          # R0: input length, R1..R7: the compiler's scratch
     HVARS = 8192
-    def __init__(self):
+    def __init__(self, plan=None):
         self.r = self.RFIRST
         self.h = 0
+        # opt: plan gives the places by key (the most used first: R, then
+        # H[0 .. 255], which d= reaches in one instruction); uses counts
+        self.plan, self.uses = plan, {}
+        if plan:
+            rs = [p._n for p in plan.values() if p.kind == 'r']
+            hs = [p._n for p in plan.values() if p.kind == 'h']
+            self.r = max(rs) + 1 if rs else self.RFIRST
+            self.h = max(hs) + 1 if hs else 0
 
-    def new(self):
+    def new(self, key=None):
+        if self.plan is not None and key in self.plan:
+            p = self.plan[key]
+            return Slot(p.kind, p._n, key, self.uses)
+        s = self.next()
+        s.key, s.uses = key, self.uses
+        return s
+
+    def next(self):
         if self.r < 256:
             s = Slot('r', self.r); self.r += 1; return s
         if self.h >= self.HVARS:
@@ -226,12 +254,12 @@ class Func:
 
 
 class Compiler:
-    def __init__(self, tree, opt=False):
+    def __init__(self, tree, opt=False, plan=None):
         self.opt = opt        # shortest constants, known A and B reused (new programs only)
         self.known = None     # with opt, in straight-line code: {'a': value, 'b': value}
         self.cbest = {}
         self.asm = Asm()
-        self.alloc = Alloc()
+        self.alloc = Alloc(plan if opt else None)
         self.consts = {}
         self.globals = {}     # name -> Slot
         self.ginit = {}       # name -> initial value
@@ -363,9 +391,9 @@ class Compiler:
         if self.heap:
             self.arr_order.append(self.heap)    # last, wherever it was declared
         for name in self.globals:
-            self.globals[name] = self.alloc.new()
+            self.globals[name] = self.alloc.new(('g', name))
         for name in self.arr_order:
-            self.arrays[name][0] = self.alloc.new()
+            self.arrays[name][0] = self.alloc.new(('a', name))
 
     # ----------------------------------------------------------- frames
 
@@ -389,16 +417,16 @@ class Compiler:
                         err(fn, 'assigning to a constant or an array: ' + t.id)
                     names.append(t.id)
         for n in names:
-            f.vars[n] = self.alloc.new()
-        f.ret = self.alloc.new()
-        f.rv = self.alloc.new()
+            f.vars[n] = self.alloc.new(('v', f.name, n))
+        f.ret = self.alloc.new(('ret', f.name))
+        f.rv = self.alloc.new(('rv', f.name))
         f.entry = self.asm.label()
         f.exit = self.asm.label()
 
     def temp(self, depth):
         f = self.cur
         while len(f.temps) <= depth:
-            f.temps.append(self.alloc.new())
+            f.temps.append(self.alloc.new(('t', f.name, len(f.temps))))
         return f.temps[depth]
 
     # ----------------------------------------------------------- moves
@@ -1054,10 +1082,28 @@ class Compiler:
         return a.assemble()
 
 
+def places(uses):
+    """opt: the variables by how often the code names them, the most named
+    first: R8 .. R255, then H[0 ..] (below 256 one instruction reaches them)"""
+    plan = {}
+    for i, key in enumerate(sorted(uses, key=lambda k: -uses[k])):
+        r = Alloc.RFIRST + i
+        plan[key] = Slot('r', r) if r < 256 else Slot('h', r - 256)
+    return plan
+
+
 def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False):
-    tree = ast.parse(src)
-    c2 = Compiler(tree, opt)
+    c2 = Compiler(ast.parse(src), opt)
     lines, size = c2.program()
+    if opt:
+        # again with the variables placed by how often the code before named
+        # them, twice: the smallest of the three
+        c = c2
+        for _ in range(2):
+            c = Compiler(ast.parse(src), opt, places(c.alloc.uses))
+            l3, s3 = c.program()
+            if s3 < size:
+                c2, lines, size = c, l3, s3
     text = ['comp 0 0 %s %s 0' % (ph, pm), 'hcomp', '  halt', 'pcomp %s ;' % name]
     text += ['  ' + l for l in lines]
     text.append('end')
