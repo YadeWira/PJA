@@ -13,7 +13,11 @@ OUT=${1:?usage: build.sh <out dir>}
 # a folder's absolute path; on Windows (MSYS, Git Bash) in Windows' form,
 # since FreePascal gets it glued to an option (-Fu...), which MSYS does not
 # translate
-apath() { (cd "$1" && { cygpath -m "$(pwd)" 2>/dev/null || pwd; }); }
+apath() {
+  p=$(cd "$1" && pwd)
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) p=$(echo "$p" | sed -E 's|^/([A-Za-z])/|\1:/|') ;; esac
+  echo "$p"
+}
 HERE=$(apath "$(dirname "$0")"); PAS=$(dirname "$HERE")
 FPC=${FPC:-fpc}
 CC=${CC:-cc}
@@ -35,6 +39,7 @@ for f in pjafilter pja7z; do
   $CC $FLAGS $PIC -c "$HERE/$f.c" -o "$OUT/c/$f.o"
 done
 CG=; [ -n "$PIC" ] && CG=-Cg
+echo "units from $PAS, objects in $OUT/c"
 # shellcheck disable=SC2086
 $FPC -O3 -dPJA_FAST $CG -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja.$EXT" "$HERE/pjalib.pas" \
   > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
