@@ -1767,3 +1767,11 @@ the standard ones, T.81's example tables (STD_TABLES in pjafilter.c, as
 cjpeg -quality 50 writes them). Konica's are those: the 10 files go from
 raw to 52 to 78%, every one back.
 
+In a solid block the filter gives a JPEG without tables the last ones it
+saw, which may be another file's: a Konica file after a FlashPix whose
+tables are the standard ones was taken, after a JPEG of optimized tables
+it was left raw. When those tables do not fit, the filter now tries the
+standard ones too (once, when the file is written out): test_lib puts
+baseline_444.jpg without tables after a JPEG of color_plasma.jpg's
+tables, which 0.5.2 left raw.
+

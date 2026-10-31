@@ -11,8 +11,10 @@
    ones) cut in two as FlashPix keeps its tiles: a JPEG of its tables only, and
    the JPEG without them, before and after it; the filter must take those
    (smaller than with the tables broken) and give them back. And
-   baseline_444.jpg (cjpeg's standard tables) without any: the filter
-   must take it with the standard tables and give it back.
+   baseline_444.jpg (cjpeg's standard tables) without any, alone and after
+   a JPEG of color_plasma.jpg's tables (another file's, which do not fit
+   it): the filter must take it with the standard tables both times and
+   give it back.
    Prints a line per check and "N checks, 0 failures" at the end. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,15 +128,20 @@ static void abbreviated(const char *name) {
   free(c); free(t); free(a); free(d);
 }
 
-/* a JPEG written with cjpeg's standard tables, without them and with no
-   JPEG of tables anywhere: the filter gives it the standard ones */
-static void standard_tables(const char *name) {
-  size_t n, tn, an;
-  unsigned char *d = slurp(name, &n), *t, *a;
-  if (!d || !split_tables(d, n, &t, &tn, &a, &an)) { free(d); return; }
-  unsigned char *c = malloc(200 + an);
-  memset(c, 0x44, 100); memcpy(c + 100, a, an); memset(c + 100 + an, 0x55, 100);
-  size_t cn = 200 + an;
+/* a JPEG written with cjpeg's standard tables, without them: with no JPEG
+   of tables anywhere, or after one of another file's (other) tables, the
+   filter gives it the standard ones */
+static void standard_tables(const char *name, const char *other) {
+  size_t n, tn, an, on = 0, otn = 0, oan;
+  unsigned char *d = slurp(name, &n), *t, *a, *od = other ? slurp(other, &on) : 0, *ot = 0, *oa = 0;
+  if (!d || !split_tables(d, n, &t, &tn, &a, &an)) { free(d); free(od); return; }
+  if (od && !split_tables(od, on, &ot, &otn, &oa, &oan)) otn = 0;
+  unsigned char *c = malloc(200 + otn + an);
+  size_t cn = 0;
+  memset(c, 0x44, 100); cn += 100;
+  if (otn) { memcpy(c + cn, ot, otn); cn += otn; }
+  memcpy(c + cn, a, an); cn += an;
+  memset(c + cn, 0x55, 100); cn += 100;
   src_t in = {c, cn, 0, 4096};
   dst_t e = {0}, back = {0};
   int r = pja_filter_encode(rd, &in, wr, &e, 2);
@@ -153,8 +160,9 @@ static void standard_tables(const char *name) {
     i += (size_t)(tag == 0x01 || tag == 0x03 ? v[1] : v[0]);
   }
   check(t3 == 1, "standard tables: taken", name);
-  printf("a JPEG without tables (%s), the standard ones given: %zu bytes -> %zu\n", name, cn, e.n);
-  free(e.d); free(back.d); free(c); free(t); free(a); free(d);
+  printf("a JPEG without tables (%s)%s, the standard ones given: %zu bytes -> %zu\n", name,
+         otn ? ", after another file's tables" : "", cn, e.n);
+  free(e.d); free(back.d); free(c); free(t); free(a); free(d); free(od); free(ot); free(oa);
 }
 
 int main(int argc, char **argv) {
@@ -194,9 +202,14 @@ int main(int argc, char **argv) {
     free(d);
   }
   printf("%zu of %d files taken: %zu -> %zu bytes as .pja\n", taken, argc - 1, insum, outsum);
-  for (int a = 1; a < argc; a++) {
-    if (strstr(argv[a], "color_plasma.jpg")) abbreviated(argv[a]);
-    if (strstr(argv[a], "baseline_444.jpg")) standard_tables(argv[a]);
+  {
+    const char *plasma = 0, *b444 = 0;
+    for (int a = 1; a < argc; a++) {
+      if (strstr(argv[a], "color_plasma.jpg")) plasma = argv[a];
+      if (strstr(argv[a], "baseline_444.jpg")) b444 = argv[a];
+    }
+    if (plasma) abbreviated(plasma);
+    if (b444) { standard_tables(b444, 0); if (plasma) standard_tables(b444, plasma); }
   }
   static const size_t steps[] = {1 << 20, 4096, 1000, 7, 1};
   dst_t enc = {0};

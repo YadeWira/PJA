@@ -25,8 +25,9 @@
    them, which PJA cannot decode alone. The encoder gives such a file the
    last tables it saw, or, before any, the first ones ahead (FlashPix
    writes them after the tiles), or, with none in 16 MiB, the standard
-   ones (STD_TABLES, 0.5.2); the JPEGs of tables stay among the raw
-   bytes. A decoder of 0.4.0 or before does not know 02 and 03 and stops
+   ones (STD_TABLES, 0.5.2), which it also tries when another file's
+   tables did not fit it (0.5.3: in a solid block, a Konica file after a
+   FlashPix); the JPEGs of tables stay among the raw bytes. A decoder of 0.4.0 or before does not know 02 and 03 and stops
    with a data error.
 
    The encoder finds a file by its first bytes (FF D8 FF), then walks its
@@ -219,6 +220,13 @@ static const uint8_t STD_TABLES[570] = {
   0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9,
   0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA
 };
+
+/* t[0..n): STD_TABLES */
+static int std_tables(const uint8_t *t, size_t n) {
+  if (n != sizeof STD_TABLES) return 0;
+  for (size_t i = 0; i < n; i++) if (t[i] != STD_TABLES[i]) return 0;
+  return 1;
+}
 
 /* p[0..n): DQT, DHT, DRI or COM segments, n bytes of them exactly */
 static int tables_segments(const uint8_t *p, size_t n) {
@@ -517,6 +525,25 @@ static void retire(in_t *s, out_t *o) {
   job_t *f = &s->files[k];
   size_t g = s->given[k], size = f->size - g;      /* the file's own bytes */
   H.pool_wait(s->pool, f);
+  /* the last tables seen were another file's (in a solid block, a FlashPix
+     before a Konica file): the standard ones, once more, here */
+  if (g && !std_tables(f->given, f->given_size) && !(f->ok && f->out_size + 12 < size) && !s->err) {
+    size_t gs = sizeof STD_TABLES;
+    uint8_t *in = H.alloc(size + gs);
+    if (in) {
+      copy(in, s->buf + s->at[k], 2);
+      copy(in + 2, STD_TABLES, gs);
+      copy(in + 2 + gs, s->buf + s->at[k] + 2, size - 2);
+      if (f->out) H.release(f->out);
+      H.release((void *)f->in);
+      s->pbytes += size + gs - f->size;
+      f->in = in; f->size = size + gs; f->given = in + 2; f->given_size = gs;
+      f->out = 0; f->out_size = 0; f->ok = 0; f->done = 0;
+      s->given[k] = g = gs;
+      H.pool_submit(s->pool, f);
+      H.pool_wait(s->pool, f);
+    }
+  }
   if (f->ok && f->out_size + 12 < size && !s->err) {
     raw_upto(s, o, s->at[k], 1);
     /* its tables, unless the decoder has them already */

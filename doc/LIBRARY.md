@@ -75,7 +75,10 @@ tables whose container has none within 16 MiB is given the standard ones,
 T.81's example tables as libjpeg writes them when it does not optimize
 (K.1's quantization at quality 50, K.3's Huffman): Konica's files are
 coded with them, 10 files 30.4 KB -> 22.5 KB on average, every one back.
-A JPEG they are not right for does not come back and stays raw.
+A JPEG they are not right for does not come back and stays raw. Since
+0.5.3 they are also tried when the last tables seen were another file's
+and did not fit (in a solid block, a Konica file after a JPEG of tables
+of some other program): 0.5.2 left such a file raw.
 
 ### The stream
 
