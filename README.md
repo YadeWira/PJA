@@ -116,6 +116,10 @@ Since 0.5.0 the filter also takes the JPEGs that FlashPix, Picture It's
 and PhotoDraw's `.mix` and TIFF keep as tiles without their tables: 34
 such files of the sample corpus in one archive, 71.92% with 0.4.0 (no
 better than plain LZMA2), 59.55% now ([doc/LIBRARY.md](doc/LIBRARY.md)).
+Since 0.5.2 it gives the standard tables to those whose container keeps
+none (Konica's Q-Photo files: 27% smaller in an archive of their own),
+and the command and the filter repair a scan that ends early, a download
+cut short included (a photo cut at 99%: 85.9% as bytes, 61.1% now).
 
 It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
 8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),
