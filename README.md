@@ -63,7 +63,7 @@ extract it.
 - **7-Zip + PJA**: 7-Zip 25.01 with PJA 0.5.1's plugin, `7z a -mmt=8
   -m0=PJA -m1=LZMA2` ([below](#in-7-zip-and-7-zip-zstd)).
 - **zpaq-std + PJA**: [zpaq-std](https://github.com/YadeWira/zpaq-std)
-  2.0.0 with the PJA 0.5.1 plugin it ships, `zpaq-std a set.zpaq FILES
+  2.0.1 with the PJA 0.5.1 plugin it ships, `zpaq-std a set.zpaq FILES
   -sa -t8`; its z codecs put the PJA streams of a block's files through an
   LZ77 that reaches back into the files before.
 - **Aqueous**: [Aqueous](https://github.com/lifthrasiir/aqueous) (`aqr`,
@@ -73,24 +73,21 @@ extract it.
 
 | set | 7-Zip + PJA | zpaq-std + PJA | Aqueous | 7-Zip | zpaq-std |
 |---|---|---|---|---|---|
-| photos (151) | **72.57%**, 10.4 / 5.2 s | 75.25%, 23.8 / 8.3 s | 80.46%, 2.2 / 0.7 s | 97.04%, 7.4 / 1.1 s | 97.84%, 0.7 / 0.4 s |
-| corpus (78) | **66.86%**, 8.6 / 3.9 s | 70.79%, 11.8 / 6.1 s | 71.98%, 1.5 / 0.3 s | 82.24%, 2.8 / 0.4 s | 85.28%, 0.4 / 0.3 s |
-| MPO (6) | **73.39%**, 5.0 / 2.5 s | 74.53%, 19.3 / 6.0 s | 78.95%, 1.1 / 0.4 s | 99.57%, 3.8 / 0.9 s | 100.07%, 0.3 / 0.2 s |
-| arithmetic-coded (244) | **17.25%**, 1.8 / 0.8 s | 18.72%, 5.6 / 1.0 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.5 / 0.1 s | 75.43%, 0.1 / 0.1 s |
-| generated (640) | **16.40%**, 3.0 / 1.5 s | 17.41%, 9.3 / 2.2 s | 33.99%, 0.6 / 0.3 s | 62.85%, 1.2 / 0.4 s | 67.22%, 0.4 / 0.3 s |
-| 12-bit (10) | **58.28%**, 0.2 / 0.2 s | 113.85%¹, 0.3 / 0.0 s | 92.62%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 99.88%, 0.0 / 0.0 s |
-| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.98%**, 0.4 / 0.2 s | 96.62%, 0.0 / 0.0 s | 95.64%, 0.0 / 0.0 s | 98.69%, 0.0 / 0.0 s |
-
-¹ zpaq-std 2.0.0 puts the 57 KB decoder of the pjax codec into a block of
-83 KB of small files; it has been told.
+| photos (151) | **72.57%**, 10.4 / 5.2 s | 75.25%, 23.0 / 8.7 s | 80.46%, 2.2 / 0.7 s | 97.04%, 7.4 / 1.1 s | 97.84%, 0.6 / 0.4 s |
+| corpus (78) | **66.86%**, 8.6 / 3.9 s | 70.74%, 10.9 / 3.0 s | 71.98%, 1.5 / 0.3 s | 82.24%, 2.8 / 0.4 s | 85.28%, 0.4 / 0.3 s |
+| MPO (6) | **73.39%**, 5.0 / 2.5 s | 74.53%, 18.2 / 5.8 s | 78.95%, 1.1 / 0.4 s | 99.57%, 3.8 / 0.9 s | 100.04%, 0.3 / 0.2 s |
+| arithmetic-coded (244) | **17.25%**, 1.8 / 0.8 s | 18.72%, 5.5 / 1.0 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.5 / 0.1 s | 75.43%, 0.1 / 0.1 s |
+| generated (640) | **16.40%**, 3.0 / 1.5 s | 17.41%, 9.2 / 2.2 s | 33.99%, 0.6 / 0.3 s | 62.85%, 1.2 / 0.4 s | 67.22%, 0.3 / 0.3 s |
+| 12-bit (10) | **58.28%**, 0.2 / 0.2 s | 96.05%, 0.3 / 0.0 s | 92.62%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
+| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.98%**, 0.4 / 0.2 s | 96.62%, 0.0 / 0.0 s | 95.64%, 0.0 / 0.0 s | 97.82%, 0.0 / 0.0 s |
 
 7-Zip + PJA is smaller than Aqueous on every set, and the smallest of all
 on every set but the lossless one; zpaq-std + PJA is smaller than Aqueous
 on all but the 12-bit one. On the arithmetic-coded and generated sets,
 whose files are variants of a few images, both keep each image about
 once: 16 to 19% of the input, where Aqueous writes 34 to 86%. zpaq-std +
-PJA is 1 to 4 points behind 7-Zip + PJA, 1.4 to 4 times slower to write
-and 1.3 to 2.4 times to extract: its plugin writes the stream PJA's ZPAQL
+PJA is 1 to 4 points behind 7-Zip + PJA, 1.3 to 3.6 times slower to write
+and up to 2.3 times slower to extract (the corpus extracts faster): its plugin writes the stream PJA's ZPAQL
 decoder reads (version 5, about 1.6 times slower than the command's), so
 that any zpaq can extract the archive without the plugin. Aqueous is 4 to
 10 times faster than either.
