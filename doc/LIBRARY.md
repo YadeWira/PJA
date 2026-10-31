@@ -70,7 +70,12 @@ so a tile of 2 KB still gains. The JPEGs of tables themselves stay raw.
 25.3 MB) in one 7-Zip archive, `-m0=PJA -m1=LZMA2`: 71.92% of their size
 with 0.4.0, which did not take the tiles (plain LZMA2: 71.92% too),
 **59.55%** now; every file back. Konica's `.kqp` and `.pic` have no tables
-anywhere (their software assumes them) and stay raw.
+anywhere: their software assumes them. Since 0.5.2, a JPEG without
+tables whose container has none within 16 MiB is given the standard ones,
+T.81's example tables as libjpeg writes them when it does not optimize
+(K.1's quantization at quality 50, K.3's Huffman): Konica's files are
+coded with them, 10 files 30.4 KB -> 22.5 KB on average, every one back.
+A JPEG they are not right for does not come back and stays raw.
 
 ### The stream
 

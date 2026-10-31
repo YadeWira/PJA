@@ -7,14 +7,17 @@
    together into one stream with bytes around them, through the filter in
    read sizes of 1 byte to 1 MiB, and back: the same bytes, every time. A
    damaged filter stream must give an error or other bytes, never a crash.
-   And the first Huffman JPEG cut in two as FlashPix keeps its tiles: a JPEG
-   of its tables only, and the JPEG without them, before and after it; the
-   filter must take those (smaller than with the tables broken) and give
-   them back.
+   And color_plasma.jpg (cjpeg -optimize: its own tables, not the standard
+   ones) cut in two as FlashPix keeps its tiles: a JPEG of its tables only, and
+   the JPEG without them, before and after it; the filter must take those
+   (smaller than with the tables broken) and give them back. And
+   baseline_444.jpg (cjpeg's standard tables) without any: the filter
+   must take it with the standard tables and give it back.
    Prints a line per check and "N checks, 0 failures" at the end. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "pja.h"
 
 static int checks, failures;
@@ -123,6 +126,37 @@ static void abbreviated(const char *name) {
   free(c); free(t); free(a); free(d);
 }
 
+/* a JPEG written with cjpeg's standard tables, without them and with no
+   JPEG of tables anywhere: the filter gives it the standard ones */
+static void standard_tables(const char *name) {
+  size_t n, tn, an;
+  unsigned char *d = slurp(name, &n), *t, *a;
+  if (!d || !split_tables(d, n, &t, &tn, &a, &an)) { free(d); return; }
+  unsigned char *c = malloc(200 + an);
+  memset(c, 0x44, 100); memcpy(c + 100, a, an); memset(c + 100 + an, 0x55, 100);
+  size_t cn = 200 + an;
+  src_t in = {c, cn, 0, 4096};
+  dst_t e = {0}, back = {0};
+  int r = pja_filter_encode(rd, &in, wr, &e, 2);
+  src_t ie = {e.d, e.n, 0, 4096};
+  if (r == PJA_OK) r = pja_filter_decode(rd, &ie, wr, &back, 2);
+  check(r == PJA_OK && back.n == cn && memcmp(back.d, c, cn) == 0, "standard tables: round trip", name);
+  /* taken: a 03 record in the stream (one JPEG of 2 KB does not pay the
+     02 record's 570 bytes of tables, which an archive pays once) */
+  int t3 = 0;
+  for (size_t i = 5; i < e.n && e.d[i] != 0xFF; ) {
+    unsigned char tag = e.d[i++];
+    uint64_t v[2] = {0, 0};
+    for (int k = 0; k < (tag == 0x01 || tag == 0x03 ? 2 : 1); k++)
+      for (int sh = 0; i < e.n; sh += 7) { v[k] |= (uint64_t)(e.d[i] & 0x7F) << sh; if (!(e.d[i++] & 0x80)) break; }
+    t3 += tag == 0x03;
+    i += (size_t)(tag == 0x01 || tag == 0x03 ? v[1] : v[0]);
+  }
+  check(t3 == 1, "standard tables: taken", name);
+  printf("a JPEG without tables (%s), the standard ones given: %zu bytes -> %zu\n", name, cn, e.n);
+  free(e.d); free(back.d); free(c); free(t); free(a); free(d);
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", pja_version());
@@ -160,11 +194,9 @@ int main(int argc, char **argv) {
     free(d);
   }
   printf("%zu of %d files taken: %zu -> %zu bytes as .pja\n", taken, argc - 1, insum, outsum);
-  for (int a = 1, done = 0; a < argc && !done; a++) {
-    size_t n, tn, an;
-    unsigned char *d = slurp(argv[a], &n), *t, *ab;
-    if (d && split_tables(d, n, &t, &tn, &ab, &an)) { free(t); free(ab); abbreviated(argv[a]); done = 1; }
-    free(d);
+  for (int a = 1; a < argc; a++) {
+    if (strstr(argv[a], "color_plasma.jpg")) abbreviated(argv[a]);
+    if (strstr(argv[a], "baseline_444.jpg")) standard_tables(argv[a]);
   }
   static const size_t steps[] = {1 << 20, 4096, 1000, 7, 1};
   dst_t enc = {0};
