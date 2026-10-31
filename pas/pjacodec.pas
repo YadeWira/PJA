@@ -103,11 +103,13 @@ function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True
   (VerifyRoundTrip): j as Decompose leaves it, not rebuilt and compared
   again. The zpaq-std plugin's compress after its detection; zpaq-std then
   decodes the block and compares it. }
-function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer = 1): TCodecResult;
+function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer = 1;
+                          v7: Boolean = False): TCodecResult;
 { What the zpaq-std plugin's pjax codec writes: version 5 or 6 for a
   Huffman JPEG (8 or 12 bits, DNL, quirks), its parts version 5 and Huffman
   too, nothing as bytes: what pjax's ZPAQL decodes. }
-function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True; threads: Integer = 1): TCodecResult;
+function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True; threads: Integer = 1;
+                      v7: Boolean = False): TCodecResult;
 { stream -> JPEG. maxRaw caps the raw part a damaged stream can claim.
   expected: the JPEG's size when the caller knows it (the .pja does), to
   allocate it once; 0 if not. Only a hint: the result is not checked
@@ -537,7 +539,8 @@ begin
   end;
 end;
 
-function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer): TCodecResult;
+function CompressVerified(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; threads: Integer;
+                          v7: Boolean): TCodecResult;
 begin
   stream := nil;
   { what CompressOne refuses for version 5 }
@@ -549,7 +552,9 @@ begin
     Result := CodecFail(ceJpeg); Result.jpeg.err := jeNoRoundTrip;
     Exit;
   end;
-  Result := CompressJpeg(jpeg, j, stream, False, threads, mkFull);
+  { v7: the plugin's pja7, version 7's coefficients }
+  if v7 then Result := CompressJpeg(jpeg, j, stream, False, threads, mkV7)
+  else Result := CompressJpeg(jpeg, j, stream, False, threads, mkFull);
 end;
 
 function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
@@ -1334,9 +1339,12 @@ begin
   if Length(inner) > 0 then Move(inner[0], Result[p], Length(inner));
 end;
 
-function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
+function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
+                      v7: Boolean): TCodecResult;
 begin
-  Result := CompressAt(jpeg, stream, verify, threads, mkFull, 0, True);
+  { v7: the zpaq-std plugin's pjax7, the same with version 7's model }
+  if v7 then Result := CompressAt(jpeg, stream, verify, threads, mkV7, 0, True)
+  else Result := CompressAt(jpeg, stream, verify, threads, mkFull, 0, True);
 end;
 
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;

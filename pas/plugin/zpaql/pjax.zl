@@ -79,7 +79,7 @@ def sink(v):
 def decodeone(first, last, cap, quirks):
     """a version 5 stream from M[first .. last) through the sink; cap: the
     largest its raw part may be"""
-    if last - first < 6 or M[first] != 5 or M[first + 1] != 0:
+    if last - first < 6 or M[first] != SVER or M[first + 1] != 0:
         error()
     hlen = u32(first + 2)
     if first + 6 + hlen > last:
@@ -106,7 +106,7 @@ def pjaxmain():
     modeltables()
     size = u32(0)
     end = inlen()
-    if M[SEG] == 5:
+    if M[SEG] == SVER:
         origsize = size
         smode = 1
         decodeone(SEG, end, size, 0)

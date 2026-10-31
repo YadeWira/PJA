@@ -62,7 +62,7 @@ library pja_zpaqstd;
 
 uses
   {$ifdef unix}cthreads,{$endif}
-  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs;
+  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7;
 
 {$I lzzpaql.inc}
 
@@ -145,7 +145,7 @@ type
   TVerdict = record
     size: SizeUInt;
     hash: QWord;
-    used, rt, pja, pjax, pjall: Boolean;
+    used, rt, pja, pjax, pjall, pja7, pjax7: Boolean;
   end;
 
 const
@@ -223,7 +223,7 @@ end;
 { compress() of either codec: pja takes no JPEG-LS file and pjals nothing
   else, so that each block's stream is the one its ZPAQL decodes }
 function CompressAs(ls: Boolean; src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt; threads: Integer): Int64;
+  level: LongInt; threads: Integer; v7: Boolean = False): Int64;
 var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean; v: TVerdict;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
@@ -233,10 +233,10 @@ begin
     { no verification here: zpaq-std decodes every block and compares }
     { version 5 only: the stream its ZPAQL reads; a JPEG pja's detection
       verified already is only taken apart }
-    if not ls and FindVerdict(n, BytesHash(src, n), v) and v.rt and v.pja and Decompose(d, j).Ok then
-      r := CompressVerified(d, j, stream, threads)
+    if not ls and FindVerdict(n, BytesHash(src, n), v) and v.rt and (v.pja or v.pja7) and Decompose(d, j).Ok then
+      r := CompressVerified(d, j, stream, threads, v7)
     else
-      r := Compress(d, stream, False, threads, False, False);
+      r := Compress(d, stream, False, threads, False, False, v7);
     if not r.Ok then Exit(ZS_ERR_DATA);
     { a 12-bit or a lossless JPEG: PJA takes it, the frozen ZPAQL would not }
     if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl) then Exit(ZS_ERR_DATA);
@@ -259,6 +259,14 @@ begin
   try Result := CompressAs(False, src, n, dst, cap, level, t); finally Leave; end;
 end;
 
+function Pja7Compress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := CompressAs(False, src, n, dst, cap, level, t, True); finally Leave; end;
+end;
+
 function LsCompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt): Int64; cdecl;
 var t: Integer;
@@ -269,14 +277,14 @@ end;
 
 { pjax: what CompressPjax writes, version 5 or 6, its ZPAQL's }
 function XCompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  level: LongInt; threads: Integer): Int64;
+  level: LongInt; threads: Integer; v7: Boolean = False): Int64;
 var stream: TBytes;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
     { no verification here: zpaq-std decodes every block and compares }
-    if not CompressPjax(Bytes(src, n), stream, False, threads).Ok then Exit(ZS_ERR_DATA);
-    if ZpaqlPjaxArgs(stream) < 0 then Exit(ZS_ERR_DATA);
+    if not CompressPjax(Bytes(src, n), stream, False, threads, v7).Ok then Exit(ZS_ERR_DATA);
+    if ZpaqlPjaxArgs(stream, v7) < 0 then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
     Result := Length(stream);
@@ -376,13 +384,13 @@ begin
 end;
 
 function XDecompressIn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
-  param: LongInt; threads: Integer): Int64;
+  param: LongInt; threads: Integer; v7: Boolean = False): Int64;
 var jpeg: TBytes; r: TCodecResult;
 begin
   if (n > MAX_BLOCK) or (cap > MAX_BLOCK) or (n < 2) then Exit(ZS_ERR_DATA);
   try
-    { version 5 of the full model, or 6 without bytes }
-    if not (((PByte(src)[0] = STREAM_VERSION) and (PByte(src)[1] = 0)) or
+    { version 5 of the full model (version 7: pjax7), or 6 without bytes }
+    if not ((((PByte(src)[0] = STREAM_VERSION) and not v7) or ((PByte(src)[0] = STREAM_V7) and v7)) and (PByte(src)[1] = 0) or
             ((PByte(src)[0] = STREAM_PARTS) and (PByte(src)[1] <= 1))) then Exit(ZS_ERR_DATA);
     r := Decompress(Bytes(src, n), jpeg, SizeInt(cap), threads, SizeInt(cap));
     if not r.Ok or (SizeUInt(Length(jpeg)) <> cap) then Exit(ZS_ERR_DATA);
@@ -400,6 +408,46 @@ var t: Integer;
 begin
   t := Enter;
   try Result := XDecompressIn(src, n, dst, cap, param, t); finally Leave; end;
+end;
+
+function X7Compress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  level: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := XCompressIn(src, n, dst, cap, level, t, True); finally Leave; end;
+end;
+
+function X7Decompress(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
+  param: LongInt): Int64; cdecl;
+var t: Integer;
+begin
+  t := Enter;
+  try Result := XDecompressIn(src, n, dst, cap, param, t, True); finally Leave; end;
+end;
+
+function X7Query(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := ZpaqlPjaxArgs(Bytes(src, n), True);
+  except
+    Result := -1;
+  end;
+end;
+
+function Pja7Query(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := ZpaqlArgs7(Bytes(src, n));
+  except
+    Result := -1;
+  end;
 end;
 
 function XQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
@@ -484,12 +532,14 @@ begin
   if (k >= 2) and (k < Length(base)) and (codecName[k - 1] = 'z') then begin
     StrLCopy(@base[0], codecName, k - 1);
     if (StrComp(@base[0], 'pja') = 0) or (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjax') = 0) or
-       (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) then
+       (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) or
+       (StrComp(@base[0], 'pja7') = 0) or (StrComp(@base[0], 'pjax7') = 0) then
       Exit(zpaqstd_detect_v1(@base[0], src, n));
     Exit;
   end;
   try
-    if (StrComp(codecName, 'pja') = 0) or (StrComp(codecName, 'pjax') = 0) or (StrComp(codecName, 'pjall') = 0) then begin
+    if (StrComp(codecName, 'pja') = 0) or (StrComp(codecName, 'pjax') = 0) or (StrComp(codecName, 'pjall') = 0) or
+       (StrComp(codecName, 'pja7') = 0) or (StrComp(codecName, 'pjax7') = 0) then begin
       { the three verify the JPEG the same way: once for all of them }
       h := BytesHash(src, n);
       if not FindVerdict(n, h, v) then begin
@@ -516,7 +566,15 @@ begin
             w := ZpaqlPjaxFileWords(d, j, after);
             v.pjax := ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and
                       (Log2Words(w) <= ZPAQL_MAX_PH);
+            { pjax7: the same files, version 7's decoder's memory }
+            w := ZpaqlPjaxFileWords(d, j, after, True);
+            v.pjax7 := ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and
+                       (Log2Words(w) <= ZPAQL_MAX_PH);
           end;
+          { pja7: what pja takes, version 7's decoder's memory }
+          v.pja7 := (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and
+                    not HasCorrectionLimits(j) and (Length(j.scans) <= ZPAQL_MAX_SCANS) and
+                    (Log2Words(ZpaqlWords7(j)) <= ZPAQL_MAX_PH);
           { pjall: a lossless JPEG (SOF3), its restarts where its DRI says:
             no other codec takes it }
           v.pjall := j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
@@ -526,6 +584,8 @@ begin
       end;
       if StrComp(codecName, 'pja') = 0 then Result := Ord(v.pja)
       else if StrComp(codecName, 'pjax') = 0 then Result := Ord(v.pjax)
+      else if StrComp(codecName, 'pja7') = 0 then Result := Ord(v.pja7)
+      else if StrComp(codecName, 'pjax7') = 0 then Result := Ord(v.pjax7)
       else Result := Ord(v.pjall);
     end else if StrComp(codecName, 'pjalsx') = 0 then begin
       { JPEG-LS with subsampled components, which pjals' frozen ZPAQL has
@@ -613,6 +673,22 @@ end;
 
 var
   InfoZ, InfoLsZ, InfoXZ, InfoLlZ, InfoLsxZ: AnsiString;
+  Info7, InfoX7, Info7Z, InfoX7Z: AnsiString;
+
+{ the version 7 codecs' cards: pja's and pjax's, version 7's coefficients }
+function Card7(const name, base, stream: AnsiString; z: Boolean): AnsiString;
+begin
+  Result := 'name=' + name + #10 +
+    'version=' + PJA_VERSION + ' (' + stream + ')'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    'format=what ' + base + ' writes, its coefficients with stream version 7''s model';
+  if z then Result := Result + ', through zpaq''s level 1 LZ77 across a block''s files (as ' + base + 'z)';
+  Result := Result + #10'notes=lossless; the same files as ' + base + '; ZPAQL config comp 0 0 $3 ';
+  if z then Result := Result + '$1 0, $1 the window''s bits'#10 else Result := Result + '$1+1 0'#10;
+end;
 
 { data(): the ZPAQL decoder (as ZS_DATA_ZPAQL_ARGS: its H comes from the
   query) and the card; anything else, ZS_DATA_ZPAQL included, nil }
@@ -654,6 +730,26 @@ end;
 function LsData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
   Result := DataOf(PJALS_ZPAQL, INFO_LS, what, size);
+end;
+
+function Pja7Data(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJA7_ZPAQL, Info7, what, size);
+end;
+
+function X7Data(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJAX7_ZPAQL, InfoX7, what, size);
+end;
+
+function Pja7ZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJA7Z_ZPAQL, Info7Z, what, size);
+end;
+
+function X7ZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJAX7Z_ZPAQL, InfoX7Z, what, size);
 end;
 
 function ZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
@@ -778,6 +874,32 @@ const
     bound: @CodecBound; compress_: @LsxCompress; decompress_: @CodecDecompress;
     query: @LsxQuery; data: @LsxZData);
 
+  { version 7 (0.6.0): pja's and pjax's files, version 7's coefficients;
+    their z, as pjaz and pjaxz }
+  ZsCodec7: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pja7'; library_: 'pja stream v7 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @Pja7Compress; decompress_: @CodecDecompress;
+    query: @Pja7Query; data: @Pja7Data);
+
+  ZsCodecX7: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjax7'; library_: 'pja stream v6 pjax, v7 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @X7Compress; decompress_: @X7Decompress;
+    query: @X7Query; data: @X7Data);
+
+  ZsCodec7Z: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pja7z'; library_: 'pja stream v7, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @Pja7Compress; decompress_: @CodecDecompress;
+    query: @Pja7Query; data: @Pja7ZData);
+
+  ZsCodecX7Z: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjax7z'; library_: 'pja stream v6 pjax, v7, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @X7Compress; decompress_: @X7Decompress;
+    query: @X7Query; data: @X7ZData);
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -796,6 +918,10 @@ begin
     7: Result := @ZsCodecXZ;
     8: Result := @ZsCodecLlZ;
     9: Result := @ZsCodecLsxZ;
+    10: Result := @ZsCodec7;
+    11: Result := @ZsCodecX7;
+    12: Result := @ZsCodec7Z;
+    13: Result := @ZsCodecX7Z;
   else Result := nil;
   end;
 end;
@@ -825,4 +951,8 @@ begin
   InfoXZ := ZCard('pjaxz', 'pjax', 'stream v6');
   InfoLlZ := ZCard('pjallz', 'pjall', 'stream v5');
   InfoLsxZ := ZCard('pjalsxz', 'pjalsx', 'stream v5');
+  Info7 := Card7('pja7', 'pja', 'stream v7', False);
+  InfoX7 := Card7('pjax7', 'pjax', 'stream v6 pjax, v7', False);
+  Info7Z := Card7('pja7z', 'pja', 'stream v7, LZ77', True);
+  InfoX7Z := Card7('pjax7z', 'pjax', 'stream v6 pjax, v7, LZ77', True);
 end.

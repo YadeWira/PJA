@@ -591,6 +591,10 @@ def decodebands(first, end):
         if CBW[c] > maxbw:
             maxbw = CBW[c]
     rowc = alloc(maxbw * 16)
+    if PJA7:
+        for c in range(ncomp):
+            RCNT[c] = alloc(CBW[c] * CBH[c])
+            CCNT[c] = alloc(CBW[c] * CBH[c])
     p = first
     for b in range(nb):
         if b < nb - 1:
@@ -599,5 +603,8 @@ def decodebands(first, end):
         else:
             ln = end - p
         dinit(p, p + ln)
-        decodeband(b, nb)
+        if PJA7:
+            decodeband7(b, nb)
+        else:
+            decodeband(b, nb)
         p += ln

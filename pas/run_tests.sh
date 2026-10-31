@@ -62,3 +62,15 @@ ZSX=("$PJA/tests/jls/plasma33x17_none_sub.jls" "$PJA/tests/jls/color_line_subsam
 "$OUT/zpaql_segments" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
 python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
+# the version 7 codecs: pja7 (gray and 4:2:0, chroma against the luma, Cr
+# against Cb), pjax7 (a DNL, 12 bits); each also as its z
+rm -rf "$OUT/zpaql7"; mkdir -p "$OUT/zpaql7"
+Z7=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/baseline_color.jpg")
+"$OUT/zpaql_segments" --pja7 "$OUT/zpaql7" "${Z7[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pja7 "$OUT/zpaql7" "${Z7[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pja7 "$OUT/zpaql7" "${Z7[@]}" | tail -1
+rm -rf "$OUT/zpaqlx7"; mkdir -p "$OUT/zpaqlx7"
+ZX7=("$PJA/tests/jpg/dnl_baseline.jpg" "$PJA/tests/jpg/twelve_bit.jpg")
+"$OUT/zpaql_segments" --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}" | tail -1
+python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}" | tail -1

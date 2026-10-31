@@ -616,7 +616,7 @@ def main():
         tables()
         modeltables()
         origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
-        if M[SEG] != 5 or M[SEG + 1] != 0:
+        if M[SEG] != SVER or M[SEG + 1] != 0:
             error()
         hlen = M[SEG + 2] | (M[SEG + 3] << 8) | (M[SEG + 4] << 16) | (M[SEG + 5] << 24)
         dinit(SEG + 6, SEG + 6 + hlen)

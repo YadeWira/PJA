@@ -174,7 +174,7 @@ class Asm:
                     out.append('lj %d' % pos[lab]); addr += 5
             else:
                 out.append('%s %d' % (kind, pos[lab] - (addr + 2))); addr += 2
-        if addr > 65535:
+        if addr > 65535 and not getattr(self, 'any_size', False):
             raise CompileError('program too big: %d bytes (ZPAQL allows 65535)' % addr)
         self.positions = pos
         return out, addr
@@ -260,6 +260,7 @@ class Compiler:
         self.cbest = {}
         self.asm = Asm()
         self.alloc = Alloc(plan if opt else None)
+        self.callgraph = {}   # each function: the functions it calls
         self.consts = {}
         self.globals = {}     # name -> Slot
         self.ginit = {}       # name -> initial value
@@ -819,6 +820,8 @@ class Compiler:
         if name not in self.funcs:
             err(node, 'unknown function ' + name)
         f = self.funcs[name]
+        if self.cur is not None:
+            self.callgraph.setdefault(self.cur.name, set()).add(name)
         if len(args) != len(f.params):
             err(node, '%s takes %d arguments' % (name, len(f.params)))
         if f is self.cur:
@@ -1052,8 +1055,29 @@ class Compiler:
             self.load_a(self.arrays[name][0]); a.op('d=a')
             if self.known is not None:
                 self.known['a'] = None
-            for v in vals:
-                self.const_a(v); a.op('*d=a'); a.op('d++')
+            if self.opt == 2:
+                # H is zero here (as the program starts, and after reset()):
+                # a table's zeros are only stepped over
+                skip = 0
+                for v in vals:
+                    if v == 0:
+                        skip += 1
+                        continue
+                    if skip:
+                        if skip <= 3:
+                            for _ in range(skip):
+                                a.op('d++')
+                        else:
+                            a.op('a=d'); self.known['a'] = None
+                            while skip:
+                                step = min(skip, 255)
+                                a.op('a+= %d' % step); skip -= step
+                            a.op('d=a')
+                        skip = 0
+                    self.const_a(v); a.op('*d=a'); a.op('d++')
+            else:
+                for v in vals:
+                    self.const_a(v); a.op('*d=a'); a.op('d++')
         self.known = None
         a.jmp('jmp', self.funcs['main'].entry)
         # main first, then the rest, in the order written
@@ -1079,6 +1103,8 @@ class Compiler:
                 if not (self.unpacker and r == R_MBASE):
                     a.op('r=a %d' % r)
             a.op('halt')
+        if self.opt == 2:
+            peephole(a.items)
         return a.assemble()
 
 
@@ -1092,10 +1118,111 @@ def places(uses):
     return plan
 
 
+def peephole(items):
+    """opt=2, in straight-line code (no label or jump between): a=r N
+    right after r=a N goes (A holds it), and so does a b=a whose B is
+    written again before anything reads it"""
+    out = []
+    for it in items:
+        if (it[0] == 'i' and out and out[-1][0] == 'i' and it[1].startswith('a=r ') and
+                out[-1][1] == 'r=a ' + it[1][4:]):
+            continue
+        out.append(it)
+    keep = []
+    for i, it in enumerate(out):
+        if it[0] == 'i' and it[1] == 'b=a':
+            dead = False
+            for nx in out[i + 1:]:
+                if nx[0] != 'i':
+                    break
+                t = nx[1]
+                if t.startswith('b=') and t != 'b=b':
+                    dead = True
+                    break
+                if 'b' in t.replace('halt', ''):
+                    break
+            if dead:
+                continue
+        keep.append(it)
+    items[:] = keep
+
+
+def overlay_places(c):
+    """opt=2: places by use (as places()), but a function's variables,
+    return places and temporaries share theirs with every function that is
+    never on the same chain of calls: each function's frame starts past
+    those of all its callers (no recursion, so frames stack as calls do).
+    An argument is stored just before the jump and a returned value read
+    just after it, so nothing of a callee outlives its call. Then the
+    places, shared, by the uses of all that share them."""
+    uses = c.alloc.uses
+    frames = {}
+    for key in uses:
+        if key and key[0] in ('v', 'ret', 'rv', 't'):
+            frames.setdefault(key[1], []).append(key)
+    for f in frames:
+        frames[f].sort(key=lambda k: -uses[k])
+    callers = {}
+    for f, cs in c.callgraph.items():
+        for g in cs:
+            callers.setdefault(g, set()).add(f)
+    start = {}
+
+    def place(f, seen=()):
+        if f in start:
+            return start[f]
+        if f in seen:
+            raise CompileError('recursion through ' + f)
+        st = 0
+        for g in callers.get(f, ()):
+            st = max(st, place(g, seen + (f,)) + len(frames.get(g, ())))
+        start[f] = st
+        return st
+
+    vslot = {}
+    nglob = 0
+    for key in sorted((k for k in uses if not (k and k[0] in ('v', 'ret', 'rv', 't'))), key=lambda k: -uses[k]):
+        vslot[key] = ('g', nglob)
+        nglob += 1
+    for f, keys in frames.items():
+        st = place(f)
+        for i, key in enumerate(keys):
+            vslot[key] = ('f', st + i)
+    vuses = {}
+    for key, v in vslot.items():
+        vuses[v] = vuses.get(v, 0) + uses[key]
+    order = {v: i for i, v in enumerate(sorted(vuses, key=lambda v: (-vuses[v], v)))}
+    plan = {}
+    for key, v in vslot.items():
+        r = Alloc.RFIRST + order[v]
+        plan[key] = Slot('r', r) if r < 256 else Slot('h', r - 256)
+    return plan
+
+
 def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False):
-    c2 = Compiler(ast.parse(src), opt)
-    lines, size = c2.program()
-    if opt:
+    if opt == 2:
+        # placed by use with frames overlaid (overlay_places): its passes
+        # may be over the limit until the last
+        Asm.any_size = True
+        try:
+            c2 = Compiler(ast.parse(src), opt)
+            lines, size = c2.program()
+            best = None
+            c = c2
+            for _ in range(2):
+                c = Compiler(ast.parse(src), opt, overlay_places(c))
+                l3, s3 = c.program()
+                if best is None or s3 < best[2]:
+                    best = (c, l3, s3)
+            c2, lines, size = best
+        finally:
+            Asm.any_size = False
+        if size > 65535:
+            raise CompileError('program too big: %d bytes (ZPAQL allows 65535)' % size)
+    else:
+        c2 = Compiler(ast.parse(src), opt)
+        lines, size = c2.program()
+    if opt and opt != 2:
         # again with the variables placed by how often the code before named
         # them, twice: the smallest of the three
         c = c2

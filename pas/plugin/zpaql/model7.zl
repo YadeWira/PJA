@@ -1,0 +1,773 @@
+"""Stream version 7's coefficient model for ZPAQL: pjav7c_loop.h (its plain
+path, decoding) line by line, over model.zl's tables and helpers. What C
+does in 64 bits is 32 bits here: the sums it takes modulo 2^32 are those,
+and each of its divisions of a number up to 2^33 is split into two that
+stay below 2^32. Its 64-bit masks are counts: nonzeros per row and per
+column of the block so far, and loops over the 64 coefficients."""
+
+ROW7 = 16                 # a ladder's or a mantissa's row of counters (pjav7c.c's ROW)
+LR_MIX = 6                # the mixers' learning rates
+LR_ZERO = 4
+LR_EEXPO = 10
+BIAS7 = 384               # the constant input
+MAX_W7 = 131072
+PTH = 6                   # an edge prediction is big from PTH quarters of a quantum,
+PTH2 = 40                 # very big from PTH2
+PQ_BUCKETS = 26
+NO_PQ = 25
+ACT2 = 28
+
+MIXA = array(8)           # a decision's counters
+MIXS = array(8)           # and their inputs, stretched
+ROWN = array(8)           # the block's nonzeros so far, per row and per column
+COLN = array(8)
+PTHR = array(8)           # |numerator| from which an edge prediction is big (row 0, column 0)
+PTHC = array(8)
+PTHR2 = array(8)
+PTHC2 = array(8)
+PN = array(16)            # the edge predictions' numerators: row 0 even, column 0 odd, from lane 2
+CSUM = array(8)
+RSUM = array(8)
+KA = array(32)            # the kernels' sums: left, top, right, bottom
+EGS = array(16)           # the edge sums: right, bottom
+RCNT = array(4)           # per component: its rows' and columns' edge counts
+CCNT = array(4)
+ERM = array(2)
+ELF = array(2)
+ECN = array(2)
+AGR = array(2)
+PCN = array(2)
+lumac = 0                 # the luma's coefficients, or 0; the luma's DC residuals, or 0
+lumad = 0
+prevc = 0                 # the previous component's (Cr after Cb), or 0
+prevd = 0
+
+
+def mixn(w, n, lr):
+    """the counters at MIXA[0 .. n) and the constant input, mixed with the
+    weights at w; the bit, the weights and the counters learned"""
+    dot = 0
+    for i in range(n):
+        s = STR[cp(H[MIXA[i]]) >> 4]
+        MIXS[i] = s
+        dot = dot + s * H[w + i]
+    MIXS[n] = BIAS7
+    dot = dot + BIAS7 * H[w + n]
+    pr = squash(tshr(dot, 16))
+    bit = decode(pr << 4)
+    err = ((bit << 12) - pr) * lr
+    for i in range(n + 1):
+        wi = H[w + i] + tshr(MIXS[i] * err, 14)
+        if sgt(wi, MAX_W7):
+            wi = MAX_W7
+        if slt(wi, -MAX_W7):
+            wi = -MAX_W7
+        H[w + i] = wi
+    for i in range(n):
+        upd(MIXA[i], bit, COUNTER_LIMIT)
+    return bit
+
+
+def avg2(a, c):
+    s = tshr(STR[cp(H[a]) >> 4] + STR[cp(H[c]) >> 4], 1)
+    bit = decode(SQ[s + 2048] << 4)
+    upd(a, bit, COUNTER_LIMIT)
+    upd(c, bit, COUNTER_LIMIT)
+    return bit
+
+
+def floor4(a, d):
+    """floor(4 a / d), a < 2^32 and 4 d < 2^32"""
+    return 4 * (a // d) + (4 * (a % d)) // d
+
+
+def div8round(a):
+    if slt(a, 0):
+        return -((-a + 4) >> 3)
+    return (a + 4) >> 3
+
+
+def nzcount(coef, base, edge):
+    """the block's nonzeros: in the interior (edge 0), on row 0 (1), on column 0 (2)"""
+    n = 0
+    if edge == 0:
+        for idx in range(49):
+            if cget(coef, base + INTERIOR[idx]):
+                n += 1
+    elif edge == 1:
+        for w in range(1, 8):
+            if cget(coef, base + UNZIG[w]):
+                n += 1
+    else:
+        for u in range(1, 8):
+            if cget(coef, base + UNZIG[u * 8]):
+                n += 1
+    return n
+
+
+def newmodel7():
+    """a model: its counters (zero: new) and its mixers' first weights,
+    each counter at 4/3 of an equal share and the constant input at zero"""
+    m = alloc(MODEL7_WORDS)
+    for j in range(MX7_COUNT):
+        w = m + mx7info[3 * j]
+        n = mx7info[3 * j + 1]
+        sets = mx7info[3 * j + 2]
+        for i in range(sets * 8):
+            if (i & 7) < n - 1:
+                H[w + i] = 65536 * 4 // (3 * n)
+    return m
+
+
+def component7(c, y0, y1, sx, sy, lumaw):
+    """the band's rows y0 .. y1 of component c, decoded with model mb"""
+    coef = CCOEF[c]
+    bw = CBW[c]
+    nzc = NZC[c]
+    dcr = DCR[c]
+    rcnt = RCNT[c]
+    ccnt = CCNT[c]
+    tq = CTQ[c]
+    for k in range(64):
+        q = QT[tq * 64 + k]
+        if q == 0:
+            q = 1
+        QK[k] = q
+    PTHR[0] = 4294967295
+    PTHC[0] = 4294967295
+    PTHR2[0] = 4294967295
+    PTHC2[0] = 4294967295
+    for i in range(1, 8):
+        PTHR[i] = ((2 * PTH - 1) * 181 * QK[UNZIG[i]] + 1) >> 1
+        PTHC[i] = ((2 * PTH - 1) * 181 * QK[UNZIG[i * 8]] + 1) >> 1
+        PTHR2[i] = ((2 * PTH2 - 1) * 181 * QK[UNZIG[i]] + 1) >> 1
+        PTHC2[i] = ((2 * PTH2 - 1) * 181 * QK[UNZIG[i * 8]] + 1) >> 1
+    dq0 = 2896 * QK[0]
+    dc5 = 5 * dq0
+    dc3 = 3 * dq0
+    for i in range(16):
+        LEFTC[i] = 0
+    for by in range(y0, y1):
+        for bx in range(bw):
+            base = (by * bw + bx) * 64
+            hava = 0
+            if by > y0:
+                hava = 1
+            havl = 0
+            if bx > 0:
+                havl = 1
+            abase = base
+            lbase = base
+            if hava:
+                abase = base - bw * 64
+            if havl:
+                lbase = base - 64
+            lb = 0
+            if lumac:
+                lb = ((by * sy) * lumaw + bx * sx) * 64
+            # 1. the interior count: its bit length in unary, mixed; the bits below with two counters
+            nza = 0
+            nzl = 0
+            if hava:
+                nza = H[nzc + (by - 1) * bw + bx]
+            if havl:
+                nzl = H[nzc + by * bw + bx - 1]
+            if hava and havl:
+                ctx = nzbucket[(nza + nzl + 1) // 2]
+            elif hava:
+                ctx = nzbucket[nza]
+            elif havl:
+                ctx = nzbucket[nzl]
+            else:
+                ctx = 0
+            za = 0
+            zb = 0
+            if hava:
+                za = nzbucket[nza]
+            if havl:
+                zb = nzbucket[nzl]
+            if lumanz:
+                lz = nzbucket[H[lumanz + (by * sy) * lumaw + bx * sx]]
+            else:
+                lz = NZ_BUCKETS
+            haval = hava and havl
+            havar = 0
+            if hava and bx + 1 < bw:
+                havar = 1
+            if haval and havar:
+                c4 = nzbucket[(H[nzc + (by - 1) * bw + bx - 1] + H[nzc + (by - 1) * bw + bx + 1] + 1) // 2]
+            elif haval:
+                c4 = nzbucket[H[nzc + (by - 1) * bw + bx - 1]]
+            elif havar:
+                c4 = nzbucket[H[nzc + (by - 1) * bw + bx + 1]]
+            else:
+                c4 = NZ_BUCKETS
+            if prevc:
+                c4 = c4 * 12 + nzbucket[nzcount(prevc, base, 0)]
+            else:
+                c4 = c4 * 12 + NZ_BUCKETS
+            e = 0
+            while e < 6:
+                MIXA[0] = mb + T7_NZ2 + (za * NZ_BUCKETS + zb) * 64 + e + 1
+                MIXA[1] = mb + T7_NZ3 + (lz * NZ_BUCKETS + ctx) * 64 + e + 1
+                MIXA[2] = mb + T7_NZ4 + c4 * 8 + e
+                if mixn(mb + MX7_NZ + e * 8, 3, LR_MIX) == 0:
+                    break
+                e += 1
+            n = 0
+            if e > 0:
+                node = 1
+                k = e - 1
+                while k > 0:
+                    k -= 1
+                    node = node * 2 + avg2(mb + T7_NZM1 + (ctx * 8 + e) * 8 + k, mb + T7_NZM2 + (lz * 8 + e) * 8 + k)
+                n = node
+            if n > 49:
+                error()
+            H[nzc + by * bw + bx] = n
+            nzb = nzbucket[n]
+            # 2. the interior in zigzag, while nonzeros are left
+            for i in range(8):
+                ROWN[i] = 0
+                COLN[i] = 0
+            rem = n
+            ssum = 0
+            lastidx = 0
+            idx = 0
+            while rem > 0 and idx <= 48:
+                k = INTERIOR[idx]
+                nb = neighbourmag(coef, base, bx, by - y0, k, bw)
+                ib = IB_WA[idx] * iabs(cget(coef, base + IB_NA[idx])) + IB_WB[idx] * iabs(cget(coef, base + IB_NB[idx]))
+                if IB_NONE[idx]:
+                    mbi = NO_NEIGHBOUR
+                else:
+                    mbi = clip(finelog(ib), NO_NEIGHBOUR - 1)
+                if nb == 4294967295:
+                    mbn = NO_NEIGHBOUR
+                    mbs = clip(finelog(2 * ib), NO_NEIGHBOUR - 1)
+                else:
+                    mbn = clip(finelog(nb), NO_NEIGHBOUR - 1)
+                    mbs = clip(finelog(nb + ib), NO_NEIGHBOUR - 1)
+                kb = kbucket[k]
+                rb = rembucket[rem]
+                pos = zigzag[k]
+                rcn = clip(ROWN[pos >> 3], 3)
+                ccn = clip(COLN[pos & 7], 3)
+                if lumac:
+                    cl = clip(finelog(cget(lumac, lb + k)), 11)
+                else:
+                    cl = 12 + clip(finelog(ssum), 15)
+                if prevc:
+                    cc = clip(finelog(cget(prevc, base + k)), 11)
+                else:
+                    cc = 12 + clip(idx - lastidx, 15)
+                left = 49 - idx
+                ratio = 16
+                if rem < left:
+                    ratio = rem * 16 // left
+                if rem >= left:
+                    bit = 1
+                else:
+                    MIXA[0] = mb + T7_ZERO2 + (k * MAG_BUCKETS + mbi) * 4 + clip(mbn, 3)
+                    MIXA[1] = mb + T7_ZERO4 + (kb * MAG_BUCKETS + mbs) * REM_BUCKETS + rb
+                    MIXA[2] = mb + T7_ZLUM + (k * 28 + cl) * REM_BUCKETS + rb
+                    MIXA[3] = mb + T7_ZCB + (k * 28 + cc) * REM_BUCKETS + rb
+                    bit = mixn(mb + MX7_ZERO + k * 8, 4, LR_ZERO)
+                if bit:
+                    ROWN[pos >> 3] = ROWN[pos >> 3] + 1
+                    COLN[pos & 7] = COLN[pos & 7] + 1
+                    i = 1
+                    while i < MAX_EXP_AC:
+                        MIXA[0] = mb + T7_EXPO3 + (kb * REM_BUCKETS + rb) * ROW7 + i - 1
+                        MIXA[1] = mb + T7_XPOS + (k * MAG_BUCKETS + mbs) * ROW7 + i - 1
+                        MIXA[2] = mb + T7_XROW + ((kb * 4 + rcn) * 4 + ccn) * ROW7 + i - 1
+                        MIXA[3] = mb + T7_XLUM + (kb * 28 + cl) * ROW7 + i - 1
+                        MIXA[4] = mb + T7_XCB + (kb * 28 + cc) * ROW7 + i - 1
+                        if mixn(mb + MX7_EXPO + (((i - 1) * K_BUCKETS + kb) * 9 + ratio // 2) * 8, 5, LR_MIX) == 0:
+                            break
+                        i += 1
+                    # the bits below the top: the first with two counters, the rest one each
+                    x = 1 << (i - 1)
+                    j = i - 1
+                    while j > 0:
+                        j -= 1
+                        if j == i - 2:
+                            bt = avg2(mb + T7_MANT1 + i * K_BUCKETS + kb,
+                                      mb + T7_MFIRST + (i * MAG_BUCKETS + mbs) * 16 + clip(cl, 15))
+                        else:
+                            bt = code1(mb + T7_MREST + kb * 256 + i * 16 + j)
+                        x = x | (bt << j)
+                    ssum = ssum + x
+                    lastidx = idx
+                    ls = 1
+                    if lumac:
+                        ls = sgn3(cget(lumac, lb + k))
+                    cs = 1
+                    if prevc:
+                        cs = sgn3(cget(prevc, base + k))
+                    if ls != 1 or cs != 1:
+                        neg = code1(mb + T7_ISIGN + (k * 3 + ls) * 3 + cs)
+                    else:
+                        neg = direct(1)
+                    if neg:
+                        cset(coef, base + k, -x)
+                    else:
+                        cset(coef, base + k, x)
+                    rem -= 1
+                idx += 1
+            if rem > 0:
+                error()
+            for idx in range(49):
+                k = INTERIOR[idx]
+                v = cget(coef, base + k)
+                if v:
+                    FB[zigzag[k]] = dequant(v, QK[k])
+            # 3. each edge coefficient predicted across its edge: the interior's share of each
+            # column (row 0) and each row (column 0), the predictions' numerators, how many are big
+            for i in range(8):
+                CSUM[i] = 0
+                RSUM[i] = 0
+            for pos in range(64):
+                f = FB[pos]
+                if f:
+                    CSUM[pos & 7] = CSUM[pos & 7] + W3[pos >> 3] * f
+                    RSUM[pos >> 3] = RSUM[pos >> 3] + W3[pos & 7] * f
+            PCN[0] = 15
+            PCN[1] = 15
+            if hava:
+                cnt = 0
+                for w in range(8):
+                    nn = H[rowc + bx * 16 + w] - CSUM[w]
+                    PN[2 * w] = nn
+                    an = iabs(nn)
+                    if an >= PTHR[w]:
+                        cnt += 1
+                    if an >= PTHR2[w]:
+                        cnt += 1
+                PCN[0] = cnt
+            if havl:
+                cnt = 0
+                for u in range(8):
+                    nn = LEFTC[u] - RSUM[u]
+                    PN[2 * u + 1] = nn
+                    an = iabs(nn)
+                    if an >= PTHC[u]:
+                        cnt += 1
+                    if an >= PTHC2[u]:
+                        cnt += 1
+                PCN[1] = cnt
+            # 3a. how many nonzero on row 0 and on column 0
+            for et in range(2):
+                if et == 0:
+                    a = 8
+                    l = 8
+                    if hava:
+                        a = H[rcnt + (by - 1) * bw + bx]
+                    if havl:
+                        l = H[rcnt + by * bw + bx - 1]
+                    cbk = 8
+                    r1 = 0
+                    for w in range(1, 8):
+                        if FB[8 + w]:
+                            r1 += 1
+                else:
+                    a = 8
+                    l = 8
+                    if havl:
+                        a = H[ccnt + by * bw + bx - 1]
+                    if hava:
+                        l = H[ccnt + (by - 1) * bw + bx]
+                    cbk = ECN[0]
+                    r1 = 0
+                    for u in range(1, 8):
+                        if FB[u * 8 + 1]:
+                            r1 += 1
+                if lumac:
+                    if prevc:
+                        ex = 2048 + ((et * 9 + nzcount(lumac, lb, et + 1)) * 18 + nzcount(prevc, base, et + 1)) * 8
+                    else:
+                        ex = 2048 + ((et * 9 + nzcount(lumac, lb, et + 1)) * 18 + 9 + r1) * 8
+                else:
+                    ex = ((et * 8 + r1) * 8 + clip(nzb, 7)) * 8
+                cnode = 1
+                for i in range(3):
+                    MIXA[0] = mb + T7_EC1 + ((et * NZ_BUCKETS + nzb) * 9 + a) * 8 + cnode
+                    MIXA[1] = mb + T7_EC2 + ((et * 9 + a) * 9 + l) * 8 + cnode
+                    MIXA[2] = mb + T7_EC3 + ((et * 9 + cbk) * PRED_BUCKETS + clip(nzb, PRED_BUCKETS - 1)) * 8 + cnode
+                    MIXA[3] = mb + T7_ECX + ex + cnode
+                    MIXA[4] = mb + T7_ECP + ((et * 16 + PCN[et]) * NZ_BUCKETS + nzb) * 8 + cnode
+                    cnode = cnode * 2 + mixn(mb + MX7_ECNT + ((et * 8 + cnode) * NZ_BUCKETS + nzb) * 8, 5, LR_MIX)
+                ECN[et] = cnode - 8
+                ERM[et] = cnode - 8
+                ELF[et] = 7
+                AGR[et] = 0
+            H[rcnt + by * bw + bx] = ECN[0]
+            H[ccnt + by * bw + bx] = ECN[1]
+            # 3b. row 0 and column 0, interleaved, each predicted across its edge
+            for ep in range(EDGE_POS):
+                et = ep & 1
+                if ERM[et] == 0:
+                    continue
+                if et == 0:
+                    u = 0
+                    w = ep // 2 + 1
+                else:
+                    u = ep // 2 + 1
+                    w = 0
+                k = UNZIG[u * 8 + w]
+                pb = NO_PRED
+                predf = 0
+                predq = 0
+                havp = havl
+                if u == 0:
+                    havp = hava
+                if havp:
+                    # the prediction n / (724 q) to an integer and to quarters, from
+                    # floor(2 |n| / (181 q)) in eighths, the sign put back
+                    nn = PN[ep + 2]
+                    an = iabs(nn)
+                    b4 = 181 * QK[k]
+                    t = 2 * (an // b4) + (2 * (an % b4)) // b4
+                    predf = (t + 4) >> 3
+                    predq = (t + 1) >> 1
+                    if slt(nn, 0):
+                        predf = -predf
+                        predq = -predq
+                    pb = clip(finelog(div8round(5 * predf)), NO_PRED - 1)
+                pbq = NO_PQ
+                if pb != NO_PRED:
+                    pbq = clip(finelog(div8round(4 * predq)), NO_PQ - 1)
+                a = 0
+                l = 0
+                if hava:
+                    a = iabs(cget(coef, abase + k))
+                if havl:
+                    l = iabs(cget(coef, lbase + k))
+                if hava and havl:
+                    mbn = clip(bitlen(a + l), NO_NEIGHBOUR - 1)
+                elif hava or havl:
+                    mbn = clip(bitlen(2 * (a + l)), NO_NEIGHBOUR - 1)
+                else:
+                    mbn = NO_NEIGHBOUR
+                prevb = 7
+                if ep >= 2:
+                    if u == 0:
+                        prevb = clip(bitlen(cget(coef, base + UNZIG[w - 1])), 7)
+                    else:
+                        prevb = clip(bitlen(cget(coef, base + UNZIG[(u - 1) * 8])), 7)
+                if u == 0:
+                    ib = clip(finelog(cget(coef, base + UNZIG[8 + w])), 11)
+                else:
+                    ib = clip(finelog(cget(coef, base + UNZIG[u * 8 + 1])), 11)
+                if lumac:
+                    el = clip(finelog(cget(lumac, lb + k)), 11)
+                else:
+                    el = 13 + clip(finelog(ssum), 12)
+                if prevc:
+                    ec = clip(finelog(cget(prevc, base + k)), 11)
+                elif hava and havl:
+                    if u == 0:
+                        ec = 12 + clip(finelog(a), 11)
+                    else:
+                        ec = 12 + clip(finelog(l), 11)
+                else:
+                    ec = 24
+                erem = ERM[et]
+                eleft = ELF[et]
+                if erem >= eleft:
+                    bit = 1
+                else:
+                    MIXA[0] = mb + T7_EZ6 + ((ep * 8 + erem) * 8 + eleft) * 4 + clip(pb, 3)
+                    MIXA[1] = mb + T7_EZERO4 + ep * MAG_BUCKETS + mbn
+                    MIXA[2] = mb + T7_EZLUM + (ep * 26 + el) * 4 + clip(pb, 3)
+                    bit = mixn(mb + MX7_EZERO + (ep * 64 + erem * 8 + eleft) * 8, 3, LR_ZERO)
+                ELF[et] = eleft - 1
+                if bit:
+                    erem -= 1
+                    ERM[et] = erem
+                    i = 1
+                    while i < MAX_EXP_AC:
+                        MIXA[0] = mb + T7_EEXPO5 + (ep * 12 + ib) * ROW7 + i - 1
+                        MIXA[1] = mb + T7_EEXPO1 + (ep * PQ_BUCKETS + pbq) * ROW7 + i - 1
+                        MIXA[2] = mb + T7_EEXPO2 + (ep * MAG_BUCKETS + mbn) * ROW7 + i - 1
+                        MIXA[3] = mb + T7_EEXPO3 + (pbq * 8 + prevb) * ROW7 + i - 1
+                        MIXA[4] = mb + T7_EEXPO4 + (ep * NZ_BUCKETS + nzb) * ROW7 + i - 1
+                        MIXA[5] = mb + T7_EXLUM + (ep * 26 + el) * ROW7 + i - 1
+                        MIXA[6] = mb + T7_EXCB + (ep * 26 + ec) * ROW7 + i - 1
+                        if mixn(mb + MX7_EEXPO + (((i - 1) * EDGE_POS + ep) * 4 + clip(erem, 3)) * 8, 7, LR_EEXPO) == 0:
+                            break
+                        i += 1
+                    # the bits below the top, each by where the prediction falls
+                    # against the two halves left (none without a prediction)
+                    x = 1 << (i - 1)
+                    pp = 4294967295
+                    if pb != NO_PRED:
+                        pp = clip(iabs(predf), 65536)
+                    j = i - 1
+                    while j > 0:
+                        j -= 1
+                        c5 = 4
+                        if pp != 4294967295:
+                            d = pp - (x | (1 << j))
+                            if slt(d, -(1 << j)):
+                                c5 = 0
+                            elif slt(d, 0):
+                                c5 = 1
+                            elif slt(d, 1 << j):
+                                c5 = 2
+                            else:
+                                c5 = 3
+                        cx = mb + T7_EMANT + ep * 1280 + (i * 16 + j) * 5 + c5
+                        if j == i - 2:
+                            bt = avg2(mb + T7_EMANT1 + i * PQ_BUCKETS + pbq, cx)
+                        else:
+                            bt = code1(cx)
+                        x = x | (bt << j)
+                    sg = 1
+                    if pb != NO_PRED:
+                        sg = sgn3(predf)
+                    if lumac:
+                        s1 = sgn3(cget(lumac, lb + k))
+                        s2 = 1
+                        if prevc:
+                            s2 = sgn3(cget(prevc, base + k))
+                    else:
+                        sa = 1
+                        sl = 1
+                        if hava:
+                            sa = sgn3(cget(coef, abase + k))
+                        if havl:
+                            sl = sgn3(cget(coef, lbase + k))
+                        if u == 0:
+                            s1 = sl
+                            s2 = sa
+                        else:
+                            s1 = sa
+                            s2 = sl
+                    rel = 4
+                    if pb != NO_PRED:
+                        rel = finelog(4 * x) + 4 - pbq
+                        if slt(rel, 0):
+                            rel = 0
+                        if sgt(rel, 8):
+                            rel = 8
+                    neg = avg2(mb + T7_ESR + (((ep & 1) * 3 + sg) * PQ_BUCKETS + (pbq >> 1)) * 9 + rel,
+                               mb + T7_ESGN + ((((ep * 3 + AGR[et]) * 3 + sg) * 3 + s1) * 3 + s2) * 3 + clip(pb, 2))
+                    if sg != 1:
+                        if neg == (sg == 0):
+                            AGR[et] = 1
+                        else:
+                            AGR[et] = 2
+                    if neg:
+                        cset(coef, base + k, -x)
+                    else:
+                        cset(coef, base + k, x)
+            for ep in range(EDGE_POS):
+                if (ep & 1) == 0:
+                    pos = ep // 2 + 1
+                else:
+                    pos = (ep // 2 + 1) * 8
+                k = UNZIG[pos]
+                v = cget(coef, base + k)
+                if v:
+                    FB[pos] = dequant(v, QK[k])
+            # 4. the DC, from up to 16 boundary estimates: the four kernels' sums and the edge sums
+            for i in range(32):
+                KA[i] = 0
+            for i in range(16):
+                EGS[i] = 0
+            for pos in range(64):
+                f = FB[pos]
+                if f:
+                    for y in range(8):
+                        KA[y] = KA[y] + KER_LEFT[pos * 8 + y] * f
+                        KA[8 + y] = KA[8 + y] + KER_TOP[pos * 8 + y] * f
+                        KA[16 + y] = KA[16 + y] + KER_RIGHT[pos * 8 + y] * f
+                        KA[24 + y] = KA[24 + y] + KER_BOTTOM[pos * 8 + y] * f
+                    EGS[pos >> 3] = EGS[pos >> 3] + E3[pos & 7] * f
+                    EGS[8 + (pos & 7)] = EGS[8 + (pos & 7)] + E3[pos >> 3] * f
+            nest = 0
+            if havl:
+                for i in range(8):
+                    ESTS[nest] = tshr(LEFTC[8 + i] - KA[i], 2)
+                    nest += 1
+            if hava:
+                for i in range(8):
+                    ESTS[nest] = tshr(H[rowc + bx * 16 + 8 + i] - KA[8 + i], 2)
+                    nest += 1
+            lo = 0
+            hi = 0
+            total = 0
+            if nest == 16:
+                for i in range(51):
+                    cswap(split16[i] >> 4, split16[i] & 15)
+                lo = mx(mx(ESTS[0], ESTS[1]), mx(ESTS[2], ESTS[3]))
+                hi = mn(mn(ESTS[12], ESTS[13]), mn(ESTS[14], ESTS[15]))
+                for i in range(4, 12):
+                    total = total + ESTS[i]
+                total = total + lo + hi
+                nest = 10
+            elif nest == 8:
+                for i in range(15):
+                    cswap(split8[i] >> 4, split8[i] & 15)
+                lo = mx(ESTS[0], ESTS[1])
+                hi = mn(ESTS[6], ESTS[7])
+                total = lo + ESTS[2] + ESTS[3] + ESTS[4] + ESTS[5] + hi
+                nest = 6
+            frac = 4
+            if nest > 0:
+                # the prediction in eighths, truncated, then rounded to an integer: the eighths left are a context
+                at = iabs(total)
+                if nest == 10:
+                    t = floor4(at, dc5)
+                else:
+                    t = floor4(at, dc3)
+                pa = (t + 4) >> 3
+                fr = t - 8 * pa
+                if slt(total, 0):
+                    pred = -pa
+                    fr = -fr
+                else:
+                    pred = pa
+                frac = fr + 4
+                ad = iabs(hi - lo)
+                dctx = clip(finelog(4 * (ad // dq0) + (4 * (ad % dq0) + dq0 // 2) // dq0), ACT2 - 2)
+            else:
+                pred = 0
+                dctx = ACT2 - 1
+            d3 = 0
+            if dctx >= 4:
+                d3 = clip((dctx - 4) // 3, 7)
+            if sgt(pred, 32767):
+                pred = 32767
+                frac = 4
+            if slt(pred, -32767):
+                pred = -32767
+                frac = 4
+            rb2 = 0
+            nbs = 0
+            nsg = 0
+            if hava:
+                d = H[dcr + (by - 1) * bw + bx]
+                rb2 = rb2 + (d & 15)
+                nbs += 1
+                nsg = nsg + 3 * (d >> 4)
+            if havl:
+                d = H[dcr + by * bw + bx - 1]
+                rb2 = rb2 + (d & 15)
+                nbs += 1
+                nsg = nsg + (d >> 4)
+            rb2 = clip(rb2, 19)
+            dxs = 0
+            dss = 0
+            o = 4294967295
+            if prevd:
+                o = H[prevd + by * bw + bx]
+            elif lumad and lumanz:
+                o = H[lumad + (by * sy) * lumaw + bx * sx]
+            if o != 4294967295:
+                dxs = 1 + (o & 15)
+                dss = o >> 4
+            res = 0
+            fd = frac - 4
+            if slt(fd, 0):
+                fd = -fd
+            MIXA[0] = mb + T7_DCZERO + dctx
+            MIXA[1] = mb + T7_DZF + rb2 * 5 + fd
+            MIXA[2] = mb + T7_DZ3 + nzb * 8 + d3
+            MIXA[3] = mb + T7_DZ4 + dctx * 3 + nbs
+            MIXA[4] = mb + T7_DZX + dctx * 17 + dxs
+            if mixn(mb + MX7_DCZERO + dctx * 8, 5, LR_MIX):
+                i = 1
+                while i < MAX_EXP_DC:
+                    MIXA[0] = mb + T7_DCEXPO + dctx * ROW7 + i - 1
+                    MIXA[1] = mb + T7_DX2 + rb2 * ROW7 + i - 1
+                    MIXA[2] = mb + T7_DX3 + (nzb * 8 + d3) * ROW7 + i - 1
+                    MIXA[3] = mb + T7_DX4 + (dctx * 3 + nbs) * ROW7 + i - 1
+                    MIXA[4] = mb + T7_DXX + (d3 * 17 + dxs) * ROW7 + i - 1
+                    if mixn(mb + MX7_DCEXPO + (i - 1) * 8, 5, LR_MIX) == 0:
+                        break
+                    i += 1
+                x = 1 << (i - 1)
+                j = i - 1
+                while j > 0:
+                    j -= 1
+                    if j == i - 2:
+                        bt = code1(mb + T7_DCMANT1 + i * ACT2 + dctx)
+                    else:
+                        bt = code1(mb + T7_DCMANT + i * ROW7 + j)
+                    x = x | (bt << j)
+                # the sign: by the spread, the prediction's eighths and which side of it the
+                # DCs left and above are, and by the neighbours' residual signs and the other component's
+                gl = 1
+                ga = 1
+                if havl:
+                    gl = sgn3(cget(coef, lbase) - pred)
+                if hava:
+                    ga = sgn3(cget(coef, abase) - pred)
+                if avg2(mb + T7_DSF + (((dctx >> 1) * 9 + frac) * 3 + gl) * 3 + ga,
+                        mb + T7_DSX + (nsg * 9 + frac) * 3 + dss):
+                    res = -x
+                else:
+                    res = x
+            sres = 0
+            if sgt(res, 0):
+                sres = 1
+            elif slt(res, 0):
+                sres = 2
+            H[dcr + by * bw + bx] = clip(finelog(res), 15) | (sres << 4)
+            x = pred + res
+            if sgt(x, 32767) or slt(x, -32767):
+                error()
+            cset(coef, base, x)
+            f = dequant(x, QK[0])
+            # the edge caches, the DC added
+            for y in range(8):
+                RIGHTC[8 + y] = KA[16 + y] + KER_RIGHT[y] * f
+                H[rowc + bx * 16 + 8 + y] = KA[24 + y] + KER_BOTTOM[y] * f
+                RIGHTC[y] = EGS[y]
+                H[rowc + bx * 16 + y] = EGS[8 + y]
+            RIGHTC[0] = RIGHTC[0] + E3[0] * f
+            H[rowc + bx * 16] = H[rowc + bx * 16] + E3[0] * f
+            for pos in range(64):
+                FB[pos] = 0
+            for i in range(16):
+                LEFTC[i] = RIGHTC[i]
+
+
+def decodeband7(band, nb):
+    """a band's components in order, version 7: chroma sees the luma (when
+    its rows map inside the band's) and Cr the Cb (same size)"""
+    global mb, lumanz, lumac, lumad, prevc, prevd
+    m0 = mcusy * band // nb
+    m1 = mcusy * (band + 1) // nb
+    luma = newmodel7()
+    chroma = newmodel7()
+    for c in range(ncomp):
+        prevc = 0
+        prevd = 0
+        if c >= 2 and CBW[c - 1] == CBW[c] and CBH[c - 1] == CBH[c]:
+            prevc = CCOEF[c - 1]
+            prevd = DCR[c - 1]
+        if c == 0:
+            mb = luma
+            lumanz = 0
+            lumac = 0
+            lumad = 0
+            component7(0, m0 * CV[0], m1 * CV[0], 0, 0, 0)
+        else:
+            mb = chroma
+            sx = CH[0] // CH[c]
+            sy = CV[0] // CV[c]
+            if sx < 1 or sy < 1 or CBW[c] * sx > CBW[0] or CBH[c] * sy > CBH[0]:
+                lumanz = 0
+                lumac = 0
+                lumad = 0
+                component7(c, m0 * CV[c], m1 * CV[c], 0, 0, 0)
+            else:
+                lumanz = NZC[0]
+                lumad = DCR[0]
+                lumac = 0
+                if CV[0] % CV[c] == 0:
+                    lumac = CCOEF[0]
+                component7(c, m0 * CV[c], m1 * CV[c], sx, sy, CBW[0])

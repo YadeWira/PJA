@@ -16,6 +16,7 @@ uses SysUtils, pjajpeg, pjajls, pjacodec, pjamodel;
 {$I pjaxzpaql.inc}
 {$I pjallzpaql.inc}
 {$I pjalsxzpaql.inc}
+{$I v7zpaql.inc}
 
 const
   { the largest H a block may ask for: 2^26 words, 256 MB }
@@ -38,13 +39,17 @@ function ZpaqlJlsArgs(const stream: TBytes): Int64;
 { The pjax codec's: its stream (version 5 or 6, pjacodec.CompressPjax)
   decoded JPEG by JPEG, each in memory of its own, and each part's bytes
   kept until the host puts them back. -1 for what its ZPAQL does not take. }
-function ZpaqlPjaxWords(const stream: TBytes): Int64;
-function ZpaqlPjaxArgs(const stream: TBytes): Int64;
+function ZpaqlPjaxWords(const stream: TBytes; v7: Boolean = False): Int64;
+function ZpaqlPjaxArgs(const stream: TBytes; v7: Boolean = False): Int64;
+{ The pja7 codec's (stream version 7): its decoder's words for this JPEG,
+  and for a stream the $3 of its config, or negative. }
+function ZpaqlWords7(const j: TJpeg): Int64;
+function ZpaqlArgs7(const stream: TBytes): Int64;
 { For the detection, before compressing: an upper bound of what pjax's
   stream of this verified JPEG would take, every candidate part counted
   (a part that does not pay is left out later); also how many bytes of
   them come after the host's EOI (an MPO's or an Ultra HDR's next images). }
-function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64): Int64;
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64; v7: Boolean = False): Int64;
 { The pjall codec's, for a lossless JPEG (its headers parsed, raw
   included): its samples, decoded by JPEG-LS's samples model, and the
   tables its scans are written with again. }
@@ -105,21 +110,51 @@ begin
   Inc(Result, 12 + 8 * 8);
 end;
 
-{ ZpaqlWords with rawLen raw bytes instead of j's: a pjax host, whose
-  stream has its parts after the EOI cut out of them }
-function ZpaqlWordsRaw(const j: TJpeg; rawLen: Int64): Int64;
+{ a decoder's words: its own (static), the raw bytes, the Huffman tables,
+  each component's coefficients (two a word) and perBlock words more for
+  each of its blocks, the row of edge caches, two models a band }
+function WordsOf(const j: TJpeg; rawLen, static, perBlock, modelWords: Int64): Int64;
 var c: Integer; maxbw: SizeInt;
 begin
-  Result := ZPAQL_STATIC_WORDS + RawWords(rawLen);
+  Result := static + RawWords(rawLen);
   Inc(Result, DhtTables(j.raw) * 512);
   maxbw := 0;
   for c := 0 to High(j.comp) do begin
-    Inc(Result, Int64(j.comp[c].bw) * j.comp[c].bh * 32);   { coefficients, two a word }
-    Inc(Result, Int64(j.comp[c].bw) * j.comp[c].bh * 2);    { nonzero counts, DC buckets }
+    Inc(Result, Int64(j.comp[c].bw) * j.comp[c].bh * (32 + perBlock));
     if j.comp[c].bw > maxbw then maxbw := j.comp[c].bw;
   end;
   Inc(Result, Int64(maxbw) * 16);
-  Inc(Result, Int64(BandCount(j)) * 2 * ZPAQL_MODEL_WORDS);
+  Inc(Result, Int64(BandCount(j)) * 2 * modelWords);
+end;
+
+{ ZpaqlWords with rawLen raw bytes instead of j's: a pjax host, whose
+  stream has its parts after the EOI cut out of them; per block, the
+  nonzero counts and the DC buckets }
+function ZpaqlWordsRaw(const j: TJpeg; rawLen: Int64): Int64;
+begin
+  Result := WordsOf(j, rawLen, ZPAQL_STATIC_WORDS, 2, ZPAQL_MODEL_WORDS);
+end;
+
+{ version 7: per block also the counts on row 0 and column 0 (model7.zl's
+  RCNT, CCNT), and its own models }
+function ZpaqlWords7(const j: TJpeg): Int64;
+begin
+  Result := WordsOf(j, Length(j.raw), ZPAQL7_STATIC_WORDS, 4, ZPAQL7_MODEL_WORDS);
+end;
+
+function ZpaqlArgs7(const stream: TBytes): Int64;
+var j: TJpeg; ph: Integer;
+begin
+  Result := -1;
+  try
+    if (Length(stream) < 2) or (stream[0] <> STREAM_V7) then Exit;
+    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl then Exit;
+    ph := Log2Words(ZpaqlWords7(j));
+    if ph > ZPAQL_MAX_PH then Exit;
+    Result := ph;
+  except
+    Result := -1;
+  end;
 end;
 
 function ZpaqlWords(const j: TJpeg): Int64;
@@ -168,21 +203,25 @@ end;
 
 { What one version 5 stream takes beyond the decoder's own words: -1 if
   pjax does not decode it (arithmetic, lossless, JPEG-LS) }
-function OneJpegWords(const st: TBytes): Int64;
+function OneJpegWords(const st: TBytes; v7: Boolean = False): Int64;
 var j: TJpeg;
 begin
+  { version 7's codecs read version 7 streams only, pjax version 5 only }
+  if (Length(st) < 1) or ((st[0] = STREAM_V7) <> v7) then Exit(-1);
   if not StreamHeaders(st, j).Ok or j.arithmetic or j.lossless then Exit(-1);
-  Result := ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
+  if v7 then Result := ZpaqlWords7(j) - ZPAQL7_STATIC_WORDS
+  else Result := ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
 end;
 
-function ZpaqlPjaxWords(const stream: TBytes): Int64;
-var n, q: Int64; i: Integer; p, at, k: SizeInt; w: Int64; copy_: Boolean;
+function ZpaqlPjaxWords(const stream: TBytes; v7: Boolean): Int64;
+var n, q: Int64; i: Integer; p, at, k: SizeInt; w, static: Int64; copy_: Boolean;
 begin
   Result := -1;
   if Length(stream) < 2 then Exit;
-  if stream[0] = STREAM_VERSION then begin
-    w := OneJpegWords(stream);
-    if w >= 0 then Result := ZPAQL_X_STATIC_WORDS + w;
+  if v7 then static := ZPAQL7_X_STATIC_WORDS else static := ZPAQL_X_STATIC_WORDS;
+  if (stream[0] = STREAM_VERSION) or (stream[0] = STREAM_V7) then begin
+    w := OneJpegWords(stream, v7);
+    if w >= 0 then Result := static + w;
     Exit;
   end;
   { version 6: no bytes, at most 256 parts, each part version 5 }
@@ -197,29 +236,37 @@ begin
     p := p + 4 + 4 * q;
     if (q > 256) or (p > Length(stream)) then Exit;
   end;
-  Result := ZPAQL_X_STATIC_WORDS;
+  Result := static;
   at := p;
   for i := 0 to n - 1 do begin
     copy_ := stream[6 + 13 * i + 12] and 2 <> 0;
     if copy_ then Continue;
     k := U32At(stream, 6 + 13 * i + 8);
     if at + k > Length(stream) then Exit(-1);
-    w := OneJpegWords(Copy(stream, at, k));
+    w := OneJpegWords(Copy(stream, at, k), v7);
     if w < 0 then Exit(-1);
     { its decoding, and its bytes until the host is out }
     Result := Result + w + U32At(stream, 6 + 13 * i + 4);
     at := at + k;
   end;
-  w := OneJpegWords(Copy(stream, at, Length(stream) - at));
+  w := OneJpegWords(Copy(stream, at, Length(stream) - at), v7);
   if w < 0 then Exit(-1);
   Result := Result + w;
 end;
 
-function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64): Int64;
+function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64; v7: Boolean): Int64;
 var k, len: SizeInt; sj: TJpeg;
+
+  { a JPEG's words beyond the decoder's own }
+  function PartWords(const pj: TJpeg; rawLen: Int64): Int64;
+  begin
+    if v7 then Result := WordsOf(pj, rawLen, 0, 4, ZPAQL7_MODEL_WORDS)
+    else Result := WordsOf(pj, rawLen, 0, 2, ZPAQL_MODEL_WORDS);
+  end;
+
 begin
   after := 0;
-  Result := ZPAQL_X_STATIC_WORDS - ZPAQL_STATIC_WORDS;
+  if v7 then Result := ZPAQL7_X_STATIC_WORDS else Result := ZPAQL_X_STATIC_WORDS;
   { as pjacodec.CompressAt looks for them: FF D8 FF from the third byte on,
     a Huffman JPEG inside the host's segments or after its end }
   k := 2;
@@ -229,7 +276,7 @@ begin
       len := sj.eoi;
       if (k >= j.eoi) or (k + len <= j.eoi) then begin
         if k >= j.eoi then Inc(after, len);
-        Result := Result + ZpaqlWords(sj) - ZPAQL_STATIC_WORDS + len;
+        Result := Result + PartWords(sj, Length(sj.raw)) + len;
         Inc(k, len);
         Continue;
       end;
@@ -240,15 +287,15 @@ begin
     stream cuts out (the parts inside its segments are zeroed, and stay);
     until 0.5.0 they were counted here as well, twice with the parts, and
     a camera's MPO of 10 MB asked for 2^27 words, its stream for 2^25 }
-  Result := Result + ZpaqlWordsRaw(j, Length(j.raw) - after);
+  Result := Result + PartWords(j, Length(j.raw) - after);
 end;
 
-function ZpaqlPjaxArgs(const stream: TBytes): Int64;
+function ZpaqlPjaxArgs(const stream: TBytes; v7: Boolean): Int64;
 var w: Int64;
 begin
   Result := -1;
   try
-    w := ZpaqlPjaxWords(stream);
+    w := ZpaqlPjaxWords(stream, v7);
     if w < 0 then Exit;
     Result := Log2Words(w);
     if Result > ZPAQL_MAX_PH then Result := -1;
