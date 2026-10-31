@@ -1775,3 +1775,56 @@ standard ones too (once, when the file is written out): test_lib puts
 baseline_444.jpg without tables after a JPEG of color_plasma.jpg's
 tables, which 0.5.2 left raw.
 
+
+## Stream version 7 for zpaq-std: pja7, pjax7 and their z (31/10/2026)
+
+zpaq-std's plugin wrote stream version 5, the one its frozen ZPAQL
+decoders read, while the command had moved to version 7: 3% smaller and
+about 1.6 times as fast. Wira approved a prototype of version 7 for
+zpaq-std, as new codecs (a frozen ZPAQL never changes): pja7 (pja's
+files), pjax7 (pjax's), and their z, pja7z and pjax7z.
+
+The decoder: `pas/plugin/zpaql/model7.zl`, pjav7c_loop.h's plain path
+line by line in zpaqlc's language over model.zl's tables and helpers.
+What C does in 64 bits is 32 bits there: the sums it only uses modulo 2^32
+are those, and each division of a number that may reach 2^33 (the edge
+prediction, the DC's eighths, its spread) is split into a quotient and a
+remainder's that stay below 2^32. Its 64-bit masks are counts (nonzeros
+per row and column of the block so far) and loops. The models' tables and
+mixers come from TCoefModel.InitV7 (gen_pjadec.make_consts7): 210,731
+words a model, two a band. The plugin links the C of version 7 (pjav7),
+so it writes the streams the command writes.
+
+Compiled as zpaqlc compiled the z codecs, the decoder was 71,052 bytes,
+over ZPAQL's 65,535: every function's variables had places of their own,
+and with this many functions most were in H, where each use builds an
+address first (a line of 150 to 450 bytes). zpaqlc's opt=2 overlays them:
+a function's frame starts past those of all the functions that may call
+it, so functions never on one chain of calls share places, and the most
+used fit in R. With kaitz's three patterns from zpaq-std's issue #4 too:
+
+| codec | PCOMP |
+|---|---|
+| pja7 | 35,104 |
+| pja7z | 35,829 |
+| pjax7 | 35,211 |
+| pjax7z | 35,987 |
+
+The plugin, one thread, against the version 5 codecs (every file back):
+
+| set | v5 | v7 | compress | decompress |
+|---|---|---|---|---|
+| 151 photos (pja / pja7) | 75.03% | **72.68%** | 52.7 -> 33.5 s | 53.5 -> 35.9 s |
+| corpus, the 65 pja takes | 73.85% | **72.22%** | 25.6 -> 19.6 s | 20.4 -> 15.2 s |
+| 244 arithmetic-coded | 76.35% | **74.44%** | 6.2 -> 5.0 s | 5.9 -> 4.8 s |
+| 640 generated | 75.47% | **73.58%** | 12.5 -> 9.4 s | 12.9 -> 10.1 s |
+| MPO, the 4 pjax takes (pjax / pjax7) | 73.93% | **73.18%** | 23.5 -> 16.8 s | 22.1 -> 16.0 s |
+
+The ZPAQL is faster as well: libzpaq extracts 30 photos in 46.4 s with
+pja7's, 108.6 s with pja's. Each set in one block through a test LZ77
+(the z): arithmetic-coded 17.70% (pjaz) -> 17.18% (pja7z), generated
+16.77% -> 16.34%, libzpaq 41 -> 28 s and 108 -> 70 s. Every file back,
+with $3 the plugin's query gives (its count, ZpaqlWords7, follows
+model7.zl's allocs); with a window of 4 KB too; damaged segments, 150 a
+codec: no hang. x86 and x64 write the same bytes. The suite decodes pja7
+and pjax7 segments, and their z, in zpaqlc's interpreter.
