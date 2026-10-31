@@ -1741,3 +1741,29 @@ export, zpaqstd_threads_v1(n), tells the plugin how many threads zpaq-std
 runs, and each call takes n / (the calls running) for its bands. The four
 MPO through pjax, one call at a time: 27.2 -> 12.6 s to compress, 23.9 ->
 9.3 s to decompress with n = 8; the same streams.
+
+Later the same day, a third slip: a scan that ends before its last block,
+at a marker (three of the corpus' 26: an encoder that did not flush its
+last bits) or at the end of the file (a download cut short). PJA reads on
+with zero bits, as libjpeg does: a filler after the scan, zero bytes
+until the scan has all its blocks, with the RSTs its DRI asks for (each
+found as the parser misses it) and their padding bits set to 1, and what
+the scan does not read taken out; then the file is decoded and rebuilt,
+and the repair is "these bytes go". The filler may be large (a photo cut
+at 60% has 40% of its blocks made up), so PATCH holds it to 4 times the
+file and 64 KB (MaxFiller), and the repaired stream is kept only when it
+is smaller than the file as bytes. Three of the corpus' four are taken
+now (98% -> 76 to 80%); 30 photos cut at random points: 10 repaired (a
+photo cut at 99%: 85.9% as bytes, 61.1% now), 20 smaller as bytes, every
+one back. Compress's own check now decodes with the original's size as
+the cap, as every caller does: before, a large filler passed the check
+and failed when extracted. New samples `scan_ends_early.jpg` and
+`cut_short.jpg`.
+
+And the tiles whose container keeps no tables at all (Konica's Q-Photo
+`.kqp` and `.pic`, 10 of the corpus' files): libpja's filter now gives a
+JPEG without tables, when it finds none in its container within 16 MiB,
+the standard ones, T.81's example tables (STD_TABLES in pjafilter.c, as
+cjpeg -quality 50 writes them). Konica's are those: the 10 files go from
+raw to 52 to 78%, every one back.
+

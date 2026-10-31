@@ -29,6 +29,8 @@ flip every bit of them.
 | `image_after_eoi.jpg` | `solid_color.jpg` with `baseline_444.jpg` after its EOI (`cat`): a small file of stream version 6, for the pjax ZPAQL in the Python interpreter |
 | `restarts_misnumbered.jpg` | `restart_huffman.jpg` with its restart markers numbered from RST4 on instead of RST0, as Second Nature's slide shows have them (libjpeg: "found marker 0xd4 instead of RST0"): PJA renumbers them and keeps the original numbers (stream version 6, PATCH) |
 | `byte_before_eoi.jpg` | `baseline_color.jpg` with a 00 byte between its scan and its EOI, as Xara writes its JPEGs (libjpeg says nothing): PJA takes it out and puts it back (PATCH) |
+| `scan_ends_early.jpg` | `color_plasma.jpg` with its scan's last 40 bytes taken out and its EOI kept, as some encoders end a scan before its last blocks (libjpeg: "premature end of data segment"): PJA reads it on with zero bits, as libjpeg does, and keeps what it added to take out again (PATCH) |
+| `cut_short.jpg` | `restart_huffman.jpg` cut at 93%, without its EOI, as a download cut short leaves a file: the same, with the RSTs its DRI asks for in what PJA adds |
 | `prog_correction_limit.jpg` | `convert -seed 71 -size 192x128 plasma:fractal -blur 0x4` → `cjpeg -progressive -quality 90`, its AC refinement scans re-encoded by PJA's own encoder ending each EOB run once it holds more than 2 correction bits (libjpeg: 937; Photoshop: about 256): it needs stream version 6, and `djpeg` decodes it to the same pixels |
 
 ## `jls/`

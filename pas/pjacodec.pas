@@ -738,6 +738,8 @@ const
   MAX_EDITS = 4096;
   { RepairJpeg's tries: one repair each, then the file parsed again }
   MAX_REPAIRS = 64;
+  { and a cut scan's: each RST its filler needs is one more }
+  MAX_FILL_TRIES = 4096;
   MAX_QUIRK_SCANS = 256;
 
 type
@@ -805,7 +807,8 @@ function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; t
 function SameAfter(const jpeg, stream: TBytes; threads, depth: Integer): Boolean;
 var back: TBytes;
 begin
-  Result := DecompressAt(stream, back, 1 shl 28, threads, Length(jpeg), depth).Ok and (Length(back) = Length(jpeg)) and
+  { maxRaw as every caller gives it: the original's exact size }
+  Result := DecompressAt(stream, back, Length(jpeg), threads, Length(jpeg), depth).Ok and (Length(back) = Length(jpeg)) and
             ((Length(back) = 0) or CompareMem(@back[0], @jpeg[0], Length(back)));
 end;
 
@@ -974,6 +977,14 @@ begin
   end;
 end;
 
+{ how much larger than the original (n bytes) its repaired file may be: a
+  cut scan's filler, at most 4 times the file and 64 KB; RepairJpeg keeps
+  to it and ReadPatch holds a stream to it }
+function MaxFiller(n: Int64): Int64;
+begin
+  Result := 4 * n + 65536;
+end;
+
 type
   { one of PATCH's edits: in the repaired file, at pos, del bytes go and
     ins takes their place }
@@ -986,12 +997,38 @@ type
 { A JPEG that PJA refuses for an encoder's slip it can undo, repaired
   (fixed) and the edits that give the original back: restarts numbered
   wrong (jeBadRst at an RST: the scan's RSTs from there numbered again, the
-  way T.81 counts them) and bytes that are no marker between a scan and the
-  next one (jeDataAfterScan: taken out). One repair at a time, in the
-  order the parser meets them; False if one is not of these, or if the file
-  still does not parse after MAX_REPAIRS. }
+  way T.81 counts them), bytes that are no marker between a scan and the
+  next one (jeDataAfterScan: taken out), and a scan that ends before its
+  last block (jeTruncated at a marker or at the end of the file: zero bits
+  after it, as libjpeg reads it, and the file rebuilt). One repair at a
+  time, in the order the parser meets them; False if one is not of these,
+  or if the file still does not parse after MAX_REPAIRS. }
 function RepairJpeg(const data: TBytes; out fixed: TBytes; out edits: TEdits): Boolean;
-var j: TJpeg; r: TJpegResult; t: Integer; p, q, k, start, count, after: SizeInt; b: Byte; e: TEdit;
+var j: TJpeg; r: TJpegResult; t, t2: Integer; p, q, k, start, count, after: SizeInt; b: Byte; e: TEdit;
+    tmp, rebuilt, filler: TBytes;
+
+  { how many RSTs the scan around d[q] has before q: from its SOS (inside
+    entropy-coded data FF is followed by 00 or an RST only); -1 if none }
+  function RstsBefore(const d: TBytes; q: SizeInt): SizeInt;
+  var i, first: SizeInt;
+  begin
+    i := q - 1;
+    while (i > 0) and not ((d[i - 1] = $FF) and (d[i] = $DA)) do Dec(i);
+    if (i = 0) or (i + 2 >= Length(d)) then Exit(-1);
+    first := i + 1 + (SizeInt(d[i + 1]) shl 8 or d[i + 2]);
+    Result := 0;
+    for i := first to q - 2 do
+      if (d[i] = $FF) and (d[i + 1] >= $D0) and (d[i + 1] <= $D7) then Inc(Result);
+  end;
+
+  { fixed with the filler at p }
+  function WithFiller(const f: TBytes): TBytes;
+  begin
+    Result := nil; SetLength(Result, Length(fixed) + Length(f));
+    if p > 0 then Move(fixed[0], Result[0], p);
+    if Length(f) > 0 then Move(f[0], Result[p], Length(f));
+    if Length(fixed) > p then Move(fixed[p], Result[p + Length(f)], Length(fixed) - p);
+  end;
 
   procedure Add(pos, del: SizeInt; const ins: TBytes);
   begin
@@ -1008,7 +1045,8 @@ begin
     r := VerifyRoundTrip(fixed, j);
     if r.Ok then Exit(Length(edits) > 0);
     p := r.pos;
-    if (p < after) or (p + 1 >= Length(fixed)) or (Length(edits) >= MAX_EDITS) then Exit;
+    if (p < after) or (p > Length(fixed)) or ((p + 1 >= Length(fixed)) and (r.err <> jeTruncated)) or
+       (Length(edits) >= MAX_EDITS) then Exit;
     case r.err of
       jeBadRst: begin
           { an RST of another number where one was due: the scan's start
@@ -1047,6 +1085,56 @@ begin
           Add(p, 0, Copy(fixed, p, q - p));
           Delete(fixed, p, q - p);
           after := p;
+        end;
+      jeTruncated: begin
+          { only a scan that stops at a marker or at the end of the file
+            (a download cut short); a filler after it: zero bytes until
+            the scan has all its blocks, with the RSTs its DRI asks for
+            where it asks for them (each found as the parser misses it),
+            and what it does not read taken out again; then the file
+            decoded and rebuilt: its bytes up to p and from p on must be
+            the file's }
+          if (p < Length(fixed)) and (fixed[p] <> $FF) then Exit;
+          filler := nil; SetLength(filler, 16);
+          for t2 := 1 to MAX_FILL_TRIES do begin
+            tmp := WithFiller(filler);
+            r := Decompose(tmp, j);
+            if r.Ok then Break;
+            q := r.pos - p;
+            if (r.err = jeDataAfterScan) and (q >= 0) and (q <= Length(filler)) then begin
+              SetLength(filler, q);
+              Continue;
+            end;
+            { the end of a restart interval in the filler: its last byte's
+              last bits are the padding, which the encoder writes as 1s;
+              more of them set to 1 until they agree (the filler's bits are
+              anyone's) }
+            if (r.err = jeInconsistentPadding) and (q >= 1) and (q <= Length(filler)) and
+               (filler[q - 1] and $7F <> $7F) then begin
+              b := filler[q - 1];
+              filler[q - 1] := b or ((b and $7F) shl 1 or 1) and $7F;
+              if filler[q - 1] = b then filler[q - 1] := b or $7F;
+              Continue;
+            end;
+            if (r.err = jeBadRst) and (q >= 0) and (q < Length(filler)) then begin
+              count := RstsBefore(tmp, r.pos);
+              if count < 0 then Exit;
+              Insert(TBytes.Create($FF, $D0 + (count and 7)), filler, q);
+              Continue;
+            end;
+            if (r.err <> jeTruncated) or (Length(filler) > 4 * Length(fixed) + 65536) then Exit;
+            k := Length(filler);
+            SetLength(filler, 2 * k);
+            FillChar(filler[k], k, 0);
+          end;
+          if not r.Ok then Exit;
+          if not Recompose(j, rebuilt).Ok or (Length(rebuilt) < Length(fixed)) then Exit;
+          k := Length(rebuilt) - Length(fixed);
+          if ((p > 0) and not CompareMem(@rebuilt[0], @fixed[0], p)) or
+             ((Length(fixed) > p) and not CompareMem(@rebuilt[p + k], @fixed[p], Length(fixed) - p)) then Exit;
+          Add(p, k, nil);
+          fixed := rebuilt;
+          if Length(fixed) - Length(data) > MaxFiller(Length(data)) then Exit;
         end;
     else
       Exit;
@@ -1198,14 +1286,14 @@ end;
 
 { PATCH: the edits, then the repaired file's stream }
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
-var p: SizeInt; e, i: Integer; pos, del, ins: Int64; edits: TEdits; fixed, inner: TBytes;
+var p: SizeInt; e, i: Integer; pos, del, ins, dels: Int64; edits: TEdits; fixed, inner: TBytes;
 begin
   jpeg := nil;
   if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
   if (GetU32(stream, 2) < 1) or (GetU32(stream, 2) > MAX_EDITS) then Exit(CodecFail(ceBadStream));
   e := Integer(GetU32(stream, 2));
   edits := nil; SetLength(edits, e);
-  p := 6;
+  p := 6; dels := 0;
   for i := 0 to e - 1 do begin
     if p + 12 > Length(stream) then Exit(CodecFail(ceBadStream));
     { each number checked before it becomes a SizeInt (32 bits on 32-bit
@@ -1213,6 +1301,7 @@ begin
     pos := GetU32(stream, p); del := GetU32(stream, p + 4); ins := GetU32(stream, p + 8);
     if (pos > maxRaw) or (del > maxRaw) or (ins > Length(stream) - p - 12) then Exit(CodecFail(ceBadStream));
     edits[i].pos := pos; edits[i].del := del;
+    dels := dels + del;
     edits[i].ins := Copy(stream, p + 12, ins);
     p := p + 12 + Length(edits[i].ins);
   end;
@@ -1220,7 +1309,10 @@ begin
   { the repaired file: neither repaired again nor as bytes }
   if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) then
     Exit(CodecFail(ceBadStream));
-  Result := DecompressAt(inner, fixed, maxRaw, threads, 0, 0);
+  { the repaired file is the original with what the edits take out: a cut
+    scan's filler makes it larger }
+  if dels > MaxFiller(maxRaw) then Exit(CodecFail(ceBadStream));
+  Result := DecompressAt(inner, fixed, maxRaw + dels, threads, 0, 0);
   if not Result.Ok then Exit;
   if not ApplyEdits(fixed, edits, maxRaw, jpeg) then Exit(CodecFail(ceBadStream));
 end;
@@ -1249,19 +1341,23 @@ end;
 
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                   fast: Boolean; parts: Boolean; v7: Boolean): TCodecResult;
-var why: TCodecResult; model: TModelKind; fixed, inner: TBytes; edits: TEdits;
+var why: TCodecResult; model: TModelKind; fixed, inner, asBytes: TBytes; edits: TEdits;
 begin
   if v7 then model := mkV7 else if fast then model := mkFast else model := mkFull;
   if not parts then Exit(CompressOne(jpeg, stream, verify, threads, model));
   Result := CompressAt(jpeg, stream, verify, threads, model, 0);
   { an encoder's slip PJA can undo: the file repaired, compressed, and the
     repairs kept (PATCH), with the reason kept }
-  if (Result.err = ceJpeg) and (Result.jpeg.err in [jeBadRst, jeDataAfterScan]) and
+  if (Result.err = ceJpeg) and (Result.jpeg.err in [jeBadRst, jeDataAfterScan, jeTruncated]) and
      RepairJpeg(jpeg, fixed, edits) then begin
     why := Result;
     if CompressAt(fixed, inner, False, threads, model, 0).Ok then begin
       stream := WritePatch(edits, inner);
-      if not verify or SameAfter(jpeg, stream, threads, 0) then begin
+      { a cut scan's filler may cost more than the model gains on the rest:
+        then the file goes as bytes, below }
+      if CompressBytes(jpeg, asBytes, False, threads).Ok and (Length(asBytes) <= Length(stream)) then
+        stream := nil
+      else if not verify or SameAfter(jpeg, stream, threads, 0) then begin
         Result := CodecFail(ceOk); Result.jpeg := why.jpeg; Result.repaired := True;
         Exit;
       end;
