@@ -30,11 +30,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, os: ubuntu-24.04 }
+          - { platform: linux-x86_64, os: ubuntu-24.04, cc: clang }
           - { platform: linux-x86, os: ubuntu-24.04 }
-          - { platform: linux-arm64, os: ubuntu-24.04-arm }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, cc: clang }
           - { platform: macos-arm64, os: macos-latest }
-          - { platform: windows-x64, os: windows-latest, fpc: fpc -Px86_64, cc: /c/msys64/mingw64/bin/gcc, gcc: mingw-w64-x86_64-gcc }
+          - { platform: windows-x64, os: windows-latest, fpc: fpc -Px86_64, cc: /c/msys64/mingw64/bin/clang, gcc: mingw-w64-x86_64-clang }
           - { platform: windows-x86, os: windows-latest, fpc: fpc -Pi386, cc: /c/msys64/mingw32/bin/gcc, gcc: mingw-w64-i686-gcc }
     runs-on: ${{ matrix.os }}
     steps:
@@ -43,13 +43,13 @@ jobs:
           ref: ${{ env.TAG }}
       - name: Install Free Pascal (Linux)
         if: runner.os == 'Linux' && matrix.platform != 'linux-x86'
-        run: sudo apt-get update && sudo apt-get install -y fpc
+        run: sudo apt-get update && sudo apt-get install -y fpc clang
       - name: Install the 32-bit Free Pascal (Linux x86)
         if: matrix.platform == 'linux-x86'
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y libc6:i386 gcc-multilib
+          sudo apt-get install -y libc6:i386 gcc-multilib clang
           scripts/fpc-i386.sh /tmp/fpc-i386
       - name: Install Free Pascal (macOS)
         if: runner.os == 'macOS'
@@ -64,7 +64,7 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
-      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+      - name: Install the C compiler (MSYS2's MinGW-w64 clang or gcc)
         if: runner.os == 'Windows'
         shell: pwsh
         run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed ${{ matrix.gcc }}
@@ -72,7 +72,7 @@ jobs:
         shell: bash
         env:
           FPC: ${{ matrix.platform == 'linux-x86' && '/tmp/fpc-i386/fpc' || matrix.fpc || 'fpc' }}
-          CC: ${{ matrix.platform == 'linux-x86' && 'gcc -m32' || matrix.cc || 'cc' }}
+          CC: ${{ matrix.platform == 'linux-x86' && 'clang -m32' || matrix.cc || 'cc' }}
           PJA_OUT: build/rel
         run: |
           export PJA_COMMIT=$(git rev-parse --short=7 HEAD)

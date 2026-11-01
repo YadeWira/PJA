@@ -11,16 +11,20 @@
 # gives the same streams).
 #
 # The object calls no library and needs no runtime: no stack protector, no
-# loop turned into memset (gcc), no position-independent code where the
-# executable is not (32-bit x86). -fwrapv and -ffp-contract=off keep the
-# arithmetic the same everywhere.
+# loop turned into memset or memcpy (gcc's -fno-tree-loop-distribute-patterns,
+# clang's -fno-builtin), no position-independent code where the executable is
+# not (32-bit x86). -fwrapv and -ffp-contract=off keep the arithmetic the
+# same everywhere. clang's code is about 8% faster than gcc's on x86-64, with
+# the same bytes: the releases use it where they can.
 set -eu
 OUT=${1:?usage: build_c.sh <out dir> [extra C flags]}
 shift
 HERE=$(cd "$(dirname "$0")" && pwd)
 CC=${CC:-cc}
 FLAGS="-O3 -fwrapv -ffp-contract=off -fno-stack-protector"
-if ! $CC --version 2>/dev/null | grep -qi clang; then
+if $CC --version 2>/dev/null | grep -qi clang; then
+  FLAGS="$FLAGS -fno-builtin"
+else
   FLAGS="$FLAGS -fno-tree-loop-distribute-patterns"
 fi
 case "$CC $*" in

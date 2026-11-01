@@ -322,7 +322,8 @@ static TARGET int FN(component)(CD_T *dc, v7m_t *m, int16_t *coef, intptr_t bw, 
       int32_t pn[16]; int pcn[2] = {15, 15};   /* pn: each prediction's numerator, row 0 even, column 0 odd, from lane 2 */
       {
         /* the interior's share of each column (for row 0) and each row (for column 0), in one pass */
-        int64_t csum[8] = {0}, rsum[8] = {0};
+        int64_t csum[8], rsum[8];
+        V7_ZERO(csum); V7_ZERO(rsum);
         uint64_t mm = fm;
         while (mm) {
           int pos = ctz64(mm); mm &= mm - 1;

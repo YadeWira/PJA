@@ -80,6 +80,17 @@ typedef struct {
 } v7work_t;
 
 static v7t_t T;
+/* No library: gcc keeps its loops (-fno-tree-loop-distribute-patterns), but
+   clang turns a zeroed array or a struct copy into a call to memset or
+   memcpy, which a DLL with no C runtime cannot resolve; its inline builtins
+   never call out. */
+#if defined(__clang__) && __has_builtin(__builtin_memset_inline) && __has_builtin(__builtin_memcpy_inline)
+#define V7_ZERO(a) __builtin_memset_inline(a, 0, sizeof(a))
+#define V7_COPY(d, s) __builtin_memcpy_inline(d, s, sizeof(*(d)))
+#else
+#define V7_ZERO(a) do { for (unsigned z_ = 0; z_ < sizeof(a) / sizeof((a)[0]); z_++) (a)[z_] = 0; } while (0)
+#define V7_COPY(d, s) (*(d) = *(s))
+#endif
 /* The prediction kernels. Every sum of their products is only used modulo
    2^32 (above), so they are summed in uint32_t, where wrapping is defined.
    K4[pos]: what the coefficient at pos adds per unit to the 8 values of each
@@ -91,7 +102,7 @@ static uint32_t E3U[8];
 static uint64_t ROW0ZZ, COL0ZZ;
 
 void pjav7_tables(const v7t_t *t) {
-  T = *t;
+  V7_COPY(&T, t);
   for (int pos = 0; pos < 64; pos++)
     for (int y = 0; y < 8; y++) {
       K4[pos][y] = (uint32_t)t->kerLeft[pos * 8 + y]; K4[pos][8 + y] = (uint32_t)t->kerTop[pos * 8 + y];

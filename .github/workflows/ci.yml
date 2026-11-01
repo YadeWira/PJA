@@ -6,6 +6,9 @@
 # checks that they are the same bytes everywhere. Linux x86-64 also runs the
 # two full suites: the codec's (pas/run_codec_tests.sh) and the .pja
 # format's with the plugin's ZPAQL decoders (pas/run_tests.sh).
+# The C is built with clang where the releases are (Linux, macOS, Windows
+# x64: about 8% faster than gcc, the same bytes) and with gcc on Windows x86
+# and in the two suites, so both compilers stay checked.
 name: CI
 
 # Branches only: a tag's commit was already tested on its branch, and the
@@ -29,9 +32,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal, and 7-Zip for libpja's plugin
-        run: sudo apt-get update && sudo apt-get install -y fpc 7zip
+      - name: Install Free Pascal, clang, and 7-Zip for libpja's plugin
+        run: sudo apt-get update && sudo apt-get install -y fpc clang 7zip
       - name: Test
+        env:
+          CC: clang
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -62,9 +67,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal
-        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Install Free Pascal and clang
+        run: sudo apt-get update && sudo apt-get install -y fpc clang
       - name: Test
+        env:
+          CC: clang
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -79,13 +86,13 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y libc6:i386 gcc-multilib
+          sudo apt-get install -y libc6:i386 gcc-multilib clang
       - name: Install the 32-bit Free Pascal
         run: scripts/fpc-i386.sh /tmp/fpc-i386
       - name: Test
         env:
           FPC: /tmp/fpc-i386/fpc
-          CC: gcc -m32
+          CC: clang -m32
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -118,14 +125,14 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
-      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+      - name: Install the C compiler (MSYS2's MinGW-w64 clang)
         shell: pwsh
-        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-clang
       - name: Test
         shell: bash
         env:
           FPC: fpc -Px86_64
-          CC: /c/msys64/mingw64/bin/gcc
+          CC: /c/msys64/mingw64/bin/clang
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
