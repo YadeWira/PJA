@@ -21,6 +21,17 @@ output's name unless it verified: compressing decompresses the result and
 compares it with the input before writing, and extracting checks the size
 and the BLAKE3 hash stored in the `.pja`.
 
+PJA belongs to a family of recompressors that share that rule: the original
+comes back byte for byte, and nothing is written unless it verified.
+
+| Sibling | Formats | Successor of |
+|---|---|---|
+| [PMPA](https://github.com/YadeWira/PMPA) | MPEG audio (MP1, MP2, MP3) | packMP3, packMP2 |
+| [PRA](https://github.com/YadeWira/PRA) | raster images (PNM, BMP, HDR, TGA, PCX, ...) | packPNM |
+| [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | packPNG |
+| [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
+| **PJA** | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
+
 ## Against other compressors
 
 One file at a time: [packJPG](https://github.com/YadeWira/packJPG) 5.0g and
