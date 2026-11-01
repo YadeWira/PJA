@@ -1850,3 +1850,26 @@ included, on its six platforms, the same archive on every one.
 Frozen in 0.6.0, for zpaq-std 2.1.0: pja7, pjax7, pja7z and pjax7z,
 their streams and their ZPAQL never change under these names, as
 codecs 0 to 9's.
+
+## clang for the model's C (01/11/2026)
+
+Profiled (callgrind, one photo, one thread), 92% of compressing is
+version 7's coefficient loop, encoding and then decoding to verify; the
+rest is Huffman, BLAKE3 and the stream's framing. Misses past the cache
+are rare: the cost is the work per bit (5 to 7 counters, the mixer, the
+coder). Packing a counter's update into one 32-bit load and store changed
+nothing measurable. The compiler did: clang 19 against gcc 14, the same C
+and flags, 20 photos, one thread, best of 3, three rounds alternated:
+
+| | gcc | clang |
+|---|---|---|
+| compress | 8.86 to 8.97 s | **8.18 to 8.33 s** |
+| extract | 4.35 to 4.42 s | **4.01 to 4.07 s** |
+
+The same streams from both, on every path (AVX2, SSE4.1, plain), in 64
+and 32 bits. clang turns a zeroed array or a struct copy into memset or
+memcpy, which a DLL with no C runtime cannot resolve: it gets
+-fno-builtin (build_c.sh, pas/lib/build.sh), and pjav7c.c zeroes and
+copies through clang's inline builtins. Since 0.6.1 the releases build
+the C with clang on Linux (x86-64, x86, arm64) and Windows x64, as macOS
+did; Windows x86 and the two suites keep gcc, so both stay checked.
