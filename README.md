@@ -85,7 +85,13 @@ extract it.
 
 7-Zip + PJA is smaller than Aqueous on every set, and the smallest of all
 on every set but the lossless one; zpaq-std + PJA is smaller than Aqueous
-on all but the 12-bit one. On the arithmetic-coded and generated sets,
+on all but the 12-bit one. That set is 10 small files (8 made with
+cjpeg, 2 from the sample corpus), 83 KB in all: each zpaq-std block
+carries pjax7's ZPAQL decoder (35 KB), more than PJA saves on so few
+bytes, so zpaq-std rightly stores them its usual way (and two are
+arithmetic-coded 12-bit, which no plugin codec takes); 12-bit files of
+hundreds of KB pay the decoder back. On the arithmetic-coded and
+generated sets,
 whose files are variants of a few images, both keep each image about
 once: 16 to 18% of the input, where Aqueous writes 34 to 86%. With 2.1.0
 zpaq-std + PJA writes stream version 7 too, as the command does: it is now
