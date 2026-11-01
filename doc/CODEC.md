@@ -1919,10 +1919,13 @@ bytes or so): 32 MB of buffer at most. The library's thread count is now
 1 to 64 in every export (a count past 2^28 overflowed the filter's job
 arrays), and a pool that fails half-built stops the threads it started.
 
-The Windows libraries' heap (`pas/pjaheap.pas`, 0.6.2) answered no memory
-with nil where FreePascal's own raises runtime error 203 (EOutOfMemory,
-which every export catches): it does the same now, and a size that would
-overflow its header is refused.
+The Windows libraries' heap (`pas/pjaheap.pas`, 0.6.2) now refuses a size
+that would overflow its 16-byte header. With no memory it answers nil, as
+it did: raising runtime error 203 from inside the memory manager instead
+was tried and measured on Windows x86 (a test that takes the address space
+and leaves 2 to 24 MB): the exception needs memory of its own, fails again
+and ends the host, where nil gives PJA_E_MEMORY at every level, as
+FreePascal's own heap (0.6.1) does.
 
 The 32-bit x86 builds now pass `-march=i686` to the C compiler: MSYS2's
 mingw32 gcc assumes SSE2 by default, and pjav7c.c took its SSE2 path when

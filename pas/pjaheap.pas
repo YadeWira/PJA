@@ -54,13 +54,14 @@ begin
   Result := PHeader(p - HEADER)^.mark = OURS;
 end;
 
-{ no memory: what FreePascal's own heap does, runtime error 203 (SysUtils
-  makes it EOutOfMemory, which the libraries' exports catch), or nil when
-  the program asked for that }
+{ no memory: nil. The runtime's callers make that EOutOfMemory, which the
+  libraries' exports catch, with nothing more to allocate; a runtime error
+  raised from here instead needs memory for its exception, fails again and
+  ends the host (measured on Windows x86 with 2 MB left: nil gives
+  PJA_E_MEMORY, as FreePascal's own heap does) }
 function Fail: Pointer;
 begin
   Result := nil;
-  if not ReturnNilIfGrowHeapFails then RunError(203);
 end;
 
 function Take(size: PtrUInt; flags: LongWord): Pointer;
