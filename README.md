@@ -1,6 +1,6 @@
 # PJA
 
-PJA (packJPG Algorithm): lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal,
+**packJPG Algorithm**: lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal,
 with the coefficient model's core in C and some x86-64 assembly; no
 libraries. The successor of [packJPG](https://github.com/YadeWira/packJPG):
 a new codec and format of its own (it does not read `.pjg` files), smaller
