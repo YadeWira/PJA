@@ -37,7 +37,8 @@ take, or that does not come back the same, counts at its own size.
 | MPO (stereo pairs) | 6 | 41.0 MB | 86.54% | takes none | **73.38%** |
 | arithmetic-coded JPEG | 244 | 6.7 MB | 78.52% | takes none | **74.59%** |
 | generated JPEGs | 640 | 18.3 MB | 77.48% | 85.35% (takes 528) | **73.72%** |
-| 12-bit JPEG | 10 | 83 KB | takes none | takes none | **88.14%** |
+| 12-bit JPEG, small | 10 | 83 KB | takes none | takes none | **88.14%** |
+| 12-bit JPEG from camera RAWs | 12 | 27.7 MB | takes none | takes none | **84.80%** |
 | lossless JPEG | 36 | 390 KB | takes none | takes none | **96.04%** |
 
 And how fast, on the 151 photos (two Xeon E5-2697A v4, 64 threads, with
@@ -81,17 +82,22 @@ extract it.
 | MPO (6) | **73.39%**, 4.8 / 2.3 s | 73.76%, 16.1 / 4.6 s | 78.94%, 1.2 / 0.4 s | 99.57%, 4.0 / 1.0 s | 100.04%, 0.3 / 0.2 s |
 | arithmetic-coded (244) | **17.25%**, 1.8 / 0.8 s | 18.14%, 5.6 / 0.9 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.5 / 0.1 s | 75.43%, 0.2 / 0.1 s |
 | generated (640) | **16.40%**, 2.9 / 1.5 s | 16.96%, 6.6 / 1.7 s | 33.98%, 0.7 / 0.3 s | 62.85%, 1.3 / 0.4 s | 67.22%, 0.3 / 0.3 s |
-| 12-bit (10) | **58.28%**, 0.2 / 0.2 s | 96.05%, 0.2 / 0.0 s | 92.63%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
+| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 96.05%, 0.2 / 0.0 s | 92.63%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
+| 12-bit from RAWs (12) | **84.80%**, 3.7 / 2.1 s | 84.99%, 12.5 / 2.9 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.3 / 0.1 s | 100.07%, 0.3 / 0.2 s |
 | lossless JPEG (36) | 27.52%, 0.3 / 0.2 s | **25.98%**, 0.4 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 97.82%, 0.0 / 0.0 s |
 
 7-Zip + PJA is smaller than Aqueous on every set, and the smallest of all
 on every set but the lossless one; zpaq-std + PJA is smaller than Aqueous
-on all but the 12-bit one. That set is 10 small files (8 made with
+on all but the small 12-bit one. That set is 10 small files (8 made with
 cjpeg, 2 from the sample corpus), 83 KB in all: each zpaq-std block
 carries pjax7's ZPAQL decoder (35 KB), more than PJA saves on so few
 bytes, so zpaq-std rightly stores them its usual way (and two are
-arithmetic-coded 12-bit, which no plugin codec takes); 12-bit files of
-hundreds of KB pay the decoder back. On the arithmetic-coded and
+arithmetic-coded 12-bit, which no plugin codec takes). 12-bit files of
+real size pay the decoder back: on 12 made from camera RAWs (NEF and DNG
+from the sample corpus, developed to 16 bits, about 2 to 5 megapixels,
+cjpeg 3.0.4 `-precision 12 -quality 90`, baseline, optimized and
+progressive), 350 KB to 4 MB each, zpaq-std + PJA is 0.19 points behind
+7-Zip + PJA, and nothing else takes them. On the arithmetic-coded and
 generated sets,
 whose files are variants of a few images, both keep each image about
 once: 16 to 18% of the input, where Aqueous writes 34 to 86%. With 2.1.0
