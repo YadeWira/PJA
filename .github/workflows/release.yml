@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'the tag to build, as v0.6.1'
+        description: 'the tag to build, as v0.6.2'
         required: true
 
 permissions:
