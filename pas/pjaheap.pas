@@ -54,11 +54,21 @@ begin
   Result := PHeader(p - HEADER)^.mark = OURS;
 end;
 
+{ no memory: what FreePascal's own heap does, runtime error 203 (SysUtils
+  makes it EOutOfMemory, which the libraries' exports catch), or nil when
+  the program asked for that }
+function Fail: Pointer;
+begin
+  Result := nil;
+  if not ReturnNilIfGrowHeapFails then RunError(203);
+end;
+
 function Take(size: PtrUInt; flags: LongWord): Pointer;
 var h: PHeader;
 begin
+  if size > High(PtrUInt) - HEADER then Exit(Fail);
   h := HeapAlloc(heap, flags, size + HEADER);
-  if h = nil then Exit(nil);
+  if h = nil then Exit(Fail);
   h^.size := size;
   h^.mark := OURS;
   Result := Pointer(h) + HEADER;
@@ -103,8 +113,9 @@ begin
   end else if p = nil then
     p := HGetMem(size)
   else if Mine(p) then begin
+    if size > High(PtrUInt) - HEADER then Exit(Fail);
     h := HeapReAlloc(heap, 0, p - HEADER, size + HEADER);
-    if h = nil then Exit(nil);
+    if h = nil then Exit(Fail);
     h^.size := size;
     p := Pointer(h) + HEADER;
   end else begin

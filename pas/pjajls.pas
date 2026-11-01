@@ -1081,7 +1081,10 @@ begin
              SetLength(j.scans, Length(j.scans) + 1);
              j.scans[High(j.scans)] := s;
              p := copied;
-             if decode and (p >= Length(data)) then Break;
+             { a file that ends with a scan, no EOI: the headers alone
+               (ParseJlsHeaders, decompressing) could not tell its end, so
+               it is refused here too, not taken and then not given back }
+             if decode and (p >= Length(data)) then Exit(JFail(jeTruncated, p));
              if not decode then p := last;
              Continue;
            end;

@@ -1873,3 +1873,59 @@ memcpy, which a DLL with no C runtime cannot resolve: it gets
 copies through clang's inline builtins. Since 0.6.1 the releases build
 the C with clang on Linux (x86-64, x86, arm64) and Windows x64, as macOS
 did; Windows x86 and the two suites keep gcc, so both stay checked.
+
+## Fuzzing the command and the 7-Zip plugin (01/11/2026)
+
+Random mutations anywhere in a file (bytes and bits changed, cuts, chunks
+copied or taken out), 30 minutes on 24 workers, the C built with UBSan's
+traps: 212,168 damaged `.pja` through `pja x` and 25,854 damaged `.7z`
+(PJA and PJA1, `7z t` with the plugin) gave nothing: no crash, no trap, no
+hang, every damage refused. 21,143 damaged JPEGs and JPEG-LS through
+`pja a` gave two bugs, both in what PJA does with a file it refuses at
+first, and neither losing data (every stream is verified before it is
+written):
+
+- **The repair could take minutes.** RepairJpeg's filler for a scan cut
+  short decodes the whole file at each try. Some damage made the parser
+  answer "data after the scan" at one length and "scan cut short" at the
+  next, and the filler went back and forth between them until its 4096
+  tries were spent (104 s for a 91 KB file); a filler cut to the length it
+  was last cut to, with nothing else changed, now gives the repair up.
+  And a cut progressive scan with a restart every few blocks cost one
+  decode per padding bit and per RST: once two intervals in a row are the
+  same length, the filler after them gets them all at once. Their lengths
+  can vary by a byte (not every interval is the same bits), so a filler
+  about to be given up after a copy goes back to how it was before it and
+  on one interval at a time: what is repaired is what 0.6.2 repaired
+  (1,207 files of every set, the same streams), in seconds at worst
+  instead of minutes (`prog_restarts_cut.jpg` has the case where the
+  copy does not fit).
+- **A JPEG-LS without its EOI was taken and then not given back.**
+  DecomposeJls stopped at the end of the file after the last scan; the
+  headers alone, decompressing, looked for a marker there. The
+  verification caught it (`NoRoundTrip`, nothing written); it is now
+  refused when parsed (`Truncated`) and goes as bytes. The plugin's pjals
+  and pjalsx share the parser: zpaq-std's detect refuses it too.
+
+An audit of the C that reads damaged or hostile input (`pjafilter.c`,
+`pja7z.c`, `pjasysc.c`; 600,000 damaged filter streams through the
+decoder with ASan and UBSan) found no memory error. It found the filter's
+encoder going quadratic: a JPEG cut short in a solid block, followed by
+bytes with no FF (text), was read again from its start at every read
+7-Zip made (32 MB: 22.8 s), and held up to 512 MB. `jpeg_extent` now goes
+on from where it got to (32 MB: 0.17 s), and 16 MB without an FF inside a
+scan ends the candidate (a JPEG's entropy-coded data has one every 256
+bytes or so): 32 MB of buffer at most. The library's thread count is now
+1 to 64 in every export (a count past 2^28 overflowed the filter's job
+arrays), and a pool that fails half-built stops the threads it started.
+
+The Windows libraries' heap (`pas/pjaheap.pas`, 0.6.2) answered no memory
+with nil where FreePascal's own raises runtime error 203 (EOutOfMemory,
+which every export catches): it does the same now, and a size that would
+overflow its header is refused.
+
+The 32-bit x86 builds now pass `-march=i686` to the C compiler: MSYS2's
+mingw32 gcc assumes SSE2 by default, and pjav7c.c took its SSE2 path when
+it did, so PJA's x86 builds needed a Pentium 4 (pointed out by PMPA). The
+plain path writes the same streams (the suite checks it); the SSE4.1 and
+AVX2 copies still go by cpuid.

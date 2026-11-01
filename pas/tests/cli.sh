@@ -53,6 +53,13 @@ check "an extension the format does not keep: by the content" bash -c "
 check "a JPEG PJA cannot take (cut short): as bytes, says why, back byte for byte" bash -c "
   head -c 9000 '$W/in/color_plasma.jpg' > '$W/cut.jpg' && '$PJA' a -f '$W/cut.jpg' -o '$W/cut.pja' | grep -q 'as bytes: Truncated' &&
   '$PJA' x -q -f '$W/cut.pja' -o '$W/cutx/' && cmp -s '$W/cut.jpg' '$W/cutx/cut.jpg'"
+check "a JPEG-LS that ends with its scan, no EOI: as bytes, says why, back byte for byte" bash -c "
+  head -c \$(( \$(stat -c %s '$W/in/gray2.jls') - 2 )) '$W/in/gray2.jls' > '$W/noeoi.jls' &&
+  '$PJA' a -f '$W/noeoi.jls' -o '$W/noeoi.pja' | grep -q 'as bytes: Truncated' &&
+  '$PJA' x -q -f '$W/noeoi.pja' -o '$W/noeoix/' && cmp -s '$W/noeoi.jls' '$W/noeoix/noeoi.jls'"
+check "a cut progressive scan with a restart every 3 blocks: repaired, back byte for byte" bash -c "
+  '$PJA' a -f '$W/in/prog_restarts_cut.jpg' -o '$W/prc.pja' | grep -q 'repaired' &&
+  '$PJA' x -q -f '$W/prc.pja' -o '$W/prcx/' && cmp -s '$W/in/prog_restarts_cut.jpg' '$W/prcx/prc.jpg'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"

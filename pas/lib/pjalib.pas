@@ -208,12 +208,22 @@ begin
   ReleaseThreadModels;
 end;
 
+{ a caller's thread count: 1 to 64, as the 7-Zip plugin takes them; the
+  filter keeps 8 jobs a thread, and a count past that would overflow }
+function Threads1to64(threads: LongInt): LongInt;
+begin
+  if threads < 1 then Result := 1
+  else if threads > 64 then Result := 64
+  else Result := threads;
+end;
+
 function OpenPool(threads, encode: LongInt): Pointer; cdecl;
 var p: TPool; k: Integer;
 begin
   Result := nil;
+  p := nil;
   try
-    if threads < 1 then threads := 1;
+    threads := Threads1to64(threads);
     p := TPool.Create;
     InitCriticalSection(p.lock);
     p.work := RTLEventCreate;
@@ -228,6 +238,17 @@ begin
     end;
     Result := p;
   except
+    { the workers started before the failure: stopped and freed, or they
+      would wait on a pool nobody holds }
+    if p <> nil then begin
+      p.stop := True;
+      for k := 0 to High(p.workers) do
+        if p.workers[k] <> nil then begin
+          RTLEventSetEvent(p.work);
+          if not p.workers[k].Suspended then p.workers[k].WaitFor;
+          p.workers[k].Free;
+        end;
+    end;
     Result := nil;
   end;
 end;
@@ -279,7 +300,7 @@ var pja: TBytes; r: TPackResult;
 begin
   output := nil; outSize := 0;
   if (input = nil) and (size > 0) then Exit(PJA_E_ARG);
-  if threads < 1 then threads := 1;
+  threads := Threads1to64(threads);
   try
     r := Pack(InBytes(input, size), pja, threads, False, True, '', True);
     if not r.Ok or r.codec.asBytes then Exit(PJA_E_NOT_TAKEN);
@@ -295,7 +316,7 @@ var original: TBytes; expected: THash16; r: TPackResult; cap: QWord;
 begin
   output := nil; outSize := 0;
   if (input = nil) and (size > 0) then Exit(PJA_E_ARG);
-  if threads < 1 then threads := 1;
+  threads := Threads1to64(threads);
   cap := MAX_ORIGINAL;
   if (maxSize > 0) and (maxSize < cap) then cap := maxSize;
   try
@@ -317,7 +338,7 @@ function pja_filter_encode(read: TReadFn; readCtx: Pointer; write: TWriteFn; wri
                            threads: LongInt): LongInt; cdecl;
 begin
   try
-    Result := pjafilter_encode(read, readCtx, write, writeCtx, threads);
+    Result := pjafilter_encode(read, readCtx, write, writeCtx, Threads1to64(threads));
   except
     Result := PJA_E_MEMORY;
   end;
@@ -327,7 +348,7 @@ function pja_filter_decode(read: TReadFn; readCtx: Pointer; write: TWriteFn; wri
                            threads: LongInt): LongInt; cdecl;
 begin
   try
-    Result := pjafilter_decode(read, readCtx, write, writeCtx, threads);
+    Result := pjafilter_decode(read, readCtx, write, writeCtx, Threads1to64(threads));
   except
     Result := PJA_E_MEMORY;
   end;
@@ -337,7 +358,7 @@ function pja_filter2_encode(read: TReadFn; readCtx: Pointer; writeA: TWriteFn; a
                             writeB: TWriteFn; bCtx: Pointer; threads: LongInt): LongInt; cdecl;
 begin
   try
-    Result := pjafilter2_encode(read, readCtx, writeA, aCtx, writeB, bCtx, threads);
+    Result := pjafilter2_encode(read, readCtx, writeA, aCtx, writeB, bCtx, Threads1to64(threads));
   except
     Result := PJA_E_MEMORY;
   end;
@@ -347,7 +368,7 @@ function pja_filter2_decode(readA: TReadFn; aCtx: Pointer; readB: TReadFn; bCtx:
                             write: TWriteFn; writeCtx: Pointer; threads: LongInt): LongInt; cdecl;
 begin
   try
-    Result := pjafilter2_decode(readA, aCtx, readB, bCtx, write, writeCtx, threads);
+    Result := pjafilter2_decode(readA, aCtx, readB, bCtx, write, writeCtx, Threads1to64(threads));
   except
     Result := PJA_E_MEMORY;
   end;

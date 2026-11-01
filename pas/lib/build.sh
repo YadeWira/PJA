@@ -37,6 +37,10 @@ if $CC --version 2>/dev/null | grep -qi clang; then
 else
   FLAGS="$FLAGS -fno-tree-loop-distribute-patterns"
 fi
+# 32-bit x86: any 686, as build_c.sh
+case "$CC $($CC -dumpmachine 2>/dev/null)" in
+  *-m32*|*i686*|*i386*|*i586*) FLAGS="$FLAGS -march=i686" ;;
+esac
 # shellcheck disable=SC2086
 for f in pjafilter pja7z; do
   $CC $FLAGS $PIC -c "$HERE/$f.c" -o "$OUT/c/$f.o"

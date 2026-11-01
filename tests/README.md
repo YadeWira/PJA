@@ -31,6 +31,7 @@ flip every bit of them.
 | `byte_before_eoi.jpg` | `baseline_color.jpg` with a 00 byte between its scan and its EOI, as Xara writes its JPEGs (libjpeg says nothing): PJA takes it out and puts it back (PATCH) |
 | `scan_ends_early.jpg` | `color_plasma.jpg` with its scan's last 40 bytes taken out and its EOI kept, as some encoders end a scan before its last blocks (libjpeg: "premature end of data segment"): PJA reads it on with zero bits, as libjpeg does, and keeps what it added to take out again (PATCH) |
 | `cut_short.jpg` | `restart_huffman.jpg` cut at 93%, without its EOI, as a download cut short leaves a file: the same, with the RSTs its DRI asks for in what PJA adds |
+| `prog_restarts_cut.jpg` | `convert -seed 25 -size 120x80 plasma:fractal` → `cjpeg -progressive -restart 3B -quality 75`, cut at 70% without its EOI: a restart every 3 blocks in the scan PJA fills, whose intervals are not all the same length (a byte or so), so the filler cannot simply repeat one: it has to come back repaired, as 0.6.2 repaired it |
 | `prog_correction_limit.jpg` | `convert -seed 71 -size 192x128 plasma:fractal -blur 0x4` → `cjpeg -progressive -quality 90`, its AC refinement scans re-encoded by PJA's own encoder ending each EOB run once it holds more than 2 correction bits (libjpeg: 937; Photoshop: about 256): it needs stream version 6, and `djpeg` decodes it to the same pixels |
 
 ## `jls/`

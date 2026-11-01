@@ -27,8 +27,14 @@ if $CC --version 2>/dev/null | grep -qi clang; then
 else
   FLAGS="$FLAGS -fno-tree-loop-distribute-patterns"
 fi
-case "$CC $*" in
-  *-m32*|*i686*|*i386*) FLAGS="$FLAGS -fno-pic" ;;
+# 32-bit x86, by the flags or by what the compiler targets (MSYS2's
+# mingw32 gcc is plain "gcc"): -march=i686, since those compilers assume
+# SSE2 (Pentium 4) by default and pjav7c.c takes its SSE2 path when they
+# do; without it the plain path, the same bits, runs on any 686 (Windows
+# XP's Pentium III and Athlon XP). The SSE4.1 and AVX2 copies still go by
+# cpuid.
+case "$CC $* $($CC -dumpmachine 2>/dev/null)" in
+  *-m32*|*i686*|*i386*|*i586*) FLAGS="$FLAGS -fno-pic -march=i686" ;;
 esac
 mkdir -p "$OUT"
 # shellcheck disable=SC2086

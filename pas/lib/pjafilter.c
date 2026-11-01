@@ -98,7 +98,11 @@ enum {
   IOBUF = 1 << 16,              /* the decoder's read buffer */
   TAG_RAW = 0x00, TAG_FILE = 0x01, TAG_TABLES = 0x02, TAG_FILE_T = 0x03, TAG_END = 0xFF,
   MAX_TABLES = 1 << 16,         /* the longest JPEG of tables taken */
-  TABLES_AHEAD = 16 << 20       /* how far ahead the first tables are looked for */
+  TABLES_AHEAD = 16 << 20,      /* how far ahead the first tables are looked for */
+  /* the longest run without FF taken as entropy-coded data: a JPEG's has
+     one every 256 bytes or so, and 16 MB with none is text or other
+     bytes after a JPEG cut short, not worth holding the buffer for */
+  FF_FREE = 16 << 20
 };
 static const uint8_t MAGIC[5] = {'P', 'J', 'A', 'F', 1};
 
@@ -115,11 +119,31 @@ enum { EXT_NOT = 0, EXT_MORE = -1 };
 
 /* p[0..n): a file that starts with FF D8. Its length up to and with its
    EOI, EXT_MORE if n bytes are not enough to tell, EXT_NOT if its markers
-   do not add up. */
-static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n) {
-  size_t i = 2;
-  int ls = 0, frames = 0, scans = 0;
+   do not add up. x keeps where it got to between calls on the same file
+   with more bytes each time (start it as EXT_START): a cut JPEG followed
+   by a long run without FF would otherwise be read again from its start
+   at every read the encoder makes, which goes quadratic. */
+typedef struct { size_t i, run; int ls, frames, scans, scan; } ext_t;
+static const ext_t EXT_START = {2, 0, 0, 0, 0, 0};
+static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n, ext_t *x) {
+  size_t i = x->i;
   for (;;) {
+    if (x->scan) {
+      /* the entropy-coded bytes, up to the next marker */
+      for (;;) {
+        while (i < n && p[i] != 0xFF) i++;
+        if (i - x->run > FF_FREE) return EXT_NOT;
+        if (i + 2 > n) { x->i = i; return i > MAX_FILE ? EXT_NOT : EXT_MORE; }
+        x->run = i;
+        uint8_t b = p[i + 1];
+        if (x->ls ? b < 0x80 : (b == 0x00 || (b >= 0xD0 && b <= 0xD7))) { i += 2; continue; }
+        if (b == 0xFF && !x->ls) { i++; continue; }     /* a fill byte before a marker */
+        break;
+      }
+      x->scan = 0;
+    }
+    /* a marker: from its start again if the bytes run out inside it */
+    x->i = i;
     if (i + 2 > n) return EXT_MORE;
     if (p[i] != 0xFF) return EXT_NOT;
     while (p[i + 1] == 0xFF) {                    /* fill bytes */
@@ -127,30 +151,23 @@ static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n) {
     }
     uint8_t m = p[i + 1];
     i += 2;
-    if (m == 0xD9) return (frames && scans) ? (ptrdiff_t)i : EXT_NOT;
+    if (m == 0xD9) return (x->frames && x->scans) ? (ptrdiff_t)i : EXT_NOT;
     if (m == 0x00 || m == 0xD8) return EXT_NOT;
     if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
     if (i + 2 > n) return EXT_MORE;
     size_t len = ((size_t)p[i] << 8) | p[i + 1];
     if (len < 2) return EXT_NOT;
     if ((m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) || m == 0xF7) {
-      frames++;
-      if (m == 0xF7) ls = 1;
+      x->frames++;
+      if (m == 0xF7) x->ls = 1;
     }
     i += len;
     if (i > MAX_FILE) return EXT_NOT;
     if (m != 0xDA) continue;
-    if (!frames) return EXT_NOT;
-    scans++;
-    /* the entropy-coded bytes, up to the next marker */
-    for (;;) {
-      while (i < n && p[i] != 0xFF) i++;
-      if (i + 2 > n) return i > MAX_FILE ? EXT_NOT : EXT_MORE;
-      uint8_t b = p[i + 1];
-      if (ls ? b < 0x80 : (b == 0x00 || (b >= 0xD0 && b <= 0xD7))) { i += 2; continue; }
-      if (b == 0xFF && !ls) { i++; continue; }     /* a fill byte before a marker */
-      break;
-    }
+    if (!x->frames) return EXT_NOT;
+    x->scans++;
+    x->scan = 1;
+    x->run = i;
   }
 }
 
@@ -623,8 +640,9 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
       pos = c + (size_t)len;
       continue;
     }
+    ext_t x = EXT_START;
     for (;;) {
-      len = jpeg_extent(s.buf + c, s.have - c);
+      len = jpeg_extent(s.buf + c, s.have - c, &x);
       if (len != EXT_MORE || s.eof || s.err || s.have - c > MAX_FILE) break;
       fill(&s, &c);
     }

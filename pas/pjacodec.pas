@@ -1009,8 +1009,8 @@ type
   time, in the order the parser meets them; False if one is not of these,
   or if the file still does not parse after MAX_REPAIRS. }
 function RepairJpeg(const data: TBytes; out fixed: TBytes; out edits: TEdits): Boolean;
-var j: TJpeg; r: TJpegResult; t, t2: Integer; p, q, k, start, count, after: SizeInt; b: Byte; e: TEdit;
-    tmp, rebuilt, filler: TBytes;
+var j: TJpeg; r: TJpegResult; t, t2: Integer; p, q, k, start, count, after, trimmed, rst1, rst2, at: SizeInt;
+    b: Byte; e: TEdit; tmp, rebuilt, filler, interval, before: TBytes; copying: Boolean;
 
   { how many RSTs the scan around d[q] has before q: from its SOS (inside
     entropy-coded data FF is followed by 00 or an RST only); -1 if none }
@@ -1033,6 +1033,18 @@ var j: TJpeg; r: TJpegResult; t, t2: Integer; p, q, k, start, count, after: Size
     if p > 0 then Move(fixed[0], Result[0], p);
     if Length(f) > 0 then Move(f[0], Result[p], Length(f));
     if Length(fixed) > p then Move(fixed[p], Result[p + Length(f)], Length(fixed) - p);
+  end;
+
+  { the filler about to be given up after intervals were copied into it:
+    their lengths can vary (a byte or so: not every interval is the same
+    bits), so the filler as it was before the first copy, and one decode an
+    interval from there, as without copying; False if there was no copy }
+  function Uncopy: Boolean;
+  begin
+    Result := copying and (before <> nil);
+    if not Result then Exit;
+    filler := before; before := nil; copying := False;
+    trimmed := -1; rst1 := -1; rst2 := -1;
   end;
 
   procedure Add(pos, del: SizeInt; const ins: TBytes);
@@ -1101,13 +1113,30 @@ begin
             the file's }
           if (p < Length(fixed)) and (fixed[p] <> $FF) then Exit;
           filler := nil; SetLength(filler, 16);
+          { the length the filler was last cut to: cut to it again with
+            nothing else changed, the parser goes back and forth between a
+            scan cut short and data after it (a damaged file), and each
+            try decodes the whole file }
+          trimmed := -1;
+          { where the last two RSTs went into the filler: three a period
+            apart, the intervals between them are the same bytes (zeros and
+            the padding found, each interval starting afresh), and the
+            filler after the third gets them all at once instead of one
+            decode for each padding bit and each RST }
+          rst1 := -1; rst2 := -1;
+          copying := True; before := nil;
           for t2 := 1 to MAX_FILL_TRIES do begin
             tmp := WithFiller(filler);
             r := Decompose(tmp, j);
             if r.Ok then Break;
             q := r.pos - p;
             if (r.err = jeDataAfterScan) and (q >= 0) and (q <= Length(filler)) then begin
+              if q = trimmed then begin
+                if Uncopy then Continue;
+                Exit;
+              end;
               SetLength(filler, q);
+              trimmed := q;
               Continue;
             end;
             { the end of a restart interval in the filler: its last byte's
@@ -1119,15 +1148,36 @@ begin
               b := filler[q - 1];
               filler[q - 1] := b or ((b and $7F) shl 1 or 1) and $7F;
               if filler[q - 1] = b then filler[q - 1] := b or $7F;
+              trimmed := -1;
               Continue;
             end;
             if (r.err = jeBadRst) and (q >= 0) and (q < Length(filler)) then begin
               count := RstsBefore(tmp, r.pos);
-              if count < 0 then Exit;
+              if count < 0 then begin
+                if Uncopy then Continue;
+                Exit;
+              end;
               Insert(TBytes.Create($FF, $D0 + (count and 7)), filler, q);
+              trimmed := -1;
+              if copying and (rst1 >= 0) and (q - rst2 = rst2 - rst1) and (q - rst2 > 2) then begin
+                if before = nil then before := Copy(filler);
+                k := q - rst2;
+                interval := Copy(filler, rst2 + 2, k - 2);
+                at := q + 2;
+                while at + k <= Length(filler) do begin
+                  Inc(count);
+                  Move(interval[0], filler[at], k - 2);
+                  filler[at + k - 2] := $FF; filler[at + k - 1] := $D0 + (count and 7);
+                  Inc(at, k);
+                end;
+              end;
+              rst1 := rst2; rst2 := q;
               Continue;
             end;
-            if (r.err <> jeTruncated) or (Length(filler) > 4 * Length(fixed) + 65536) then Exit;
+            if (r.err <> jeTruncated) or (Length(filler) > 4 * Length(fixed) + 65536) then begin
+              if Uncopy then Continue;
+              Exit;
+            end;
             k := Length(filler);
             SetLength(filler, 2 * k);
             FillChar(filler[k], k, 0);
