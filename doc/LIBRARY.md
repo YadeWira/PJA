@@ -163,7 +163,10 @@ copy deduplicated), and damaged and cut filter streams.
 ## The 7-Zip plugin
 
 Put the library in the `Codecs` folder next to 7-Zip: `7z.exe` on Windows
-(7-Zip or 7-Zip-zstd), `7z` and `7z.so` on Linux. `7z i` lists two methods:
+(7-Zip or 7-Zip-zstd), `7z` and `7z.so` on Linux. The library's build must
+be 7-Zip's: the x64 `pja.dll` for 64-bit 7-Zip, the x86 one for 32-bit
+7-Zip (on 64-bit Windows, the other one gives "Codec Load Error: ... is not
+a valid Win32 application"). `7z i` lists two methods:
 
 ```
  1 2ED     37F02 PJA
@@ -215,6 +218,15 @@ data: 20.9 / 7.8 s on the photos, for 72.60%.
 Tested on Windows 10 with 7-Zip 26.05 and 7-Zip-zstd 26.02, 64 and 32
 bits: the plugin listed, archives written, tested and extracted byte for
 byte, and an archive written on Linux extracted.
+
+On Windows the library takes its memory from the process heap
+(`pas/pjaheap.pas`), not FreePascal's own. FreePascal 3.2.2's heap, in a
+DLL, deletes its lock when the thread that loaded the DLL ends; 7-Zip's
+file manager loads its codecs from such a short-lived thread, and up to
+0.6.1 testing or extracting from inside an archive in 7zFM crashed in
+PJA's threads (7z.exe and 7zG, which load codecs from their main thread,
+did not). Checked on Windows 10 with 7-Zip 25.01, 64 and 32 bits: 7zFM
+tests PJA and PJA1 archives without errors.
 
 The method IDs, `03 7F 02` and `03 7F 01`, are in the slot 7-Zip's
 `DOC/Methods.txt` keeps for an experimental method; PJA will move to IDs

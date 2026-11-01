@@ -61,7 +61,7 @@ library pja_zpaqstd;
 {$mode objfpc}{$H+}
 
 uses
-  {$ifdef unix}cthreads,{$endif}
+  {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
   SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7;
 
 {$I lzzpaql.inc}

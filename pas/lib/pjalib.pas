@@ -17,7 +17,7 @@ library pja;
 {$mode objfpc}{$H+}
 
 uses
-  {$ifdef unix}cthreads,{$endif}
+  {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
   Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjamodel;
 
 {$L pjafilter.o}

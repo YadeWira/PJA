@@ -106,7 +106,8 @@ either.
 `libpja` (in each release) is a C library and, in the same file, a codec
 for [7-Zip](https://7-zip.org) and
 [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd): put `pja.dll` (or
-`pja.so`) in the `Codecs` folder next to 7-Zip, and
+`pja.so`) in the `Codecs` folder next to 7-Zip (the x64 build for 64-bit
+7-Zip, the x86 one for 32-bit), and
 
 ```sh
 7z a -m0=PJA -m1=LZMA2 photos.7z photos/      # 7-Zip-zstd: -m1=zstd
