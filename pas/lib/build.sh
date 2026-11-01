@@ -31,7 +31,10 @@ esac
 # shellcheck disable=SC2086
 CC="$CC" "$PAS/build_c.sh" "$OUT/c" $PIC
 FLAGS="-O3 -fwrapv -ffp-contract=off -fno-stack-protector"
-if ! $CC --version 2>/dev/null | grep -qi clang; then
+# no memset or memcpy calls, as build_c.sh: the DLL has no C runtime
+if $CC --version 2>/dev/null | grep -qi clang; then
+  FLAGS="$FLAGS -fno-builtin"
+else
   FLAGS="$FLAGS -fno-tree-loop-distribute-patterns"
 fi
 # shellcheck disable=SC2086
