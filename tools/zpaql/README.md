@@ -52,7 +52,7 @@ segment came out). M[i] is then M[mbase() + i], and `reset()` moves
 a block follow one another in M (a ring) and each can refer to the ones
 before: `pas/plugin/zpaql/lz.zl`, the z codecs' LZ77 expander.
 
-`compile_source(..., opt=True)`, for programs not frozen yet: each
+`compile_source(..., opt=True)`, the z codecs' (frozen in 0.4.0): each
 constant as the shortest sequence of instructions found (`a= 255 a+= 5`
 for 260, `a= 255 a+=a a++` for 511), checked by running it, and in the
 start-up code a constant near the one before built from it, kept in A or
@@ -62,7 +62,7 @@ the variables the code named most in R8 .. R255, then in H[0 .. 255]
 the smallest of the three kept. Without it the output is what it always
 was.
 
-`opt=2`, for the generation after the z codecs (the version 7 codecs):
+`opt=2`, the version 7 codecs' (frozen in 0.6.0):
 the same, with the functions' variables overlaid. A function's frame (its
 variables, return places and temporaries) starts past the frames of all
 the functions that may call it, so functions never on one chain of calls

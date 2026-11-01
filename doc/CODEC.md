@@ -1828,3 +1828,25 @@ with $3 the plugin's query gives (its count, ZpaqlWords7, follows
 model7.zl's allocs); with a window of 4 KB too; damaged segments, 150 a
 codec: no hang. x86 and x64 write the same bytes. The suite decodes pja7
 and pjax7 segments, and their z, in zpaqlc's interpreter.
+
+zpaq-std measured the prototype (commit 9c3e61a) through its whole
+path (`-sa -t8`, pja7 and pjax7 in place of pja and pjax, their z where
+the LZ77 wins), against its 2.0.3:
+
+| set | 2.0.3 | with version 7 | |
+|---|---|---|---|
+| photos | 59,009,713 | 57,151,702 | -3.1% |
+| corpus | 23,290,117 | 22,739,830 | -2.4% |
+| MPO | 30,570,193 | 30,254,230 | -1.0% |
+| arithmetic-coded | 1,251,109 | 1,212,377 | -3.1% |
+| generated | 3,183,477 | 3,099,865 | -2.6% |
+
+Writing 1.3 to 1.6 times as fast, extracting natively 1.2 to 1.6 times,
+zpaq 7.15 with the ZPAQL 1.5 to 1.6 times (photos 191 -> 121 s). Every
+file back, natively and with zpaq 7.15; with the smallest valid window
+forced in each group as well (2^16 to 2^24). Its CI built the plugin, C
+included, on its six platforms, the same archive on every one.
+
+Frozen in 0.6.0, for zpaq-std 2.1.0: pja7, pjax7, pja7z and pjax7z,
+their streams and their ZPAQL never change under these names, as
+codecs 0 to 9's.
