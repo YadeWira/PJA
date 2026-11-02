@@ -131,6 +131,12 @@ for [7-Zip](https://7-zip.org) and
 7z a -m0=PJA -m1=LZMA2 photos.7z photos/      # 7-Zip-zstd: -m1=zstd
 ```
 
+In 7-Zip's window (Add to archive, 7z format), the same goes in
+**Parameters**: `0=PJA 1=LZMA2` (7-Zip-zstd: `0=PJA 1=zstd`). `0=PJA`
+alone also works, but then nothing follows PJA in the chain and every
+byte that is not a JPEG (other files, EXIF) goes into the archive as it is.
+Extracting needs nothing but the plugin.
+
 PJA goes first in the chain as a filter: it recompresses the JPEG and
 JPEG-LS files it finds in the solid block and passes every other byte on
 to LZMA2 or zstd, which match what PJA leaves (EXIF, other files); its
