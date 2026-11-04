@@ -47,8 +47,9 @@
     thread a call, as before. The streams are the same with any number.
   - The detections of pja, pjax and pjall verify the same JPEG the same
     way: the first one keeps what it found (a few entries, by the bytes'
-    size and hash), the others and pja's compress() use it, which then
-    does not rebuild the JPEG a third time (pjacodec.CompressVerified).
+    size and BLAKE3), the others and pja's compress() use it, which then
+    does not rebuild the JPEG a third time (pjacodec.CompressVerified);
+    compress() looks for the file before zpaq-std's list of fragments.
 
   Levels: 2 = the full model, the stream frozen as pja5-full (stream version
   5, model byte 0). The fast model (level 1) joins once its stream is frozen.
@@ -62,7 +63,7 @@ library pja_zpaqstd;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
-  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7;
+  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3;
 
 {$I lzzpaql.inc}
 
@@ -75,7 +76,6 @@ const
   { 1: the ZPAQL decodes several segments in one block (it starts afresh
     after each), so zpaq-std may put consecutive files of the codec there }
   ZS_QUERY_SEGMENTS = 3;
-  ZPAQL_MAX_SCANS = 256;
   ZPAQL_LS_MAX_SCANS = 64;    { jls.zl's JMAXSCANS }
   { the JPEGs after the EOI pjax's detect asks for: they gain about a fifth
     of their size, which then pays pjax's ZPAQL (57,709 bytes) on its own }
@@ -144,7 +144,7 @@ type
     pja, pjax and pjall take it }
   TVerdict = record
     size: SizeUInt;
-    hash: QWord;
+    hash: THash16;
     used, rt, pja, pjax, pjall, pja7, pjax7: Boolean;
   end;
 
@@ -156,35 +156,27 @@ var
   VerdictNext: Integer = 0;
   VerdictLock: TRTLCriticalSection;
 
-{ the bytes' hash: 8 at a time, then the rest; only to find a verdict
-  again (a collision costs one block that zpaq-std's own check refuses) }
-function BytesHash(src: PByte; n: SizeUInt): QWord;
-var i: SizeUInt; w: QWord;
+{ the bytes' hash, to find a verdict again: BLAKE3, since a verdict found
+  is not checked again (up to 0.6.3 a 64-bit FNV-like mix, which a file
+  could be made to match: a JPEG pja refuses then got another's verdict,
+  and a block its ZPAQL cannot decode) }
+function BytesHash(src: PByte; n: SizeUInt): THash16;
+var b: TBlake3;
 begin
-  Result := QWord($CBF29CE484222325) xor n;
-  i := 0;
-  {$push}{$Q-}{$R-}
-  while i + 8 <= n do begin
-    Move(src[i], w, 8);
-    Result := (Result xor w) * QWord($100000001B3);
-    Result := Result xor (Result shr 29);
-    Inc(i, 8);
-  end;
-  while i < n do begin
-    Result := (Result xor src[i]) * QWord($100000001B3);
-    Inc(i);
-  end;
-  {$pop}
+  b.Init;
+  b.Update(src^, n);
+  Result := b.Final;
 end;
 
-function FindVerdict(size: SizeUInt; hash: QWord; out v: TVerdict): Boolean;
+function FindVerdict(size: SizeUInt; const hash: THash16; out v: TVerdict): Boolean;
 var i: Integer;
 begin
   Result := False;
   EnterCriticalSection(VerdictLock);
   try
     for i := 0 to VERDICT_SLOTS - 1 do
-      if KeptVerdicts[i].used and (KeptVerdicts[i].size = size) and (KeptVerdicts[i].hash = hash) then begin
+      if KeptVerdicts[i].used and (KeptVerdicts[i].size = size) and
+         CompareMem(@KeptVerdicts[i].hash[0], @hash[0], SizeOf(THash16)) then begin
         v := KeptVerdicts[i];
         Exit(True);
       end;
@@ -211,6 +203,23 @@ begin
   if n > 0 then Move(src^, Result[0], n);
 end;
 
+{ compress()'s block: the verdict of the file it holds, with or without
+  zpaq-std's list of fragments after it (their sizes, 4 bytes each, then 4
+  bytes and their count, little endian), which a file alone in its block
+  and a group's last have; size: the file's }
+function BlockVerdict(src: PByte; n: SizeUInt; out v: TVerdict; out size: SizeUInt): Boolean;
+var f: SizeUInt;
+begin
+  size := n;
+  Result := FindVerdict(n, BytesHash(src, n), v);
+  if Result or (n < 12) then Exit;
+  f := SizeUInt(src[n - 4]) or (SizeUInt(src[n - 3]) shl 8) or (SizeUInt(src[n - 2]) shl 16) or
+       (SizeUInt(src[n - 1]) shl 24);
+  if (f < 1) or (f > (n - 8) div 4) then Exit;
+  size := n - 8 - 4 * f;
+  Result := FindVerdict(size, BytesHash(src, size), v);
+end;
+
 { The stream is the JPEG modelled, so it is usually smaller; a file the
   codec cannot shrink comes out a little larger, and zpaq-std then stores it
   as -m says. }
@@ -224,7 +233,7 @@ end;
   else, so that each block's stream is the one its ZPAQL decodes }
 function CompressAs(ls: Boolean; src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt;
   level: LongInt; threads: Integer; v7: Boolean = False): Int64;
-var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean; v: TVerdict;
+var stream, d: TBytes; r: TCodecResult; j: TJpeg; jl: TJls; symbols: Boolean; v: TVerdict; size: SizeUInt;
 begin
   if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
   try
@@ -232,8 +241,11 @@ begin
     if IsJls(d) <> ls then Exit(ZS_ERR_DATA);
     { no verification here: zpaq-std decodes every block and compares }
     { version 5 only: the stream its ZPAQL reads; a JPEG pja's detection
-      verified already is only taken apart }
-    if not ls and FindVerdict(n, BytesHash(src, n), v) and v.rt and (v.pja or v.pja7) and Decompose(d, j).Ok then
+      verified already is only taken apart. With the fragments after it,
+      only if its EOI comes before them: they then go to raw as they are,
+      and the block rebuilds as the file did }
+    if not ls and BlockVerdict(src, n, v, size) and v.rt and (v.pja or v.pja7) and Decompose(d, j).Ok and
+       (SizeUInt(j.eoi) <= size) then
       r := CompressVerified(d, j, stream, threads, v7)
     else
       r := Compress(d, stream, False, threads, False, False, v7);
@@ -523,7 +535,7 @@ begin
 end;
 
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
-var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt; h: QWord; v: TVerdict;
+var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt; h: THash16; v: TVerdict;
 begin
   Result := 0;
   if (codecName = nil) or (n < 4) or (n > MAX_BLOCK) then Exit;
@@ -565,11 +577,11 @@ begin
              (Length(j.scans) <= ZPAQL_MAX_SCANS) then begin
             w := ZpaqlPjaxFileWords(d, j, after);
             v.pjax := ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and
-                      (Log2Words(w) <= ZPAQL_MAX_PH);
+                      (w >= 0) and (Log2Words(w) <= ZPAQL_MAX_PH);
             { pjax7: the same files, version 7's decoder's memory }
             w := ZpaqlPjaxFileWords(d, j, after, True);
             v.pjax7 := ((after >= PJAX_MIN_AFTER) or (j.precision = 12) or j.dnl or HasIgnoredRestarts(j)) and
-                       (Log2Words(w) <= ZPAQL_MAX_PH);
+                       (w >= 0) and (Log2Words(w) <= ZPAQL_MAX_PH);
           end;
           { pja7: what pja takes, version 7's decoder's memory }
           v.pja7 := (j.precision = 8) and not j.lossless and not j.dnl and not HasIgnoredRestarts(j) and

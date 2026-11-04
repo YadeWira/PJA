@@ -21,6 +21,8 @@ uses SysUtils, pjajpeg, pjajls, pjacodec, pjamodel;
 const
   { the largest H a block may ask for: 2^26 words, 256 MB }
   ZPAQL_MAX_PH = 26;
+  { the scans a JPEG may have: pjadec.zl's MAXSCANS }
+  ZPAQL_MAX_SCANS = 256;
 
 { The words of H the decoder takes for this JPEG (its headers parsed, raw
   included). }
@@ -48,7 +50,8 @@ function ZpaqlArgs7(const stream: TBytes): Int64;
 { For the detection, before compressing: an upper bound of what pjax's
   stream of this verified JPEG would take, every candidate part counted
   (a part that does not pay is left out later); also how many bytes of
-  them come after the host's EOI (an MPO's or an Ultra HDR's next images). }
+  them come after the host's EOI (an MPO's or an Ultra HDR's next images).
+  -1 if a part has more scans than its ZPAQL takes. }
 function ZpaqlPjaxFileWords(const d: TBytes; const j: TJpeg; out after: Int64; v7: Boolean = False): Int64;
 { The pjall codec's, for a lossless JPEG (its headers parsed, raw
   included): its samples, decoded by JPEG-LS's samples model, and the
@@ -148,7 +151,8 @@ begin
   Result := -1;
   try
     if (Length(stream) < 2) or (stream[0] <> STREAM_V7) then Exit;
-    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl then Exit;
+    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl or
+       (Length(j.scans) > ZPAQL_MAX_SCANS) then Exit;
     ph := Log2Words(ZpaqlWords7(j));
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
@@ -178,8 +182,10 @@ var j: TJpeg; ph: Integer;
 begin
   Result := -1;
   try
-    { the decoder takes 8-bit DCT JPEGs with their height in the frame only }
-    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl then Exit;
+    { the decoder takes 8-bit DCT JPEGs with their height in the frame only,
+      and at most its MAXSCANS scans (up to 0.6.3 only the detection said so) }
+    if not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl or
+       (Length(j.scans) > ZPAQL_MAX_SCANS) then Exit;
     ph := ZpaqlPh(j);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
@@ -202,13 +208,14 @@ begin
 end;
 
 { What one version 5 stream takes beyond the decoder's own words: -1 if
-  pjax does not decode it (arithmetic, lossless, JPEG-LS) }
+  pjax does not decode it (arithmetic, lossless, JPEG-LS, more scans than
+  its MAXSCANS) }
 function OneJpegWords(const st: TBytes; v7: Boolean = False): Int64;
 var j: TJpeg;
 begin
   { version 7's codecs read version 7 streams only, pjax version 5 only }
   if (Length(st) < 1) or ((st[0] = STREAM_V7) <> v7) then Exit(-1);
-  if not StreamHeaders(st, j).Ok or j.arithmetic or j.lossless then Exit(-1);
+  if not StreamHeaders(st, j).Ok or j.arithmetic or j.lossless or (Length(j.scans) > ZPAQL_MAX_SCANS) then Exit(-1);
   if v7 then Result := ZpaqlWords7(j) - ZPAQL7_STATIC_WORDS
   else Result := ZpaqlWords(j) - ZPAQL_STATIC_WORDS;
 end;
@@ -275,6 +282,8 @@ begin
        Decompose(Copy(d, k, Length(d) - k), sj).Ok and not sj.arithmetic and not sj.lossless then begin
       len := sj.eoi;
       if (k >= j.eoi) or (k + len <= j.eoi) then begin
+        { a part pjax.zl's readsos refuses (taken up to 0.6.3) }
+        if Length(sj.scans) > ZPAQL_MAX_SCANS then Exit(-1);
         if k >= j.eoi then Inc(after, len);
         Result := Result + PartWords(sj, Length(sj.raw)) + len;
         Inc(k, len);
@@ -332,13 +341,18 @@ begin
 end;
 
 function ZpaqlLjpegWords(const j: TJpeg): Int64;
-var jl: TJls; samples: Int64;
+var jl: TJls; samples: Int64; c: Integer;
 begin
   { what pjacodec.LosslessView hands the samples model: every component
-    whole, width by height }
+    whole, width by height (the bands ljpeg.zl's jlsbandcount counts; up to
+    0.6.3 the components had no size here, one band, and an image of 2^21
+    samples or more could ask for too small an H) }
   jl := Default(TJls);
   jl.width := j.width; jl.height := j.height;
   SetLength(jl.comp, Length(j.comp));
+  for c := 0 to High(jl.comp) do begin
+    jl.comp[c].width := j.width; jl.comp[c].height := j.height;
+  end;
   samples := Int64(j.width) * j.height;
   Result := ZPAQL_LL_STATIC_WORDS + RawWords(Length(j.raw));
   Inc(Result, DhtTables(j.raw) * 512);
@@ -351,7 +365,8 @@ var j: TJpeg; ph: Integer;
 begin
   Result := -1;
   try
-    if not StreamHeaders(stream, j).Ok or not j.lossless or j.arithmetic then Exit;
+    if not StreamHeaders(stream, j).Ok or not j.lossless or j.arithmetic or
+       (Length(j.scans) > ZPAQL_MAX_SCANS) then Exit;
     ph := Log2Words(ZpaqlLjpegWords(j));
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
