@@ -14,7 +14,9 @@
    baseline_444.jpg (cjpeg's standard tables) without any, alone and after
    a JPEG of color_plasma.jpg's tables (another file's, which do not fit
    it): the filter must take it with the standard tables both times and
-   give it back.
+   give it back. A lossless JPEG (no DQT, and none needed) must be taken as
+   it is, in a 01 record, smaller than it was. And version 2 with B's write
+   failing must stop there with PJA_E_WRITE, not read the rest.
    Prints a line per check and "N checks, 0 failures" at the end. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -165,6 +167,39 @@ static void standard_tables(const char *name, const char *other) {
   free(e.d); free(back.d); free(c); free(t); free(a); free(d); free(od); free(ot); free(oa);
 }
 
+/* a lossless JPEG (SOF3): no DQT, and none needed; taken as it is, a 01
+   record, not given tables it has no use for */
+static void lossless(const char *name) {
+  size_t n;
+  unsigned char *d = slurp(name, &n);
+  if (!d) return;
+  src_t in = {d, n, 0, 4096};
+  dst_t e = {0}, back = {0};
+  int r = pja_filter_encode(rd, &in, wr, &e, 2);
+  src_t ie = {e.d, e.n, 0, 4096};
+  if (r == PJA_OK) r = pja_filter_decode(rd, &ie, wr, &back, 2);
+  check(r == PJA_OK && back.n == n && memcmp(back.d, d, n) == 0, "lossless: round trip", name);
+  check(e.n > 5 && e.d[5] == 0x01 && e.n < n, "lossless: taken without tables", name);
+  printf("a lossless JPEG (%s): %zu bytes -> %zu\n", name, n, e.n);
+  free(e.d); free(back.d); free(d);
+}
+
+/* version 2, B's write failing after its magic: PJA_E_WRITE, and the
+   input not read to its end */
+static int b_calls;
+static int wr_b_fails(void *ctx, const void *buf, size_t size) {
+  return ++b_calls > 1 ? -1 : wr(ctx, buf, size);
+}
+static void b_failure(const unsigned char *all, size_t alln) {
+  src_t in = {all, alln, 0, 4096};
+  dst_t a = {0}, b = {0};
+  b_calls = 0;
+  int r = pja_filter2_encode(rd, &in, wr, &a, wr_b_fails, &b, 1);
+  check(r == PJA_E_WRITE && in.p < in.n, "filter2: stops when B fails", "");
+  printf("filter2 with B failing: %d, %zu of %zu bytes read\n", r, in.p, in.n);
+  free(a.d); free(b.d);
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", pja_version());
@@ -207,6 +242,7 @@ int main(int argc, char **argv) {
     for (int a = 1; a < argc; a++) {
       if (strstr(argv[a], "color_plasma.jpg")) plasma = argv[a];
       if (strstr(argv[a], "baseline_444.jpg")) b444 = argv[a];
+      if (strstr(argv[a], "dnl_lossless.jpg") || strstr(argv[a], "lossless_restart.jpg")) lossless(argv[a]);
     }
     if (plasma) abbreviated(plasma);
     if (b444) { standard_tables(b444, 0); if (plasma) standard_tables(b444, plasma); }
@@ -261,6 +297,7 @@ int main(int argc, char **argv) {
     }
     free(two);
   }
+  b_failure(all, alln);
   /* damaged filter streams: about 300 bytes spread over the stream
      flipped, one at a time, and cut short at a few places */
   int bad = 0, same = 0;
