@@ -294,36 +294,54 @@ begin
   Result := VERSION_TEXT;
 end;
 
-function pja_compress(input: PByte; size: SizeUInt; out output: PByte; out outSize: SizeUInt;
+{ pja_compress and pja_decompress run the codec on the caller's thread,
+  which keeps its models in threadvars (about 18 MB) that nothing frees when
+  a thread of the host ends: parked before returning (pjamodel), and taken
+  back by the next call on any thread, which then does not allocate them
+  again. out and outSize are pointers, not out parameters, so that a null
+  one is an error and not a crash. }
+function pja_compress(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
                       threads: LongInt): LongInt; cdecl;
 var pja: TBytes; r: TPackResult;
 begin
-  output := nil; outSize := 0;
+  if (output = nil) or (outSize = nil) then Exit(PJA_E_ARG);
+  output^ := nil; outSize^ := 0;
   if (input = nil) and (size > 0) then Exit(PJA_E_ARG);
   threads := Threads1to64(threads);
   try
-    r := Pack(InBytes(input, size), pja, threads, False, True, '', True);
-    if not r.Ok or r.codec.asBytes then Exit(PJA_E_NOT_TAKEN);
-    if Hand(pja, output, outSize) then Result := PJA_OK else Result := PJA_E_MEMORY;
+    UnparkThreadModels;
+    try
+      r := Pack(InBytes(input, size), pja, threads, False, True, '', True);
+      if not r.Ok or r.codec.asBytes then Exit(PJA_E_NOT_TAKEN);
+      if Hand(pja, output^, outSize^) then Result := PJA_OK else Result := PJA_E_MEMORY;
+    finally
+      ParkThreadModels;
+    end;
   except
     Result := PJA_E_MEMORY;
   end;
 end;
 
-function pja_decompress(input: PByte; size: SizeUInt; out output: PByte; out outSize: SizeUInt;
+function pja_decompress(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
                         maxSize: SizeUInt; threads: LongInt): LongInt; cdecl;
 var original: TBytes; expected: THash16; r: TPackResult; cap: QWord;
 begin
-  output := nil; outSize := 0;
+  if (output = nil) or (outSize = nil) then Exit(PJA_E_ARG);
+  output^ := nil; outSize^ := 0;
   if (input = nil) and (size > 0) then Exit(PJA_E_ARG);
   threads := Threads1to64(threads);
   cap := MAX_ORIGINAL;
   if (maxSize > 0) and (maxSize < cap) then cap := maxSize;
   try
-    r := Unpack(InBytes(input, size), cap, original, expected, threads);
-    if r.err = ukTooLarge then Exit(PJA_E_MEMORY);
-    if not r.Ok then Exit(PJA_E_DATA);
-    if Hand(original, output, outSize) then Result := PJA_OK else Result := PJA_E_MEMORY;
+    UnparkThreadModels;
+    try
+      r := Unpack(InBytes(input, size), cap, original, expected, threads);
+      if r.err = ukTooLarge then Exit(PJA_E_MEMORY);
+      if not r.Ok then Exit(PJA_E_DATA);
+      if Hand(original, output^, outSize^) then Result := PJA_OK else Result := PJA_E_MEMORY;
+    finally
+      ParkThreadModels;
+    end;
   except
     Result := PJA_E_MEMORY;
   end;

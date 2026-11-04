@@ -180,6 +180,11 @@ int main(int argc, char **argv) {
     int r = pja_compress(d, n, &p, &pn, 2);
     check(r == PJA_OK || r == PJA_E_NOT_TAKEN, "compress", argv[a]);
     if (r == PJA_OK) {
+      void *p2 = 0;                                /* again, on the models the call parked */
+      size_t pn2 = 0;
+      check(pja_compress(d, n, &p2, &pn2, 1) == PJA_OK && pn2 == pn && memcmp(p2, p, pn) == 0,
+            "the same bytes again", argv[a]);
+      pja_free(p2);
       taken++; insum += n; outsum += pn;
       r = pja_decompress(p, pn, &back, &bn, 0, 2);
       check(r == PJA_OK && bn == n && memcmp(back, d, n) == 0, "decompress", argv[a]);
@@ -202,6 +207,18 @@ int main(int argc, char **argv) {
     free(d);
   }
   printf("%zu of %d files taken: %zu -> %zu bytes as .pja\n", taken, argc - 1, insum, outsum);
+  {                                                /* null pointers: an error, not a crash */
+    static const unsigned char some[4] = {0xFF, 0xD8, 0xFF, 0xD9};
+    void *p = 0;
+    size_t pn = 0;
+    check(pja_compress(some, 4, NULL, &pn, 1) == PJA_E_ARG, "compress, null out", "");
+    check(pja_compress(some, 4, &p, NULL, 1) == PJA_E_ARG, "compress, null out_size", "");
+    check(pja_decompress(some, 4, NULL, &pn, 0, 1) == PJA_E_ARG, "decompress, null out", "");
+    check(pja_decompress(some, 4, &p, NULL, 0, 1) == PJA_E_ARG, "decompress, null out_size", "");
+    check(pja_filter_encode(NULL, NULL, NULL, NULL, 1) == PJA_E_ARG, "filter, null functions", "");
+    check(pja_filter2_decode(NULL, NULL, NULL, NULL, NULL, NULL, 1) == PJA_E_ARG,
+          "filter2, null functions", "");
+  }
   {
     const char *plasma = 0, *b444 = 0;
     for (int a = 1; a < argc; a++) {

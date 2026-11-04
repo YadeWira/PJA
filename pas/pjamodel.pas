@@ -95,6 +95,14 @@ function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind
   FreePascal does not free when a thread ends). Each thread that codes calls
   it before it ends: the library starts threads on every call. }
 procedure ReleaseThreadModels;
+{ libpja's exports, which code on the host's threads, and those can be many
+  and short-lived: ParkThreadModels moves this thread's models out of its
+  threadvars (as ReleaseThreadModels) into a few kept for the next call on
+  any thread, which UnparkThreadModels gives to its thread; the ones past
+  those few are freed. Models from another thread make the same streams as
+  fresh ones (RawDirty travels with them). }
+procedure ParkThreadModels;
+procedure UnparkThreadModels;
 { libpja's JPEGs without tables of their own (pjafilter.c): the tables the
   filter put after the SOI of the one this thread codes now, which CodeRaw
   then leaves out of the stream (a bit says it did) and puts back when
@@ -1413,6 +1421,63 @@ begin
   PoolChroma := Default(TCoefModel);
 end;
 
+type
+  { one thread's models, parked }
+  TParkedModels = record
+    o0, o1, o2: TBits;
+    dirty: Boolean;
+    luma, chroma: TCoefModel;
+  end;
+  PParkedModels = ^TParkedModels;
+
+const
+  { the sets kept, about 18 MB each }
+  MAX_PARKED = 4;
+
+var
+  ParkLock: TRTLCriticalSection;
+  Parked: array[0..MAX_PARKED - 1] of PParkedModels;
+  ParkedCount: Integer;
+
+procedure ParkThreadModels;
+var m: PParkedModels;
+begin
+  m := nil;
+  if Length(RawO2) + Length(PoolLuma.nz2) + Length(PoolChroma.nz2) > 0 then begin
+    New(m);
+    m^.o0 := RawO0; m^.o1 := RawO1; m^.o2 := RawO2;
+    m^.dirty := RawDirty;
+    m^.luma := PoolLuma; m^.chroma := PoolChroma;
+  end;
+  ReleaseThreadModels;
+  if m = nil then Exit;
+  EnterCriticalSection(ParkLock);
+  if ParkedCount < MAX_PARKED then begin
+    Parked[ParkedCount] := m;
+    Inc(ParkedCount);
+    m := nil;
+  end;
+  LeaveCriticalSection(ParkLock);
+  if m <> nil then Dispose(m);
+end;
+
+procedure UnparkThreadModels;
+var m: PParkedModels;
+begin
+  m := nil;
+  EnterCriticalSection(ParkLock);
+  if ParkedCount > 0 then begin
+    Dec(ParkedCount);
+    m := Parked[ParkedCount];
+  end;
+  LeaveCriticalSection(ParkLock);
+  if m = nil then Exit;
+  RawO0 := m^.o0; RawO1 := m^.o1; RawO2 := m^.o2;
+  RawDirty := m^.dirty;
+  PoolLuma := m^.luma; PoolChroma := m^.chroma;
+  Dispose(m);
+end;
+
 procedure V7FillTables(out t: TV7Tables);
 begin
   t := Default(TV7Tables);
@@ -2078,4 +2143,12 @@ initialization
   {$endif}
   InitTables;
   InitUnzig;
+  InitCriticalSection(ParkLock);
+
+finalization
+  while ParkedCount > 0 do begin
+    Dec(ParkedCount);
+    Dispose(Parked[ParkedCount]);
+  end;
+  DoneCriticalSection(ParkLock);
 end.
