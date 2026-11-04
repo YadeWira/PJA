@@ -60,6 +60,51 @@ check "a JPEG-LS that ends with its scan, no EOI: as bytes, says why, back byte 
 check "a cut progressive scan with a restart every 3 blocks: repaired, back byte for byte" bash -c "
   '$PJA' a -f '$W/in/prog_restarts_cut.jpg' -o '$W/prc.pja' | grep -q 'repaired' &&
   '$PJA' x -q -f '$W/prc.pja' -o '$W/prcx/' && cmp -s '$W/in/prog_restarts_cut.jpg' '$W/prcx/prc.jpg'"
+# a scan cut short at 1000 bytes of 17 KB, whose filler is longer than what
+# is left: zero bits are empty blocks (EOB has the shortest code here)
+python3 -I - "$W/cutlong.jpg" <<'EOF'
+import sys, struct, math
+dcb = [0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0]; acb = [0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,0x7d]
+acv = bytes.fromhex('00020301041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa')
+def codes(nb, vals):
+    t = {}; c = 0; k = 0
+    for l in range(16):
+        for _ in range(nb[l]): t[vals[k]] = (c, l + 1); c += 1; k += 1
+        c <<= 1
+    return t
+DC = codes(dcb, list(range(12))); AC = codes(acb, list(acv))
+bits = []
+def put(v, l): bits.extend((v >> (l - 1 - i)) & 1 for i in range(l))
+def coef(t, run, v):
+    s = abs(v).bit_length(); put(*t[run * 16 + s] if t is AC else t[s])
+    if s: put(v if v >= 0 else v + (1 << s) - 1, s)
+prev = 0
+for by in range(64):
+    for bx in range(64):
+        dc = round(40 * math.sin(bx / 5) + 30 * math.cos(by / 7)); coef(DC, 0, dc - prev); prev = dc
+        run = 0
+        for k in range(1, 5):
+            a = round(9 * math.cos(bx / (2 + k) + by / (3 + k)))
+            if a: coef(AC, run, a); run = 0
+            else: run += 1
+        put(*AC[0])
+bits += [1] * (-len(bits) % 8)
+scan = bytearray()
+for i in range(0, len(bits), 8):
+    scan.append(int(''.join(map(str, bits[i:i + 8])), 2))
+    if scan[-1] == 0xFF: scan.append(0)
+o = b'\xff\xd8\xff\xdb\x00\x43\x00' + bytes([4] * 64)
+o += b'\xff\xc0\x00\x0b\x08\x02\x00\x02\x00\x01\x01\x11\x00'
+o += b'\xff\xc4\x00\x1f\x00' + bytes(dcb) + bytes(range(12))
+o += b'\xff\xc4' + struct.pack('>H', 19 + len(acv)) + bytes([0x10] + acb) + acv
+o += b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00' + scan + b'\xff\xd9'
+open(sys.argv[1], 'wb').write(o[:1000])
+EOF
+check "a cut scan whose filler outgrows the file: repaired, back byte for byte" bash -c "
+  '$PJA' a -f '$W/cutlong.jpg' -o '$W/cl.pja' | grep -q 'repaired' &&
+  '$PJA' x -q -f '$W/cl.pja' -o '$W/clx/' && cmp -s '$W/cutlong.jpg' '$W/clx/cl.jpg'"
+check "  with --no-verify: the very same .pja" bash -c "
+  '$PJA' a -q -f --no-verify '$W/cutlong.jpg' -o '$W/cl2.pja' && cmp -s '$W/cl.pja' '$W/cl2.pja'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
 
 echo "--- existing outputs"

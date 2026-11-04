@@ -14,7 +14,7 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (a photo is usually one band). Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
-| `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, and the `.pja` is the same byte for byte |
+| `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, so does the check of a repaired JPEG, and the `.pja` is the same byte for byte |
 | `--fast` | `a`: accepted for older scripts, and changes nothing: since 0.1.0 the model `a` uses (stream version 7) is as fast as the fast model was and as small as the full one (`CODEC.md`). `x` reads every version |
 | `-n`, `--dry-run` | do everything but write |
 | `-q`, `--quiet` | only errors |

@@ -87,10 +87,10 @@ type
   end;
 
 { JPEG -> stream. With verify (the default), the stream is decompressed and
-  compared before returning. threads: how many bands at once (1 = no thread
-  is created). fast: a JPEG's coefficients with the fast model, which
-  decodes about 1.5 times as fast for about 1.7% more (doc/CODEC.md);
-  JPEG-LS files ignore it. parts: the JPEGs inside a JPEG compressed on
+  compared before returning (a repaired JPEG's always). threads: how many
+  bands at once (1 = no thread is created). fast: a JPEG's coefficients
+  with the fast model, which decodes about 1.5 times as fast for about 1.7%
+  more (doc/CODEC.md); JPEG-LS files ignore it. parts: the JPEGs inside a JPEG compressed on
   their own (STREAM_PARTS); without it the stream is always version 5, the
   one the zpaq-std plugin's ZPAQL reads. v7: a JPEG's coefficients with
   version 7's model (fast is then ignored), which needs pjav7 in the
@@ -229,9 +229,22 @@ end;
 function Min2(a, b: Integer): Integer;
 begin if a < b then Result := a else Result := b; end;
 
+{ A thread for a job, not started; nil if the system has none to give (a
+  host at its limit, an address space full of stacks). }
+function NewBandThread(job: PBandJob): TBandThread;
+begin
+  try
+    Result := TBandThread.Create(True);
+  except
+    Exit(nil);
+  end;
+  Result.job := job;
+  Result.FreeOnTerminate := False;
+end;
+
 { Runs every job, up to `threads` at a time. }
 procedure RunBands(var jobs: array of TBandJob; threads: Integer);
-var i, next, k: Integer; pool: array of TBandThread;
+var i, next, k, started: Integer; pool: array of TBandThread;
 begin
   if (threads <= 1) or (Length(jobs) <= 1) then begin
     { PJA_BANDS_REVERSE=1 (the codec suite): the last band first, which shows
@@ -246,13 +259,17 @@ begin
   while next < Length(jobs) do begin
     pool := nil;
     SetLength(pool, Min2(threads, Length(jobs) - next));
-    for k := 0 to High(pool) do begin
-      pool[k] := TBandThread.Create(True);
-      pool[k].job := @jobs[next + k];
-      pool[k].FreeOnTerminate := False;
-      pool[k].Start;
+    started := 0;
+    while started < Length(pool) do begin
+      pool[started] := NewBandThread(@jobs[next + started]);
+      if pool[started] = nil then Break;
+      pool[started].Start;
+      Inc(started);
     end;
-    for k := 0 to High(pool) do begin pool[k].WaitFor; pool[k].Free; end;
+    { the jobs no thread was had for, here; the threads running are waited
+      for all the same, never left on jobs the caller is about to free }
+    for k := started to High(pool) do RunBand(jobs[next + k]);
+    for k := 0 to started - 1 do begin pool[k].WaitFor; pool[k].Free; end;
     Inc(next, Length(pool));
   end;
 end;
@@ -428,12 +445,14 @@ end;
   in about the time of one of them. }
 function CompressLive(const jpeg: TBytes; var j: TJpeg; const head: TBytes; threads: Integer;
                       model: TModelKind; out stream: TBytes): Boolean;
-var h: THead; nb, b, i, k, pairs, next: Integer; enc, dec: array of TBandJob; r: array of TRange;
+var h: THead; nb, b, i, k, pairs, next, made: Integer; enc, dec: array of TBandJob; r: array of TRange;
     pool: array of TBandThread; back: TBytes; cr: TCodecResult;
 begin
   stream := nil;
   Result := False;
-  cr := DecodeHead(head, 1 shl 28, h);
+  { maxRaw: the input's own size, as Decompress is given it, never a cap
+    below what CodeRaw took }
+  cr := DecodeHead(head, Length(jpeg), h);
   if not cr.Ok or h.isLs then Exit;
   nb := BandCount(j);
   if h.nb <> nb then Exit;
@@ -458,14 +477,23 @@ begin
       if k > pairs then k := pairs;
       pool := nil;
       SetLength(pool, 2 * k);
-      for i := 0 to k - 1 do begin
-        pool[2 * i] := TBandThread.Create(True);
-        pool[2 * i].job := @enc[next + i];
-        pool[2 * i + 1] := TBandThread.Create(True);
-        pool[2 * i + 1].job := @dec[next + i];
+      made := 0;
+      while made < Length(pool) do begin
+        if made mod 2 = 0 then pool[made] := NewBandThread(@enc[next + made div 2])
+        else pool[made] := NewBandThread(@dec[next + made div 2]);
+        if pool[made] = nil then Break;
+        Inc(made);
       end;
-      for i := 0 to High(pool) do begin pool[i].FreeOnTerminate := False; pool[i].Start; end;
-      for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+      if made = Length(pool) then begin
+        for i := 0 to High(pool) do pool[i].Start;
+        for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+      end else begin
+        { not every thread was had: none started, those made let go, and
+          each band here, its encoder and then its reader (a live stream
+          keeps all it is given) }
+        for i := 0 to made - 1 do pool[i].Free;
+        for i := 0 to k - 1 do begin RunBand(enc[next + i]); RunBand(dec[next + i]); end;
+      end;
       Inc(next, k);
     end;
     for b := 0 to nb - 1 do
@@ -491,14 +519,15 @@ begin
   end;
 end;
 
-{ With verify: the stream decompressed and compared with the input; a
-  difference is a bug, and nothing is handed out }
+{ With verify: the stream decompressed (maxRaw the input's size, as every
+  decoder is given it) and compared with the input; a difference is a bug,
+  and nothing is handed out }
 function VerifyStream(const jpeg: TBytes; var stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
 var r: TCodecResult; back: TBytes;
 begin
   Result := CodecFail(ceOk);
   if not verify then Exit;
-  r := Decompress(stream, back, 1 shl 28, threads);
+  r := Decompress(stream, back, Length(jpeg), threads);
   if not r.Ok or (Length(back) <> Length(jpeg)) or
      ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then begin
     stream := nil;
@@ -1341,22 +1370,26 @@ end;
 
 { PATCH: the edits, then the repaired file's stream }
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
-var p: SizeInt; e, i: Integer; pos, del, ins, dels: Int64; edits: TEdits; fixed, inner: TBytes;
+var p: SizeInt; e, i: Integer; pos, del, ins, grown, limit: Int64; edits: TEdits; fixed, inner: TBytes;
 begin
   jpeg := nil;
   if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
   if (GetU32(stream, 2) < 1) or (GetU32(stream, 2) > MAX_EDITS) then Exit(CodecFail(ceBadStream));
   e := Integer(GetU32(stream, 2));
   edits := nil; SetLength(edits, e);
-  p := 6; dels := 0;
+  { the repaired file, where the edits are: at most MaxFiller larger than
+    the original (a cut scan's filler can be longer than what is left of
+    the file), and the original at most maxRaw }
+  limit := Min(Int64(maxRaw) + MaxFiller(maxRaw), High(SizeInt));
+  p := 6; grown := 0;
   for i := 0 to e - 1 do begin
     if p + 12 > Length(stream) then Exit(CodecFail(ceBadStream));
     { each number checked before it becomes a SizeInt (32 bits on 32-bit
-      systems): no file is larger than maxRaw }
+      systems) }
     pos := GetU32(stream, p); del := GetU32(stream, p + 4); ins := GetU32(stream, p + 8);
-    if (pos > maxRaw) or (del > maxRaw) or (ins > Length(stream) - p - 12) then Exit(CodecFail(ceBadStream));
+    if (pos > limit) or (del > limit) or (ins > Length(stream) - p - 12) then Exit(CodecFail(ceBadStream));
     edits[i].pos := pos; edits[i].del := del;
-    dels := dels + del;
+    grown := grown + del - ins;
     edits[i].ins := Copy(stream, p + 12, ins);
     p := p + 12 + Length(edits[i].ins);
   end;
@@ -1364,10 +1397,11 @@ begin
   { the repaired file: neither repaired again nor as bytes }
   if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) then
     Exit(CodecFail(ceBadStream));
-  { the repaired file is the original with what the edits take out: a cut
-    scan's filler makes it larger }
-  if dels > MaxFiller(maxRaw) then Exit(CodecFail(ceBadStream));
-  Result := DecompressAt(inner, fixed, maxRaw + dels, threads, 0, 0);
+  { the repaired file is the original with what the edits take out and
+    without what they put back: larger by what RepairJpeg holds to
+    MaxFiller (a cut scan's filler), smaller by bytes taken out }
+  if (grown > MaxFiller(maxRaw)) or (maxRaw + grown < 0) then Exit(CodecFail(ceBadStream));
+  Result := DecompressAt(inner, fixed, SizeInt(Min(maxRaw + grown, High(SizeInt))), threads, 0, 0);
   if not Result.Ok then Exit;
   if not ApplyEdits(fixed, edits, maxRaw, jpeg) then Exit(CodecFail(ceBadStream));
 end;
@@ -1405,17 +1439,19 @@ begin
   if not parts then Exit(CompressOne(jpeg, stream, verify, threads, model));
   Result := CompressAt(jpeg, stream, verify, threads, model, 0);
   { an encoder's slip PJA can undo: the file repaired, compressed, and the
-    repairs kept (PATCH), with the reason kept }
+    repairs kept (PATCH, whose places are 32 bits), with the reason kept }
   if (Result.err = ceJpeg) and (Result.jpeg.err in [jeBadRst, jeDataAfterScan, jeTruncated]) and
-     RepairJpeg(jpeg, fixed, edits) then begin
+     RepairJpeg(jpeg, fixed, edits) and (Length(fixed) < High(Cardinal)) then begin
     why := Result;
     if CompressAt(fixed, inner, False, threads, model, 0).Ok then begin
       stream := WritePatch(edits, inner);
       { a cut scan's filler may cost more than the model gains on the rest:
-        then the file goes as bytes, below }
+        then the file goes as bytes, below. Verified even without verify:
+        the repairs are guesses, and a PATCH that does not give the file
+        back is not written }
       if CompressBytes(jpeg, asBytes, False, threads).Ok and (Length(asBytes) <= Length(stream)) then
         stream := nil
-      else if not verify or SameAfter(jpeg, stream, threads, 0) then begin
+      else if SameAfter(jpeg, stream, threads, 0) then begin
         Result := CodecFail(ceOk); Result.jpeg := why.jpeg; Result.repaired := True;
         Exit;
       end;

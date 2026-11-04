@@ -1932,3 +1932,26 @@ mingw32 gcc assumes SSE2 by default, and pjav7c.c took its SSE2 path when
 it did, so PJA's x86 builds needed a Pentium 4 (pointed out by PMPA). The
 plain path writes the same streams (the suite checks it); the SSE4.1 and
 AVX2 copies still go by cpuid.
+
+## An audit of the codec's limits (04/11/2026)
+
+- **A cut photo whose filler outgrew the file was refused when read.**
+  ReadPatch held each edit's place and length to the original's size,
+  while RepairJpeg lets a cut scan's filler grow to MaxFiller (4 times the
+  file and 64 KB): the first 70% of a corpus photo was repaired, failed its
+  check and went as bytes (2871.5 KB instead of 2758.2 KB), and with
+  `--no-verify` the `.pja` written could not be extracted. ReadPatch now
+  takes what RepairJpeg writes (places and lengths up to the original and
+  its MaxFiller, the repaired file's size from the edits), and a PATCH
+  stream is always decompressed before it is kept, with or without
+  verify: the repairs are guesses. Every stream that was read is read the
+  same, and every file gives the same bytes.
+- **Verification decoded with a cap of 256 MiB**, while compressing took a
+  raw part of any size: a JPEG with more than 256 MiB after its EOI failed
+  as `NoRoundTrip`, and nothing was written. It decodes now with the
+  original's size, as `pja x`, libpja and the plugin do.
+- **A thread the system would not give** (a host at its limit) left the
+  bands' threads already started running on the job arrays the exception
+  freed. The bands with no thread now run on the caller's thread, after
+  the others were started, and those are waited for: the same stream and
+  the same JPEG (`tests/test_threads.pas` refuses threads to check it).

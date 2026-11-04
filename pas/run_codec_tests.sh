@@ -18,7 +18,7 @@ echo "== build"
 # the C part (stream version 7's model), and the same without SSE2
 "$PAS/build_c.sh" "$OUT/c"
 "$PAS/build_c.sh" "$OUT/cplain" -DPJA_V7_PLAIN
-for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt; do
+for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt test_threads; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -65,6 +65,9 @@ SAMP=$OUT/sampling; rm -rf "$SAMP"; mkdir -p "$SAMP"
 python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y13c12.jpg" 100 200 13,12,12 1 > /dev/null
 python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y22c11.jpg" 150 200 22,11,11 2 > /dev/null
 PJA_BANDS_REVERSE=1 PJA_TEST_V7=1 "$OUT/test_codec" "$SAMP" 2 | tail -2
+# threads the system will not give (a host at its limit): the bands left run
+# on the caller's thread, the same stream and the same JPEG back
+"$OUT/test_threads" "$SAMP/y13c12.jpg" | tail -1
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -2; done
 for d in "${dirs[@]}"; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
 
