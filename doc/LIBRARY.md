@@ -228,6 +228,13 @@ PJA's threads (7z.exe and 7zG, which load codecs from their main thread,
 did not). Checked on Windows 10 with 7-Zip 25.01, 64 and 32 bits: 7zFM
 tests PJA and PJA1 archives without errors.
 
+`pja_compress` and `pja_decompress` code on the caller's thread, and the
+codec keeps its models (about 18 MB) in threadvars, which FreePascal does
+not free when a thread of the host ends: up to 0.6.3 every thread that
+called them kept one set for good. They now give the set back before
+returning, and the library keeps up to four for the next calls on any
+thread (no cost measured on repeated calls from one thread).
+
 The method IDs, `03 7F 02` and `03 7F 01`, are in the slot 7-Zip's
 `DOC/Methods.txt` keeps for an experimental method; PJA will move to IDs
 of its own once 7-Zip assigns them, and stay able to read these.
