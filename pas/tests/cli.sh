@@ -53,6 +53,21 @@ check "an extension the format does not keep: by the content" bash -c "
 check "a JPEG PJA cannot take (cut short): as bytes, says why, back byte for byte" bash -c "
   head -c 9000 '$W/in/color_plasma.jpg' > '$W/cut.jpg' && '$PJA' a -f '$W/cut.jpg' -o '$W/cut.pja' | grep -q 'as bytes: Truncated' &&
   '$PJA' x -q -f '$W/cut.pja' -o '$W/cutx/' && cmp -s '$W/cut.jpg' '$W/cutx/cut.jpg'"
+python3 -I -c "
+import sys, struct
+for n, out in ((1024, sys.argv[1]), (1025, sys.argv[2])):
+    b = b'\xff\xd8\xff\xdb\x00\x43\x00' + bytes([1] * 64)
+    b += b'\xff\xc0' + struct.pack('>HBHHB', 11, 8, 8, 8, 1) + b'\x01\x11\x00'
+    b += b'\xff\xc4\x00\x14\x00' + bytes([1] + [0] * 15) + b'\x00'
+    b += b'\xff\xc4\x00\x14\x10' + bytes([1] + [0] * 15) + b'\x00'
+    b += (b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00' + b'\x3f') * n + b'\xff\xd9'
+    open(out, 'wb').write(b)" "$W/scans1024.jpg" "$W/scans1025.jpg"
+check "1024 scans (the cap): taken, back byte for byte" bash -c "
+  o=\$('$PJA' a -f '$W/scans1024.jpg' -o '$W/s1024.pja') && ! grep -q 'as bytes' <<< \"\$o\" &&
+  '$PJA' x -q -f '$W/s1024.pja' -o '$W/s1024x/' && cmp -s '$W/scans1024.jpg' '$W/s1024x/s1024.jpg'"
+check "1025 scans: as bytes, says why, back byte for byte" bash -c "
+  '$PJA' a -f '$W/scans1025.jpg' -o '$W/s1025.pja' | grep -q 'as bytes: TooLarge' &&
+  '$PJA' x -q -f '$W/s1025.pja' -o '$W/s1025x/' && cmp -s '$W/scans1025.jpg' '$W/s1025x/s1025.jpg'"
 check "a JPEG-LS that ends with its scan, no EOI: as bytes, says why, back byte for byte" bash -c "
   head -c \$(( \$(stat -c %s '$W/in/gray2.jls') - 2 )) '$W/in/gray2.jls' > '$W/noeoi.jls' &&
   '$PJA' a -f '$W/noeoi.jls' -o '$W/noeoi.pja' | grep -q 'as bytes: Truncated' &&
