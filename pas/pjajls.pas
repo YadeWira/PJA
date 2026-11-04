@@ -1052,8 +1052,9 @@ begin
                if c < 0 then Exit(JFail(jeBadSos, first));
                for k := 0 to i - 1 do if s.comp[k] = c then Exit(JFail(jeBadSos, first));
                { each component in one scan: coding it again would cost a
-                 whole decode for each copy of a few bytes }
-               if coded[c] then Exit(JFail(jeBadSos, first));
+                 whole decode for each copy of a few bytes. Only when
+                 compressing: a .pja already written with one extracts }
+               if decode and coded[c] then Exit(JFail(jeBadSos, first));
                s.comp[i] := c;
              end;
              for i := 0 to ns - 1 do coded[s.comp[i]] := True;
