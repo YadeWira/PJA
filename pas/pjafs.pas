@@ -12,7 +12,8 @@
 
   The system calls are the ones the reference module's Rust std made (lstat,
   open O_EXCL, mkdir 0777, rename; on Windows CreateFileW CREATE_NEW,
-  MoveFileExW), with the same error codes. }
+  MoveFileExW), with the same error codes; and link to give a temporary its
+  name without replacing anything (MoveFileExW without REPLACE_EXISTING). }
 unit pjafs;
 {$I pja.inc}
 
@@ -51,12 +52,14 @@ type
     function Text: string;
   end;
 
-{ Writes the file if `data` has the hash `expected`. The file is CREATED (an
-  existing one is never opened, and links are not followed). With `overwrite`,
-  it is written to a temporary and renamed over the target: what was there is
-  only replaced by something that verified. If the hash does not match,
-  nothing is written under that name (with omKeep, it stays as
-  <file>.corrupt[.N]). }
+{ Writes the file if `data` has the hash `expected`. It is written to a new
+  temporary (.pja-tmpN in the same directory) and given the name only once
+  complete: an existing file is never opened, and links are not followed.
+  Without `overwrite` the name is only taken if free; with it, the temporary
+  is renamed over the target: what was there is only replaced by something
+  that verified. If the hash does not match, nothing is written under that
+  name (with omKeep, it stays as <file>.corrupt[.N], or pja.corrupt[.N]
+  beside it if that name is too long). }
 function WriteVerified(const fileName: RawByteString; const data: TBytes; const expected: THash16;
                        onMismatch: TOnMismatch; overwrite: Boolean; out outcome: TOutcome): TFsResult;
 
@@ -104,6 +107,14 @@ function LastError: LongInt; begin Result := LongInt(GetLastError); end;
 const E_NOT_FOUND = ERROR_FILE_NOT_FOUND; E_NOT_FOUND2 = ERROR_PATH_NOT_FOUND;
   { something that is not a folder where one is needed }
   E_NOT_DIR = ERROR_DIRECTORY;
+  E_EXISTS = ERROR_FILE_EXISTS;
+
+{ A name the system will not take for its length. Past MAX_PATH Windows
+  answers "path not found" (the parent exists by then) or "invalid name". }
+function TooLong(code: LongInt): Boolean;
+begin
+  Result := (code = ERROR_FILENAME_EXCED_RANGE) or (code = ERROR_PATH_NOT_FOUND) or (code = ERROR_INVALID_NAME);
+end;
 
 function MakeDir(const p: RawByteString): Boolean;
 begin Result := CreateDirectoryW(PWideChar(W(p)), nil); end;
@@ -111,6 +122,15 @@ function DeleteEntry(const p: RawByteString): Boolean;
 begin Result := DeleteFileW(PWideChar(W(p))); end;
 function RenameEntry(const a, b: RawByteString): Boolean;
 begin Result := MoveFileExW(PWideChar(W(a)), PWideChar(W(b)), MOVEFILE_REPLACE_EXISTING); end;
+{ Gives `a` the name `b` only if `b` is free; the same code as CreateNew when
+  it is not. }
+function MoveNoReplace(const a, b: RawByteString; out code: LongInt): Boolean;
+begin
+  Result := MoveFileExW(PWideChar(W(a)), PWideChar(W(b)), 0);
+  if Result then begin code := 0; Exit; end;
+  code := LastError;
+  if code = ERROR_ALREADY_EXISTS then code := ERROR_FILE_EXISTS;
+end;
 
 type TFileHandle = THandle;
 function CreateNew(const p: RawByteString; out f: TFileHandle): Boolean;
@@ -149,6 +169,10 @@ begin Result := (Pos(#0, p) = 0) and (fpLstat(PChar(p), st) = 0); end;
 function LastError: LongInt; begin Result := fpgeterrno; end;
 const E_NOT_FOUND = ESysENOENT; E_NOT_FOUND2 = ESysENOENT;
   E_NOT_DIR = ESysENOTDIR;
+  E_EXISTS = ESysEEXIST;
+
+function TooLong(code: LongInt): Boolean;
+begin Result := code = ESysENAMETOOLONG; end;
 
 function MakeDir(const p: RawByteString): Boolean;
 begin Result := fpMkdir(PChar(p), &777) = 0; end;
@@ -156,6 +180,16 @@ function DeleteEntry(const p: RawByteString): Boolean;
 begin Result := fpUnlink(PChar(p)) = 0; end;
 function RenameEntry(const a, b: RawByteString): Boolean;
 begin Result := fpRename(PChar(a), PChar(b)) = 0; end;
+{ link() never replaces nor follows a link at `b`: EEXIST if the name is
+  taken. A file system without hard links answers something else (EPERM on
+  FAT): the caller then writes the old way. }
+function MoveNoReplace(const a, b: RawByteString; out code: LongInt): Boolean;
+begin
+  Result := fpLink(PChar(a), PChar(b)) = 0;
+  if not Result then begin code := LastError; Exit; end;
+  code := 0;
+  fpUnlink(PChar(a));
+end;
 
 type TFileHandle = cint;
 function CreateNew(const p: RawByteString; out f: TFileHandle): Boolean;
@@ -263,6 +297,20 @@ begin
   if Result then code := 0 else if EntryExists(p) then code := E_NOT_DIR;
 end;
 
+{ The directory part of `fileName`, with its separator ('' for a bare
+  name): what a name in the same directory starts with. }
+function DirPrefix(const fileName: RawByteString): RawByteString;
+var i: SizeInt;
+begin
+  i := Length(fileName);
+  {$ifdef MSWINDOWS}
+  while (i > 0) and not IsSep(fileName[i]) and (fileName[i] <> ':') do Dec(i);   { "C:x": the drive's current directory }
+  {$else}
+  while (i > 0) and not IsSep(fileName[i]) do Dec(i);
+  {$endif}
+  Result := Copy(fileName, 1, i);
+end;
+
 { First free `<path>.corrupt[.N]`, looking at the entry and not at what it
   points to. }
 function FreeCorruptPath(const fileName: RawByteString; out r: RawByteString): Boolean;
@@ -297,9 +345,27 @@ begin
   Result := True;
 end;
 
+{ Writes `data` to a new temporary in the directory of `fileName`, under a
+  short name of its own: <name>.pja-tmpN went over NAME_MAX (or MAX_PATH)
+  with a long name, where the name itself still fit. }
+function WriteTemp(const fileName: RawByteString; const data: TBytes; out tmp: RawByteString;
+                   out code: LongInt): Boolean;
+var n: Integer;
+begin
+  for n := 0 to 999 do begin
+    tmp := DirPrefix(fileName) + '.pja-tmp' + IntToStr(n);
+    if CreateAndWrite(tmp, data, code) then Exit(True);
+    { a real failure, not a taken name. EEXIST counts as taken even if it is
+      gone by now: another job of the run gave it its name meanwhile. }
+    if (code <> E_EXISTS) and not EntryExists(tmp) then begin tmp := ''; Exit(False); end;
+  end;
+  tmp := ''; code := -1;
+  Result := False;
+end;
+
 function WriteVerified(const fileName: RawByteString; const data: TBytes; const expected: THash16;
                        onMismatch: TOnMismatch; overwrite: Boolean; out outcome: TOutcome): TFsResult;
-var p, other, tmp: RawByteString; code: LongInt; actual: THash16; n: Integer;
+var p, other, tmp: RawByteString; code: LongInt; actual: THash16;
 begin
   outcome.kind := ocVerified; outcome.path := '';
   FillChar(outcome.expected, SizeOf(outcome.expected), 0); FillChar(outcome.actual, SizeOf(outcome.actual), 0);
@@ -317,31 +383,43 @@ begin
       Exit(FsFail(feNone, 0));
     end;
     if not FreeCorruptPath(fileName, other) then Exit(FsFail(feCouldNotKeep, -1));
-    if not CreateAndWrite(other, data, code) then Exit(FsFail(feCouldNotKeep, code));
+    if not CreateAndWrite(other, data, code) then begin
+      { <name>.corrupt does not fit where <name> did: a short one beside it }
+      if not TooLong(code) then Exit(FsFail(feCouldNotKeep, code));
+      if not FreeCorruptPath(DirPrefix(fileName) + 'pja', other) then Exit(FsFail(feCouldNotKeep, -1));
+      if not CreateAndWrite(other, data, code) then Exit(FsFail(feCouldNotKeep, code));
+    end;
     outcome.kind := ocKept; outcome.path := other;
     Exit(FsFail(feNone, 0));
   end;
 
+  { Both ways go through a new temporary in the same directory, and only
+    once it is fully written does it take the name: a run cut short (Ctrl-C,
+    a kill, a full disk) leaves at most a .pja-tmpN, never a truncated file
+    under the output's name. }
   if not overwrite then begin
-    if not CreateAndWrite(fileName, data, code) then Exit(FsFail(feIo, code));
+    { taken already: nothing to write (and the same code as before) }
+    if EntryExists(fileName) then Exit(FsFail(feIo, E_EXISTS));
+    if not WriteTemp(fileName, data, tmp, code) then Exit(FsFail(feIo, code));
+    { The name is given only if it is still free: no rename on top, so
+      whatever took it meanwhile (a link too) stays as it was. }
+    if not MoveNoReplace(tmp, fileName, code) then begin
+      DeleteEntry(tmp);
+      if code = E_EXISTS then Exit(FsFail(feIo, code));
+      { no hard links here (FAT): created in place, as before }
+      if not CreateAndWrite(fileName, data, code) then Exit(FsFail(feIo, code));
+    end;
     outcome.path := fileName;
     Exit(FsFail(feNone, 0));
   end;
 
-  { Overwrite: to a new temporary in the same directory, and only once fully
-    written, rename over the target. What was there stays intact if something
-    fails before, and rename replaces the ENTRY: it does not write through a
-    symbolic or hard link with that name. Before, the target was deleted
-    first: an `x -f` of a file that did not verify destroyed the JPEG the user
-    already had (measured from the CLI, 12/10/2026). }
-  tmp := '';
-  for n := 0 to 999 do begin
-    tmp := fileName + '.pja-tmp' + IntToStr(n);
-    if CreateAndWrite(tmp, data, code) then Break;
-    if not EntryExists(tmp) then Exit(FsFail(feIo, code));   { a real failure, not a taken name }
-    tmp := '';
-  end;
-  if tmp = '' then Exit(FsFail(feIo, -1));
+  { Overwrite: once fully written, the temporary is renamed over the target.
+    What was there stays intact if something fails before, and rename
+    replaces the ENTRY: it does not write through a symbolic or hard link
+    with that name. Before, the target was deleted first: an `x -f` of a
+    file that did not verify destroyed the JPEG the user already had
+    (measured from the CLI, 12/10/2026). }
+  if not WriteTemp(fileName, data, tmp, code) then Exit(FsFail(feIo, code));
   if not RenameEntry(tmp, fileName) then begin
     code := LastError;
     DeleteEntry(tmp);

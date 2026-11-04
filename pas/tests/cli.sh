@@ -137,6 +137,36 @@ rm -f "$W/g.jpg"; ln -s "$W/nowhere" "$W/g.jpg"
 check "a dangling link also takes the name" test "$(rc "$PJA" x "$W/g.pja")" -eq 1
 check "  and nothing is created where it points" test ! -e "$W/nowhere"
 rm -f "$W/g.jpg"
+check "cut short while writing (ulimit -f): nothing under the output's name" bash -c "
+  (ulimit -f 1; '$PJA' x '$W/pja/color_plasma.pja' -o '$W/cutw/c.jpg') ; [ ! -e '$W/cutw/c.jpg' ]"
+check "-n with an existing output: refused like the real run (rc 1)" test "$(rc "$PJA" a -n "$W/in/grayscale.jpg" -o "$W/g.pja")" -eq 1
+L=$(printf 'n%.0s' $(seq 250)); cp "$W/in/grayscale.jpg" "$W/$L.jpg"
+check "-f with a 254-byte name: the temporary is short" bash -c "
+  '$PJA' a -q '$W/$L.jpg' && '$PJA' a -q -f '$W/$L.jpg' && rm '$W/$L.jpg' && '$PJA' x -q -f '$W/$L.pja' &&
+  cmp -s '$W/in/grayscale.jpg' '$W/$L.jpg'"
+
+echo "--- two inputs, one output"
+mkdir -p "$W/dup/d1" "$W/dup/d2"; cp "$W/in/grayscale.jpg" "$W/dup/a.jpg"; cp "$W/in/color_plasma.jpg" "$W/dup/a.jpeg"
+cp "$W/in/grayscale.jpg" "$W/dup/d1/p.jpg"; cp "$W/in/color_plasma.jpg" "$W/dup/d2/p.jpg"
+check "a -f a.jpg a.jpeg: the later one fails, rc 1" bash -c "
+  ! '$PJA' a -f -th 4 '$W/dup/a.jpg' '$W/dup/a.jpeg' 2> '$W/dup/err.txt' &&
+  grep -q 'a.pja: also the output of .*a.jpg' '$W/dup/err.txt'"
+check "  and a.pja holds a.jpg" bash -c "'$PJA' list '$W/dup/a.pja' | grep -q 'original $(stat -c %s "$W/in/grayscale.jpg") B'"
+check "--output-dir with the same name from two folders: rc 1, one written" bash -c "
+  ! '$PJA' a -f --output-dir='$W/dup/o' '$W/dup/d1/p.jpg' '$W/dup/d2/p.jpg' 2>/dev/null && [ -e '$W/dup/o/p.pja' ]"
+check "x -f with the same output twice: rc 1" bash -c "
+  '$PJA' a -q '$W/dup/d2/p.jpg' && ! '$PJA' x -f -q --output-dir='$W/dup/x' '$W/dup/o/p.pja' '$W/dup/d2/p.pja' 2>/dev/null"
+check "the same with -n: rc 1" test "$(rc "$PJA" a -n -f "$W/dup/a.jpg" "$W/dup/a.jpeg")" -eq 1
+cp "$W/in/grayscale.jpg" "$W/dup/q.jpg"; cp "$W/in/grayscale.jpg" "$W/dup/q.pja"
+check "an output that is another input (a JPEG named q.pja): refused" bash -c "
+  ! '$PJA' a -f -th 1 '$W/dup/q.jpg' '$W/dup/q.pja' 2> '$W/dup/err2.txt' && grep -q 'q.pja: also an input' '$W/dup/err2.txt'"
+mkdir -p "$W/many"; for i in $(seq 24); do cp "$W/pja/grayscale.pja" "$W/many/g$i.pja"; done
+check "x -th 8 of 24 files into one folder, 5 times: no job trips on another's temporary" bash -c "
+  for n in 1 2 3 4 5; do rm -rf '$W/many/o'; '$PJA' x -q -th 8 '$W'/many/*.pja -o '$W/many/o/' || exit 1; done &&
+  [ \$(ls -A '$W/many/o' | wc -l) -eq 24 ]"
+mkdir -p "$W/bs";cp "$W/in/grayscale.jpg" "$W/bs/a\\x.jpg"; cp "$W/in/solid_color.jpg" "$W/bs/b\\x.jpg"
+check "a backslash is part of the name on Unix: a\\x.jpg and b\\x.jpg" bash -c "
+  '$PJA' a -q --output-dir='$W/bs/o' '$W/bs/a\\x.jpg' '$W/bs/b\\x.jpg' && [ -e '$W/bs/o/a\\x.pja' ] && [ -e '$W/bs/o/b\\x.pja' ]"
 
 echo plain > "$W/plain"
 check "a write the system refuses: its own words, not just a number" bash -c "

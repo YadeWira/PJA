@@ -141,11 +141,12 @@ Each row is a case with its expected result, and it is in the tests.
 | case | expected |
 |---|---|
 | link (symbolic or hard) with the output's name | without overwrite: the name is taken (a dangling link takes it too); with overwrite, the entry is replaced and **it is never written through** |
-| the output already exists | rejected, unless overwrite is requested |
-| with overwrite | written to a new temporary file in the same directory and renamed on top: **what was there is only replaced by something that verified** |
+| any write | to a new temporary file with a short name of its own (`.pja-tmpN`) in the same directory, which takes the output's name only once complete: **cut short, it leaves no truncated file under that name** |
+| the output already exists | rejected, unless overwrite is requested; the name is given without replacing anything (link, or MoveFileEx without REPLACE_EXISTING), so one taken meanwhile is rejected too |
+| with overwrite | the temporary is renamed on top: **what was there is only replaced by something that verified** |
 | the output is a directory | rejected, even if overwrite is requested |
 | hash does not match | **nothing is written** under that name |
-| the same, with `--keep-corrupt` | written as `<name>.corrupt`; if it already exists, `.corrupt.1`, `.corrupt.2`... |
+| the same, with `--keep-corrupt` | written as `<name>.corrupt`; if it already exists, `.corrupt.1`, `.corrupt.2`...; if that name is too long, `pja.corrupt[.N]` in the same directory |
 | the same, and there is no free `.corrupt` name | error, without writing anything |
 | the write fails halfway | what was written is deleted before returning the error |
 | the file could not be created | **nothing is deleted**: whatever is there was not written by us |
