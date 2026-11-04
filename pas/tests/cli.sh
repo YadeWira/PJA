@@ -151,7 +151,7 @@ cp "$W/in/grayscale.jpg" "$W/dup/d1/p.jpg"; cp "$W/in/color_plasma.jpg" "$W/dup/
 check "a -f a.jpg a.jpeg: the later one fails, rc 1" bash -c "
   ! '$PJA' a -f -th 4 '$W/dup/a.jpg' '$W/dup/a.jpeg' 2> '$W/dup/err.txt' &&
   grep -q 'a.pja: also the output of .*a.jpg' '$W/dup/err.txt'"
-check "  and a.pja holds a.jpg" bash -c "'$PJA' list '$W/dup/a.pja' | grep -q 'original $(stat -c %s "$W/in/grayscale.jpg") B'"
+check "  and a.pja holds a.jpg" bash -c "'$PJA' list '$W/dup/a.pja' | grep -q 'original $(wc -c < "$W/in/grayscale.jpg" | tr -d ' ') B'"
 check "--output-dir with the same name from two folders: rc 1, one written" bash -c "
   ! '$PJA' a -f --output-dir='$W/dup/o' '$W/dup/d1/p.jpg' '$W/dup/d2/p.jpg' 2>/dev/null && [ -e '$W/dup/o/p.pja' ]"
 check "x -f with the same output twice: rc 1" bash -c "
