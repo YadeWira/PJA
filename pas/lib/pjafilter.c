@@ -132,8 +132,8 @@ static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n, ext_t *x) {
       /* the entropy-coded bytes, up to the next marker */
       for (;;) {
         while (i < n && p[i] != 0xFF) i++;
-        if (i - x->run > FF_FREE) return EXT_NOT;
-        if (i + 2 > n) { x->i = i; return i > MAX_FILE ? EXT_NOT : EXT_MORE; }
+        if (i - x->run > FF_FREE || i > MAX_FILE) return EXT_NOT;
+        if (i + 2 > n) { x->i = i; return EXT_MORE; }
         x->run = i;
         uint8_t b = p[i + 1];
         if (x->ls ? b < 0x80 : (b == 0x00 || (b >= 0xD0 && b <= 0xD7))) { i += 2; continue; }
@@ -151,6 +151,9 @@ static ptrdiff_t jpeg_extent(const uint8_t *p, size_t n, ext_t *x) {
     }
     uint8_t m = p[i + 1];
     i += 2;
+    /* past MAX_FILE, the decoder would refuse its record: raw, however
+       the bytes were read */
+    if (i > MAX_FILE) return EXT_NOT;
     if (m == 0xD9) return (x->frames && x->scans) ? (ptrdiff_t)i : EXT_NOT;
     if (m == 0x00 || m == 0xD8) return EXT_NOT;
     if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
@@ -260,10 +263,11 @@ static int tables_segments(const uint8_t *p, size_t n) {
 }
 
 /* p[0..n), a whole JPEG: 1 if it has no DHT (Huffman) or no DQT before
-   its first scan, so that PJA could not decode it alone */
+   its first scan, so that PJA could not decode it alone; a lossless one
+   (SOF3, 7, 11, 15) has no DQT and needs none */
 static int lacks_tables(const uint8_t *p, size_t n) {
   size_t i = 2;
-  int dqt = 0, dht = 0, arith = 0;
+  int dqt = 0, dht = 0, arith = 0, lossless = 0;
   while (i + 4 <= n && p[i] == 0xFF) {
     uint8_t m = p[i + 1];
     if (m == 0xFF) { i++; continue; }
@@ -271,10 +275,11 @@ static int lacks_tables(const uint8_t *p, size_t n) {
     if (m == 0xDB) dqt = 1;
     if (m == 0xC4) dht = 1;
     if (m >= 0xC9 && m <= 0xCF && m != 0xCC) arith = 1;
+    if (m == 0xC3 || m == 0xC7 || m == 0xCB || m == 0xCF) lossless = 1;
     if (m == 0xF7) return 0;                       /* JPEG-LS */
     i += 2 + (((size_t)p[i + 2] << 8) | p[i + 3]);
   }
-  return !dqt || (!dht && !arith);
+  return (!dqt && !lossless) || (!dht && !arith);
 }
 
 /* ---------- writing ---------- */
@@ -534,6 +539,17 @@ static void submit(in_t *s, size_t *pc, size_t len) {
   H.pool_submit(s->pool, f);
 }
 
+/* an error already: what is left is only waited for */
+static int failed(const in_t *s, const out_t *o) {
+  return s->err || o->err || (s->ob && s->ob->err) || (s->dd && s->dd->err);
+}
+
+/* a file of size bytes PJA took and made smaller, in a record the decoder
+   takes (size <= MAX_FILE, 0 < n < size) */
+static int smaller(const job_t *f, size_t size) {
+  return f->ok && f->out_size && f->out_size + 12 < size && size <= MAX_FILE;
+}
+
 /* the oldest file in the pool, waited for and written with the raw bytes
    before it; one PJA did not take, or that did not get smaller, stays in
    the raw run around it */
@@ -544,7 +560,7 @@ static void retire(in_t *s, out_t *o) {
   H.pool_wait(s->pool, f);
   /* the last tables seen were another file's (in a solid block, a FlashPix
      before a Konica file): the standard ones, once more, here */
-  if (g && !std_tables(f->given, f->given_size) && !(f->ok && f->out_size + 12 < size) && !s->err) {
+  if (g && !std_tables(f->given, f->given_size) && !smaller(f, size) && !failed(s, o)) {
     size_t gs = sizeof STD_TABLES;
     uint8_t *in = H.alloc(size + gs);
     if (in) {
@@ -561,7 +577,7 @@ static void retire(in_t *s, out_t *o) {
       H.pool_wait(s->pool, f);
     }
   }
-  if (f->ok && f->out_size + 12 < size && !s->err) {
+  if (smaller(f, size) && !failed(s, o)) {
     raw_upto(s, o, s->at[k], 1);
     /* its tables, unless the decoder has them already */
     int same = g == s->dtabn;
@@ -609,7 +625,7 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
   } else
     put(&o, MAGIC, sizeof MAGIC);
   size_t pos = 0;                                 /* where the search goes on */
-  while (!s.err && !o.err && !dd.err) {
+  while (!failed(&s, &o)) {
     size_t c = pos;
     while (c + 3 <= s.have && !(s.buf[c] == 0xFF && s.buf[c + 1] == 0xD8 && s.buf[c + 2] == 0xFF)) c++;
     if (!s.np) raw_upto(&s, &o, c, 0);
@@ -661,7 +677,7 @@ static int encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *wr
     s.first = (s.first + 1) % s.maxp; s.np--;
   }
   if (!s.err && dd.err) s.err = dd.err;
-  if (!s.err && !o.err) { uint8_t t = TAG_END; put(&o, &t, 1); }
+  if (!failed(&s, &o)) { uint8_t t = TAG_END; put(&o, &t, 1); }
   if (s.pool) H.pool_close(s.pool);
   if (s.buf) H.release(s.buf);
   if (s.files) H.release(s.files);
