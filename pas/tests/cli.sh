@@ -69,7 +69,7 @@ check "1025 scans: as bytes, says why, back byte for byte" bash -c "
   '$PJA' a -f '$W/scans1025.jpg' -o '$W/s1025.pja' | grep -q 'as bytes: TooLarge' &&
   '$PJA' x -q -f '$W/s1025.pja' -o '$W/s1025x/' && cmp -s '$W/scans1025.jpg' '$W/s1025x/s1025.jpg'"
 check "a JPEG-LS that ends with its scan, no EOI: as bytes, says why, back byte for byte" bash -c "
-  head -c \$(( \$(stat -c %s '$W/in/gray2.jls') - 2 )) '$W/in/gray2.jls' > '$W/noeoi.jls' &&
+  head -c \$(( \$(wc -c < '$W/in/gray2.jls') - 2 )) '$W/in/gray2.jls' > '$W/noeoi.jls' &&
   '$PJA' a -f '$W/noeoi.jls' -o '$W/noeoi.pja' | grep -q 'as bytes: Truncated' &&
   '$PJA' x -q -f '$W/noeoi.pja' -o '$W/noeoix/' && cmp -s '$W/noeoi.jls' '$W/noeoix/noeoi.jls'"
 check "a cut progressive scan with a restart every 3 blocks: repaired, back byte for byte" bash -c "
@@ -120,7 +120,7 @@ check "a cut scan whose filler outgrows the file: repaired, back byte for byte" 
   '$PJA' x -q -f '$W/cl.pja' -o '$W/clx/' && cmp -s '$W/cutlong.jpg' '$W/clx/cl.jpg'"
 check "  with --no-verify: the very same .pja" bash -c "
   '$PJA' a -q -f --no-verify '$W/cutlong.jpg' -o '$W/cl2.pja' && cmp -s '$W/cl.pja' '$W/cl2.pja'"
-check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(stat -c %s "$W/in/color_plasma.jpg") B'"
+check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(wc -c < "$W/in/color_plasma.jpg" | tr -d ' ') B'"
 
 echo "--- existing outputs"
 cp "$W/in/grayscale.jpg" "$W/g.jpg"; "$PJA" a -q "$W/g.jpg"

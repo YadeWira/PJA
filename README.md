@@ -164,8 +164,9 @@ Anything else goes through as bytes, and `pja a` says why
 ## Install
 
 Download the command for your platform from the [latest release][relLink]:
-Linux (x86-64, x86, arm64), macOS (Apple silicon) or Windows (x64, and x86
-from XP on). Each build is tested by CI on its own platform, and a `.pja`
+Linux (x86-64, x86, arm64; glibc 2.34 or later: Debian 12, Ubuntu 22.04,
+RHEL 9 and newer), macOS (Apple silicon) or Windows (x64, and x86 from XP
+on). Each build is tested by CI on its own platform, and a `.pja`
 made on one opens on any other ([installing][wInstall], [platforms][wPlat]).
 
 ```sh
