@@ -36,6 +36,11 @@ const
   MAX_MCU_BLOCKS = 10;
   { Lossless JPEG: cap on samples over all components, as for JPEG-LS }
   MAX_LOSSLESS_SAMPLES = 1 shl 27;
+  { Cap on scans in a JPEG taken apart (Decompose): each one is a TScan of
+    about 18 KB. Photos have a few dozen at most; over a thousand is no
+    photo (TooLarge, the file is kept as it is). Reading the headers back
+    (ParseHeaders) has no cap: streams made before it }
+  MAX_SCANS = 1024;
 
   { ZIGZAG[k] = natural position (row*8+col) of the k-th coefficient in a scan. }
   ZIGZAG: array[0..63] of Byte = (
@@ -2195,17 +2200,16 @@ end;
 { ---------- top ---------- }
 
 { Whether a scan of data, just read from its header (s, starting at first)
-  as the scan of the same number in ref, decodes as that one did: the same
+  as scan ns, decodes as the scan of the same number in ref did: the same
   frame, the same header and tables, the same place, and the same bytes
   through the two after its end (the marker that stops the reader) }
-function SameScanAs(const data: TBytes; first: SizeInt; const j: TJpeg; const s: TScan;
+function SameScanAs(const data: TBytes; first: SizeInt; const j: TJpeg; const s: TScan; ns: SizeInt;
                     const ref: TJpeg; const refData: TBytes): Boolean;
 var i: Integer; rs: TScan; e: SizeInt;
 begin
   Result := False;
-  i := Length(j.scans);
-  if (i > High(ref.scans)) or ref.dnl or j.dnl or ref.arithmetic or ref.lossless then Exit;
-  rs := ref.scans[i];
+  if (ns > High(ref.scans)) or ref.dnl or j.dnl or ref.arithmetic or ref.lossless then Exit;
+  rs := ref.scans[ns];
   if rs.ignoreRi or (rs.dataStart <> first) or (rs.cut <> s.cut) or (rs.dataEnd < first) then Exit;
   { the frame }
   if (j.width <> ref.width) or (j.height <> ref.height) or (j.precision <> ref.precision) or
@@ -2240,7 +2244,7 @@ type PJpegRef = ^TJpeg;
 
 function ParseWith(const data: TBytes; decode: Boolean; out j: TJpeg; ref: PJpegRef; const refData: TBytes;
                    out refFailed: Boolean): TJpegResult;
-var p, first, last, copied, seglen: SizeInt; m: Byte; hs: THuffState; ri, i: Integer;
+var p, first, last, copied, seglen, ns: SizeInt; m: Byte; hs: THuffState; ri, i: Integer;
     haveFrame: Boolean; e: TJpegError; s, s2: TScan; rawOut: TBitWriter; ac: TArithCond; r2: TJpegResult;
 
   procedure CopyUpTo(upto: SizeInt);
@@ -2252,8 +2256,11 @@ begin
   hs := Default(THuffState);
   rawOut := Default(TBitWriter);
   if (Length(data) < 4) or (data[0] <> $FF) or (data[1] <> $D8) then Exit(Fail(jeNotJpeg, 0));
-  p := 2; copied := 0; ri := 0; haveFrame := False;
+  p := 2; copied := 0; ri := 0; haveFrame := False; ns := 0;
   for i := 0 to 3 do begin ac.L[i] := 0; ac.U[i] := 1; ac.K[i] := 5; end;   { T.81 F.1.4.4.1.4 defaults }
+  { j.scans grows by doubling (a scan is ~18 KB: one at a time is
+    quadratic), ns of it used; cut to ns however this ends }
+  try
   while True do begin
     if p >= Length(data) then Exit(Fail(jeTruncated, p));
     if data[p] <> $FF then Exit(Fail(jeUnexpectedMarker, p, data[p]));
@@ -2284,7 +2291,7 @@ begin
       $DC: begin
              { DNL: only where the frame left its height to it, after the
                first scan, and saying the height read ahead }
-             if not j.dnl or (Length(j.scans) <> 1) or (seglen <> 4) or (U16(data, first) <> j.height) then
+             if not j.dnl or (ns <> 1) or (seglen <> 4) or (U16(data, first) <> j.height) then
                Exit(Fail(jeUnexpectedMarker, p - 1, m));
            end;
       $C0, $C1, $C2, $C9, $CA, $C3: begin
@@ -2302,21 +2309,22 @@ begin
            Exit(Fail(jeUnsupported, p - 1, m));
       $DA: begin
              if not haveFrame then Exit(Fail(jeUnexpectedMarker, p - 1, m));
+             if decode and (ns >= MAX_SCANS) then Exit(Fail(jeTooLarge, p - 1));
              e := ReadSos(data, first, last, j, hs, ac, ri, s);
              if e <> jeNone then Exit(Fail(e, first));
              { lossless: one point transform for the whole image (the model
                takes its samples in one range) }
-             if j.lossless and (Length(j.scans) > 0) and (s.al <> j.scans[0].al) then
+             if j.lossless and (ns > 0) and (s.al <> j.scans[0].al) then
                Exit(Fail(jeUnsupported, first, m));
              CopyUpTo(last);
              s.cut := rawOut.n;
              if decode and (ref <> nil) then begin
                { the scan of ref, bytes and all: what decoding would give }
-               if not SameScanAs(data, last, j, s, ref^, refData) then begin
+               if not SameScanAs(data, last, j, s, ns, ref^, refData) then begin
                  refFailed := True;
                  Exit(Fail(jeUnsupported, last));
                end;
-               s := ref^.scans[Length(j.scans)];
+               s := ref^.scans[ns];
                copied := s.dataEnd;
              end else if decode then begin
                if j.lossless then Result := DecodeScanLossless(data, last, j, s, copied)
@@ -2340,8 +2348,8 @@ begin
                if not Result.Ok then Exit;
                s.dataStart := last; s.dataEnd := copied;
              end;
-             SetLength(j.scans, Length(j.scans) + 1);
-             j.scans[High(j.scans)] := s;
+             if ns = Length(j.scans) then SetLength(j.scans, Max(8, 2 * ns));
+             j.scans[ns] := s; Inc(ns);
              p := copied;
              if p >= Length(data) then begin j.eoi := Length(data); Break; end;  { no EOI }
              Continue;
@@ -2349,7 +2357,10 @@ begin
     end;
     p := last;
   end;
-  if Length(j.scans) = 0 then Exit(Fail(jeUnexpectedMarker, p, $D9));
+  finally
+    SetLength(j.scans, ns);
+  end;
+  if ns = 0 then Exit(Fail(jeUnexpectedMarker, p, $D9));
   CopyUpTo(Length(data));
   j.raw := Copy(rawOut.d, 0, rawOut.n);
   Result := Success;
@@ -2429,7 +2440,7 @@ begin
 end;
 
 function IsMpo(const data: TBytes): Boolean;
-var p, t, ifd, e, n, k, i, off, cnt, images: SizeInt; le: Boolean; m: Byte;
+var p, t, e, n, k, i, cnt, images: SizeInt; ifd, off: Int64; le: Boolean; m: Byte;
 
   function Get16(q: SizeInt): Integer;
   begin
@@ -2469,7 +2480,7 @@ begin
           is the low 24 bits, Multi-Frame 0x02xxxx }
         if Get16(e) = $B002 then begin
           off := t + Get32(e + 8);
-          images := Get32(e + 4) div 16;
+          images := SizeInt(Get32(e + 4) div 16);   { below 2^28 }
           for i := 0 to images - 1 do begin
             if (off < t) or (off + 16 * (i + 1) > Length(data)) then Exit;
             if (Get32(off + 16 * i) shr 16) and $FF = $02 then Exit(True);
