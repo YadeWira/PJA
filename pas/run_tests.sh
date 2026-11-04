@@ -17,7 +17,7 @@ python3 "$PAS/results.py" "$PAS"
 
 echo "== build"
 "$PAS/build_c.sh" "$OUT/c"
-for prog in test_blake3 test_format test_corruption test_pjafs zpaql_segments; do
+for prog in test_blake3 test_format test_corruption test_pjafs zpaql_segments test_zpaqlargs; do
   $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -36,6 +36,8 @@ rm -rf "$OUT/tmp_pjafs"; mkdir -p "$OUT/tmp_pjafs"; "$OUT/test_pjafs" "$(realpat
 
 echo "== the zpaq-std plugin's ZPAQL decoders (each also as its z codec's, --lz)"
 python3 "$PJA/tools/zpaql/gen_pjadec.py" --check
+# their H and what they refuse, on what is too large for test_pjadec.py
+"$OUT/test_zpaqlargs" "$PJA/tests/jpg" | tail -1
 rm -rf "$OUT/zpaql"; mkdir -p "$OUT/zpaql"
 ZS=("$PJA/tests/jpg/grayscale.jpg" "$PJA/tests/jpg/solid_color.jpg" "$PJA/tests/jpg/prog_huffman.jpg"
     "$PJA/tests/jpg/arith_restart.jpg"
