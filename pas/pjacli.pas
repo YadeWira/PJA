@@ -15,7 +15,7 @@ program pjacli;
 {$ifopt Q-}{$fatal pjacli: overflow checks ($Q+) are mandatory}{$endif}
 
 uses
-  {$ifdef UNIX} cthreads, {$endif}
+  {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
   SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel;
 
@@ -361,6 +361,18 @@ begin
   end;
 end;
 
+{ Anything under that name, a link that leads nowhere included (FileExists
+  follows links, and a dangling one said no where the write then failed) }
+function Exists(const path: string): Boolean;
+{$ifdef UNIX} var st: Stat; {$endif}
+begin
+  {$ifdef UNIX}
+  Result := fpLstat(path, st) = 0;
+  {$else}
+  Result := FileExists(path) or DirectoryExists(path);
+  {$endif}
+end;
+
 { Writes data under path, which must verify against `expected`. }
 function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
 var r: TFsResult; o: TOutcome; om: TOnMismatch;
@@ -368,7 +380,7 @@ begin
   Result := False;
   if not Claim(path) then Exit;
   { -n checks this too: it said yes to what the real run then refused }
-  if not force and (FileExists(path) or DirectoryExists(path)) then begin
+  if not force and Exists(path) then begin
     Fail(path + ': already exists (-f to replace it)');
     Exit;
   end;
@@ -538,9 +550,10 @@ begin
   end;
   { a's outputs follow from the names alone: taken here, in the order of the
     inputs, so it is always the later one that fails. x's come from inside
-    the .pja, and are taken when written. }
+    the .pja, and are taken when written. An input that is not there takes
+    nothing: it fails on its own, and must not take a later one down. }
   if command = cmCompress then
-    for i := 0 to High(jobs) do begin
+    for i := 0 to High(jobs) do if FileExists(jobs[i].name) then begin
       CurJob := @jobs[i];
       path := OutputPath(jobs[i].name, ChangeFileExt(ExtractFileName(jobs[i].name), '.pja'));
       Claim(path);
