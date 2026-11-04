@@ -942,16 +942,21 @@ begin
   p := 2;
   while p + 4 <= Length(data) do begin
     if data[p] <> $FF then Exit;
+    { $FF fill bytes before the marker, and RSTs with no length, as Parse }
+    while (p + 1 < Length(data)) and (data[p + 1] = $FF) do Inc(p);
+    if p + 4 > Length(data) then Exit;
     m := data[p + 1];
     if m = $F7 then Exit(True);
     if (m = $DA) or (m = $D9) or ((m >= $C0) and (m <= $CF) and (m <> $C4) and (m <> $CC)) then Exit;
-    p := p + 2 + U16(data, p + 2);
+    if IsRstMarker(m) then Inc(p, 2)
+    else p := p + 2 + U16(data, p + 2);
   end;
 end;
 
 function Parse(const data: TBytes; decode: Boolean; out j: TJls): TJpegResult;
 var p, first, last, copied, seglen: SizeInt; m: Byte; ri, i, k, c, id, ns, hmax, vmax: Integer; haveFrame: Boolean;
     preset: TPreset; s: TJlsScan; rawN: SizeInt; total: Int64; dt1, dt2, dt3: Integer;
+    coded: array[0..3] of Boolean;
 
   procedure CopyUpTo(upto: SizeInt);
   var q: SizeInt;
@@ -967,6 +972,7 @@ begin
   if (Length(data) < 4) or (data[0] <> $FF) or (data[1] <> $D8) then Exit(JFail(jeNotJpeg, 0));
   p := 2; copied := 0; rawN := 0; ri := 0; haveFrame := False;
   preset := Default(TPreset);
+  for i := 0 to 3 do coded[i] := False;
   while True do begin
     if p >= Length(data) then Exit(JFail(jeTruncated, p));
     if data[p] <> $FF then Exit(JFail(jeUnexpectedMarker, p, data[p]));
@@ -1045,8 +1051,13 @@ begin
                for k := 0 to High(j.comp) do if j.comp[k].id = id then c := k;
                if c < 0 then Exit(JFail(jeBadSos, first));
                for k := 0 to i - 1 do if s.comp[k] = c then Exit(JFail(jeBadSos, first));
+               { each component in one scan: coding it again would cost a
+                 whole decode for each copy of a few bytes. Only when
+                 compressing: a .pja already written with one extracts }
+               if decode and coded[c] then Exit(JFail(jeBadSos, first));
                s.comp[i] := c;
              end;
+             for i := 0 to ns - 1 do coded[s.comp[i]] := True;
              k := first + 1 + 2 * ns;
              s.near := data[k]; s.ilv := data[k + 1];
              if data[k + 2] <> 0 then Exit(JFail(jeUnsupported, first, $DA));   { point transform }
@@ -1059,6 +1070,14 @@ begin
                intervals would count groups of lines }
              if Grouped(j, s) and ((s.ilv = 2) or ((s.ilv = 1) and (ri > 0))) then
                Exit(JFail(jeUnsupported, first, $DA));
+             { not grouped, an interleaved scan goes by the frame's lines
+               (and in sample interleave its width): 1x1 components in a
+               frame with larger factors are smaller than that }
+             if (s.ilv > 0) and not Grouped(j, s) then
+               for i := 0 to ns - 1 do
+                 if (j.comp[s.comp[i]].height <> j.height) or
+                    ((s.ilv = 2) and (j.comp[s.comp[i]].width <> j.width)) then
+                   Exit(JFail(jeUnsupported, first, $DA));
              { the parameters in force }
              if preset.maxval <> 0 then s.maxval := preset.maxval else s.maxval := (1 shl j.bits) - 1;
              if (s.maxval < 1) or (s.maxval > (1 shl j.bits) - 1) then Exit(JFail(jeBadLse, first));
