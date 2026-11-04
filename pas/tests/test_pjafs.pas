@@ -60,8 +60,8 @@ begin
 end;
 var d, outside: string; q: RawByteString; f: TFsResult;
     oc: TOutcome; i: Integer; foreign, hGood: THash16;
-const TEMP_DIRS: array[0..10] of string = ('verify', 'keep', 'final_outside', 'final_outside_x', 'dangling',
-        'dangling_x', 'hard', 'hard_x', 'foreign', 'corrupt_link', 'dirs');
+const TEMP_DIRS: array[0..11] of string = ('verify', 'keep', 'final_outside', 'final_outside_x', 'dangling',
+        'dangling_x', 'hard', 'hard_x', 'foreign', 'corrupt_link', 'dirs', 'long');
 begin
   cells := 0; failures := 0;
   if ParamCount < 1 then begin Writeln('usage: test_pjafs <temp_dir>'); Halt(2); end;
@@ -97,6 +97,7 @@ begin
   f := WriteVerified(d + '/ok.jpg', B('correct contents'), H16('correct contents'), omDelete, False, oc);
   Check(f.Ok and (oc.kind = ocVerified) and (oc.path = d + '/ok.jpg'), 'positive control: Verified');
   Check(ReadText(d + '/ok.jpg') = 'correct contents', 'the good case stays on disk');
+  Check(not Exists(d + '/.pja-tmp0'), '  through a temporary, not left behind');
   foreign := H16('something else');
   f := WriteVerified(d + '/bad.jpg', B('correct contents'), foreign, omDelete, False, oc);
   Check(f.Ok and (oc.kind = ocDeleted), 'foreign hash: Deleted');
@@ -132,11 +133,14 @@ begin
      and (ReadText(d + '/f.jpg.corrupt') = 'bad'), '  and with keep, too: it goes to .corrupt');
   f := WriteVerified(d + '/f.jpg', B('x'), H16('x'), omDelete, True, oc);
   Check(f.Ok and (ReadText(d + '/f.jpg') = 'x'), 'with overwrite: replaces it');
-  Check(not Exists(d + '/f.jpg.pja-tmp0'), '  without leaving the temporary');
-  PutText(d + '/g.jpg.pja-tmp0', 'taken');
+  Check(not Exists(d + '/.pja-tmp0'), '  without leaving the temporary');
+  PutText(d + '/.pja-tmp0', 'taken');
   f := WriteVerified(d + '/g.jpg', B('y'), H16('y'), omDelete, True, oc);
-  Check(f.Ok and (ReadText(d + '/g.jpg') = 'y') and (ReadText(d + '/g.jpg.pja-tmp0') = 'taken'),
+  Check(f.Ok and (ReadText(d + '/g.jpg') = 'y') and (ReadText(d + '/.pja-tmp0') = 'taken'),
      '  with temporary 0 taken, it uses another and does not touch it');
+  f := WriteVerified(d + '/h.jpg', B('z'), H16('z'), omDelete, False, oc);
+  Check(f.Ok and (ReadText(d + '/h.jpg') = 'z') and (ReadText(d + '/.pja-tmp0') = 'taken')
+     and not Exists(d + '/.pja-tmp1'), '  and without overwrite too');
   ForceDirectories(d + '/folder.jpg');
   f := WriteVerified(d + '/folder.jpg', B('x'), H16('x'), omDelete, True, oc);
   Check((not f.Ok) and DirectoryExists(d + '/folder.jpg'), 'over a directory, not even with overwrite: ' + f.Text);
@@ -185,6 +189,18 @@ begin
   Check(f.Ok, 'writes');
   Check(ReadText(outside + '/victim.txt') = 'original', 'outside intact');
 
+  Writeln('--- a name near NAME_MAX: the temporary is short, not <name>.pja-tmpN');
+  d := TempDir('long');
+  q := StringOfChar('n', 250) + '.jpg';
+  f := WriteVerified(d + '/' + q, B('l'), H16('l'), omDelete, False, oc);
+  Check(f.Ok and (ReadText(d + '/' + q) = 'l'), 'without overwrite: ' + f.Text);
+  f := WriteVerified(d + '/' + q, B('m'), H16('m'), omDelete, True, oc);
+  Check(f.Ok and (ReadText(d + '/' + q) = 'm'), 'with overwrite: ' + f.Text);
+  f := WriteVerified(d + '/' + q, B('k'), H16('other'), omKeep, False, oc);
+  Check(f.Ok and (oc.kind = ocKept) and (oc.path = d + '/pja.corrupt') and (ReadText(d + '/pja.corrupt') = 'k'),
+     'keep: <name>.corrupt is too long, pja.corrupt beside it');
+  Check(not Exists(d + '/.pja-tmp0'), 'no temporary left');
+
   Writeln('--- corrupt_name_taken_by_a_dangling_link');
   d := TempDir('corrupt_link');
   MakeLink(d + '/does_not_exist', d + '/g.jpg.corrupt');
@@ -198,6 +214,6 @@ begin
 
   Writeln;
   Writeln(cells, ' cells, ', failures, ' failures');
-  {$ifdef MSWINDOWS} if (failures > 0) or (cells < 30) then Halt(1);
-  {$else} if (failures > 0) or (cells < 39) then Halt(1); {$endif}
+  {$ifdef MSWINDOWS} if (failures > 0) or (cells < 32) then Halt(1);
+  {$else} if (failures > 0) or (cells < 49) then Halt(1); {$endif}
 end.

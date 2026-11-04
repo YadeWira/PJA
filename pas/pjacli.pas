@@ -44,12 +44,16 @@ type
     in parallel, and their lines come out in the order of the inputs. }
   TFileJob = record
     name, outText, errText: string;
+    index: Integer;
     failed, done: Boolean;
   end;
   PFileJob = ^TFileJob;
 
 threadvar
   CurJob: PFileJob;
+
+var
+  jobs: array of TFileJob;
 
 var
   { the arguments, in UTF-8 on every system }
@@ -303,16 +307,72 @@ begin
   else Result := IntToStr(n) + ' B';
 end;
 
+var
+  { every output this run has taken, and every input, by PathKey; Objects
+    is the job's index }
+  outKeys, inKeys: TStringList;
+  claimLock: TRTLCriticalSection;
+
+{ The same file for the same text: absolute, without . and .., and on
+  Windows without case. Links are not resolved. }
+function PathKey(const p: string): string;
+begin
+  Result := ExpandFileName(p);
+  {$ifdef MSWINDOWS} Result := UTF8Encode(WideLowerCase(UTF8Decode(Result))); {$endif}
+end;
+
+function NewKeyList: TStringList;
+begin
+  Result := TStringList.Create;
+  Result.CaseSensitive := True;
+  Result.UseLocale := False;
+  Result.Duplicates := dupAccept;
+  Result.Sorted := True;
+end;
+
+{ Takes path as the output of the current job. Without this, with -f two
+  inputs with the same output (a.jpg and a.jpeg, or the same name from two
+  folders with --output-dir) both said they were written, and only the last
+  one was there; one could also replace another job's input before it was
+  read. False, and the job failed, if the path is another job's. }
+function Claim(const path: string): Boolean;
+var key: string; i, j, k: Integer;
+begin
+  key := PathKey(path); k := CurJob^.index;
+  Result := False;
+  EnterCriticalSection(claimLock);
+  try
+    if outKeys.Find(key, i) then begin
+      j := PtrInt(outKeys.Objects[i]);
+      if j <> k then begin Fail(path + ': also the output of ' + jobs[j].name + ' in this run'); Exit; end;
+      Exit(True);
+    end;
+    if inKeys.Find(key, i) then begin
+      while (i > 0) and (inKeys[i - 1] = key) do Dec(i);
+      while (i < inKeys.Count) and (inKeys[i] = key) do begin
+        if PtrInt(inKeys.Objects[i]) <> k then begin Fail(path + ': also an input of this run'); Exit; end;
+        Inc(i);
+      end;
+    end;
+    outKeys.AddObject(key, TObject(PtrInt(k)));
+    Result := True;
+  finally
+    LeaveCriticalSection(claimLock);
+  end;
+end;
+
 { Writes data under path, which must verify against `expected`. }
 function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
 var r: TFsResult; o: TOutcome; om: TOnMismatch;
 begin
   Result := False;
-  if dryRun then Exit(True);
+  if not Claim(path) then Exit;
+  { -n checks this too: it said yes to what the real run then refused }
   if not force and (FileExists(path) or DirectoryExists(path)) then begin
     Fail(path + ': already exists (-f to replace it)');
     Exit;
   end;
+  if dryRun then Exit(True);
   if keepCorrupt then om := omKeep else om := omDelete;
   r := WriteVerified(path, data, expected, om, force, o);
   if not r.Ok then begin
@@ -397,7 +457,6 @@ begin
 end;
 
 var
-  jobs: array of TFileJob;
   nextJob, nextPrint: LongInt;
   printLock: TRTLCriticalSection;
 
@@ -405,6 +464,8 @@ procedure RunJob(k: Integer);
 begin
   CurJob := @jobs[k];
   try
+    { failed before starting: its output is another input's }
+    if not jobs[k].failed then
     case command of
       cmCompress: CompressOne(jobs[k].name);
       cmExtract: ExtractOne(jobs[k].name);
@@ -454,18 +515,36 @@ begin
   ReleaseThreadModels;
 end;
 
-var i, workers: Integer; pool: array of TWorker;
+var i, workers: Integer; pool: array of TWorker; path: string;
 begin
+  { On Unix only '/' separates: the RTL's ExtractFileName and ChangeFileExt
+    also cut at '\', a plain character there, so 'a\x.jpg' and 'b\x.jpg'
+    both went to x.pja. (The extension kept is the same: one with '\' is
+    not one the format takes.) }
+  {$ifndef MSWINDOWS} AllowDirectorySeparators := ['/']; {$endif}
   errors := 0;
   ParseArgs;
   if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
     UsageError('-o with several inputs has to be a directory');
   jobs := nil;
   SetLength(jobs, inputs.Count);
+  InitCriticalSection(claimLock);
+  outKeys := NewKeyList; inKeys := NewKeyList;
   for i := 0 to inputs.Count - 1 do begin
     jobs[i] := Default(TFileJob);
     jobs[i].name := inputs[i];
+    jobs[i].index := i;
+    inKeys.AddObject(PathKey(inputs[i]), TObject(PtrInt(i)));
   end;
+  { a's outputs follow from the names alone: taken here, in the order of the
+    inputs, so it is always the later one that fails. x's come from inside
+    the .pja, and are taken when written. }
+  if command = cmCompress then
+    for i := 0 to High(jobs) do begin
+      CurJob := @jobs[i];
+      path := OutputPath(jobs[i].name, ChangeFileExt(ExtractFileName(jobs[i].name), '.pja'));
+      Claim(path);
+    end;
   { the threads go to files first (a photo is usually one band), and what
     is left to each file's bands }
   workers := threads;
@@ -479,6 +558,7 @@ begin
   Work;
   for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
   DoneCriticalSection(printLock);
+  DoneCriticalSection(claimLock);
   if errors > 0 then begin
     if inputs.Count > 1 then Writeln(StdErr, 'pja: ', errors, ' of ', inputs.Count, ' files failed');
     Halt(1);

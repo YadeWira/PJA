@@ -13,10 +13,10 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `-f`, `--force` | replace an existing output, only with something that verified |
 | `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (a photo is usually one band). Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
-| `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
+| `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` (`pja.corrupt` beside it if that name would be too long) |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, and the `.pja` is the same byte for byte |
 | `--fast` | `a`: accepted for older scripts, and changes nothing: since 0.1.0 the model `a` uses (stream version 7) is as fast as the fast model was and as small as the full one (`CODEC.md`). `x` reads every version |
-| `-n`, `--dry-run` | do everything but write |
+| `-n`, `--dry-run` | do everything but write: an output that exists, or that two inputs share, fails as it would for real |
 | `-q`, `--quiet` | only errors |
 | `--` | everything after it is a file, even if it starts with a dash |
 
@@ -33,10 +33,15 @@ stderr.
 - `x` does, in order: validate the format; refuse a declared size above
   `--max-output` **before** decoding; decode with that size as the cap;
   check the size **and** the hash; and only then write.
-- Writing creates the file without following links. With `-f`, it goes to a
-  temporary file and is renamed on top: what was there is only replaced by
-  something that verified. Nothing that fails deletes a file this run did not
-  write.
+- Writing creates the file without following links, always as a temporary
+  in the same directory (`.pja-tmpN`) that takes the output's name only once
+  it is complete: a run cut short (Ctrl-C, a kill, a full disk) can leave a
+  `.pja-tmpN` behind, never a truncated file under the output's name.
+  Without `-f` the name is only taken if it is still free; with `-f` the
+  temporary is renamed on top: what was there is only replaced by something
+  that verified. Nothing that fails deletes a file this run did not write.
+  (On a file system without hard links, such as FAT, it is written in place
+  when there is no `-f`.)
 
 ## Choices, and why
 
@@ -50,6 +55,14 @@ measured against the old spelling.
   one input, a destination that is not a directory is an error**: without
   that guard, `pja a *.jpg -o one.pja` would write every input over the same
   file and the last one would win.
+- **Two inputs with the same output in one run: the second fails**, with or
+  without `-f` (`a.jpg` and `a.jpeg`, `d1/p.jpg` and `d2/p.jpg` with
+  `--output-dir`, the same file twice), naming the input that took it; so
+  does an output that is another input of the run. For `a` it is always the
+  later input; for `x`, whose names come from inside the `.pja`, whichever
+  finishes second.
+- **On Unix a backslash is part of the name**, not a separator:
+  `a\x.jpg` gives `a\x.pja`.
 - **Values with `=` or a space, never glued**: `-th 4` or `--threads=4`. The
   old glued `-th4` is refused naming the right spelling.
 - **There is no bare `-t`.** `-th` is two letters; with no `-t`, it can never
@@ -78,6 +91,7 @@ measured against the old spelling.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (51 cells: round trips, existing outputs, links,
-damage, `--keep-corrupt`, `--max-output`, threads, every usage error), and
+Tested by `pas/tests/cli.sh` (64 cells: round trips, existing outputs, links,
+damage, `--keep-corrupt`, `--max-output`, threads, outputs shared by two
+inputs, a write cut short, every usage error), and
 on Windows by `pas/tests/windows.ps1` (28 cells, the wildcards among them).
