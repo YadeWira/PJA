@@ -23,11 +23,15 @@ FPC=${FPC:-fpc}
 CC=${CC:-cc}
 mkdir -p "$OUT/c" "$OUT/u"
 OUT=$(apath "$OUT")
-case "$CC $FPC" in
-  *mingw*|*-Twin*) PIC=; EXT=dll ;;
-  *) PIC=-fPIC; EXT=so ;;
-esac
-[ "$(uname -s)" = Darwin ] && EXT=dylib
+# Windows: a native build (MSYS, Git Bash: by uname, as .github/test.sh)
+# or a cross one
+WIN=; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; esac
+case "$CC $FPC" in *mingw*|*-Twin*) WIN=1 ;; esac
+if [ -n "$WIN" ]; then PIC=; EXT=dll; else PIC=-fPIC; EXT=so; fi
+# macOS: the install name is @rpath/pja.dylib, not the path it was built
+# at, so that a program linked against it finds it by its own rpath
+LDN=
+if [ -z "$WIN" ] && [ "$(uname -s)" = Darwin ]; then EXT=dylib; LDN="-k-install_name -k@rpath/pja.dylib"; fi
 # shellcheck disable=SC2086
 CC="$CC" "$PAS/build_c.sh" "$OUT/c" $PIC
 FLAGS="-O3 -fwrapv -ffp-contract=off -fno-stack-protector"
@@ -50,6 +54,6 @@ echo "units from $PAS, objects in $OUT/c"
 # MSYS would take "-Fud:/..." for a list of paths (the colon) and rewrite
 # it: no conversion for FreePascal's arguments
 # shellcheck disable=SC2086
-MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' $FPC -O3 -dPJA_FAST $CG -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja.$EXT" "$HERE/pjalib.pas" \
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' $FPC -O3 -dPJA_FAST $CG $LDN -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja.$EXT" "$HERE/pjalib.pas" \
   > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
 echo "$OUT/pja.$EXT"

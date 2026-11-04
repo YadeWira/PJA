@@ -37,8 +37,10 @@ cmp -s "$OUT/corrupt_c.txt" "$OUT/corrupt_pas.txt" || { echo "FAIL: other verdic
 echo "== layer 1, JPEG-LS: samples"
 "$OUT/test_jls" "$PJA/tests/jls" 8 | tail -1
 "$OUT/test_jpeg_corrupt" "$PJA/tests/jls" 256 | tail -1
+# ${dirs[@]+...}: bash before 4.4 (macOS's 3.2) takes an empty array for
+# an unset one under set -u
 IFS=: read -ra dirs <<< "${JPEG_CORPUS:-}"
-for d in "${dirs[@]}"; do "$OUT/test_jpeg" "$d" 1 | tail -1; done
+for d in ${dirs[@]+"${dirs[@]}"}; do "$OUT/test_jpeg" "$d" 1 | tail -1; done
 
 echo "== layer 2: arithmetic coder"
 "$OUT/test_arith" | tail -1
@@ -65,8 +67,8 @@ SAMP=$OUT/sampling; rm -rf "$SAMP"; mkdir -p "$SAMP"
 python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y13c12.jpg" 100 200 13,12,12 1 > /dev/null
 python3 "$PAS/tests/mkjpg_sampling.py" "$SAMP/y22c11.jpg" 150 200 22,11,11 2 > /dev/null
 PJA_BANDS_REVERSE=1 PJA_TEST_V7=1 "$OUT/test_codec" "$SAMP" 2 | tail -2
-for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -2; done
-for d in "${dirs[@]}"; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
+for d in ${dirs[@]+"${dirs[@]}"}; do "$OUT/test_codec" "$d" 1 | tail -2; done
+for d in ${dirs[@]+"${dirs[@]}"}; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
 
 echo "== the fast build (PJA_FAST, with and without asm) writes the same streams as the reference"
 FAST=$OUT/fast; PLAIN=$OUT/plain; mkdir -p "$FAST" "$PLAIN"
@@ -77,8 +79,8 @@ $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/dump_st
 # version 7 with the C part built without SSE2 (and so without its SSE4.1 copy)
 $FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/cplain" -FU"$PLAIN" -FE"$PLAIN" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "${dirs[@]}" "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
-for d in "${dirs[@]}"; do SRC_DIRS+=("v7:$d"); done
+SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" ${dirs[@]+"${dirs[@]}"} "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
+for d in ${dirs[@]+"${dirs[@]}"}; do SRC_DIRS+=("v7:$d"); done
 for d in "${SRC_DIRS[@]}"; do
   # fast:DIR = the same, with the fast model; v7:DIR, with stream version 7's
   unset PJA_TEST_FAST PJA_TEST_V7; tag=

@@ -81,15 +81,18 @@ jobs:
         shell: bash
         run: |
           V=${TAG#v}; P=${{ matrix.platform }}
+          # LIB: libpja's name; PLGF: the plugin's, as zpaq-std loads it
+          # (codecs/pja.dll on Windows, codecs/pja.so everywhere else, macOS
+          # included)
           case $P in
-            windows-*) EXE=.exe; LIB=pja.dll ;;
-            macos-*) EXE=; LIB=pja.dylib ;;
-            *) EXE=; LIB=pja.so ;;
+            windows-*) EXE=.exe; LIB=pja.dll; PLGF=pja.dll ;;
+            macos-*) EXE=; LIB=pja.dylib; PLGF=pja.so ;;
+            *) EXE=; LIB=pja.so; PLGF=pja.so ;;
           esac
           CLI=pja-$V-$P; PLG=pja-$V-zpaqstd-plugin-$P; LIBP=pja-$V-lib-$P
           mkdir -p dist "$CLI" "$PLG" "$LIBP"
           cp build/rel/pja$EXE README.md LICENSE NOTICE doc/CLI.md "$CLI/"
-          cp build/rel/pja_plugin* "$PLG/$LIB"
+          cp build/rel/pja_plugin* "$PLG/$PLGF"
           cp LICENSE NOTICE "$PLG/"
           # libpja: the C library and 7-Zip / 7-Zip-zstd plugin
           cp build/rel/lib/$LIB pas/lib/pja.h doc/LIBRARY.md LICENSE NOTICE "$LIBP/"
@@ -105,9 +108,32 @@ jobs:
         with:
           name: rel-${{ matrix.platform }}
           path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-${{ matrix.platform }}
+          path: hash.txt
+
+  # the codec's streams the same bytes on every platform, as CI's last job
+  # checks: the tag's own CI run may have been cancelled by a newer push
+  determinism:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-*
+      - name: Compare the streams' hashes
+        run: |
+          for f in hash-*/*; do echo "$f: $(cat "$f")"; done
+          n=$(cat hash-*/* | sort -u | wc -l)
+          if [ "$n" -ne 1 ]; then
+            echo "the codec's streams differ between platforms" >&2
+            exit 1
+          fi
+          echo "the same streams on every platform"
 
   publish:
-    needs: build
+    needs: [build, determinism]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -123,7 +149,8 @@ jobs:
       - name: Upload to the release
         run: |
           gh release view "$TAG" > /dev/null 2>&1 \
-            || gh release create "$TAG" --verify-tag --title "PJA ${TAG#v}" --notes "PJA ${TAG#v}."
+            || gh release create "$TAG" --verify-tag --title "PJA ${TAG#v}" \
+                 --notes "PJA ${TAG#v}. The Linux builds need glibc 2.34 or later (Debian 12, Ubuntu 22.04, RHEL 9 and newer)."
           gh release upload "$TAG" dist/* --clobber
           mkdir all
           gh release download "$TAG" --dir all --pattern 'pja-*'

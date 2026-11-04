@@ -37,23 +37,40 @@ $FPC -O3 -dPJA_FAST $PIC -Fupas -Fipas -Fupas/plugin -Fipas/plugin -Fo"$OUT/pc" 
 echo "== libpja"
 sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; echo "FAIL: libpja did not build"; exit 1; }
 LIBF=$(tail -1 "$OUT/lib.log")
-RP=; case "$(uname -s)" in Linux) RP="-Wl,-rpath,$OUT/lib" ;; esac
+# the test finds the library by its rpath alone (no DYLD_LIBRARY_PATH: on
+# macOS the install name a program records is @rpath/pja.dylib, not the
+# path the library was built at)
+RP=; case "$(uname -s)" in Linux|Darwin) RP="-Wl,-rpath,$(dirname "$LIBF")" ;; esac
+if [ "$(uname -s)" = Darwin ]; then
+  ID=$(otool -D "$LIBF" | tail -1)
+  [ "$ID" = "@rpath/pja.dylib" ] || { echo "FAIL: libpja's install name is $ID"; exit 1; }
+fi
 # shellcheck disable=SC2086
 ${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $RP
-DYLD_LIBRARY_PATH="$OUT/lib" "$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* README.md > "$OUT/lib/test.txt" \
+"$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* README.md > "$OUT/lib/test.txt" \
   || { cat "$OUT/lib/test.txt"; echo "FAIL: libpja's test"; exit 1; }
 tail -4 "$OUT/lib/test.txt"
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
 # plugin in its Codecs folder (the same word size as the library), an
-# archive written and extracted
-case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN= ;; *) SEVEN=/usr/lib/7zip ;; esac
-if [ -n "$SEVEN" ] && [ -f "$SEVEN/7z.so" ] && [ -x "$SEVEN/7z" ]; then
-  Z="$OUT/7z"; rm -rf "$Z"; cp -r "$SEVEN" "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
+# archive written and extracted. Linux: 7-Zip's package; Windows: the
+# 7-Zip installed (64-bit on the runners: the x64 build only)
+case "$LIBF" in
+  *.dll) SEVEN="/c/Program Files/7-Zip"; SLIB=7z.dll
+    [ -f "$SEVEN/$SLIB" ] || { S=$(command -v 7z 2> /dev/null) && SEVEN=$(dirname "$S"); } || SEVEN= ;;
+  *.so) SEVEN=/usr/lib/7zip; SLIB=7z.so ;;
+  *) SEVEN=; SLIB= ;;
+esac
+case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN= ;; esac
+if [ -z "$SEVEN" ] || [ ! -f "$SEVEN/$SLIB" ] || [ ! -f "$SEVEN/7z$EXE" ]; then
+  echo "7-Zip: none of the library's word size here, not tried"
+else
+  Z="$OUT/7z"; rm -rf "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
+  cp "$SEVEN/7z$EXE" "$SEVEN/$SLIB" "$Z/"
   cp "$LIBF" "$Z/Codecs/"
   cp tests/jpg/* tests/jls/* README.md "$OUT/7in/"
-  "$Z/7z" i | grep -q '37F01 PJA' || { echo "FAIL: 7-Zip does not list PJA"; exit 1; }
-  (cd "$OUT/7in" && "../7z/7z" a -bso0 -bsp0 -m0=PJA -m1=LZMA2 ../a.7z .)
-  "$Z/7z" x -bso0 -bsp0 -o"$OUT/7x" "$OUT/a.7z"
+  "$Z/7z$EXE" i | grep -q '37F01 PJA' || { echo "FAIL: 7-Zip does not list PJA"; exit 1; }
+  (cd "$OUT/7in" && "../7z/7z$EXE" a -bso0 -bsp0 -m0=PJA -m1=LZMA2 ../a.7z .)
+  "$Z/7z$EXE" x -bso0 -bsp0 -o"$OUT/7x" "$OUT/a.7z"
   for f in "$OUT"/7in/*; do
     cmp -s "$f" "$OUT/7x/$(basename "$f")" || { echo "FAIL: 7-Zip: $(basename "$f") does not come back"; exit 1; }
   done
