@@ -108,6 +108,8 @@ procedure UnparkThreadModels;
   then leaves out of the stream (a bit says it did) and puts back when
   decoding; nil for every other file. Both sides set the same. }
 procedure SetGivenTables(const t: TBytes);
+{ This thread's, for a thread that codes for it (pjacodec's helpers) }
+function GetGivenTables: TBytes;
 
 type
   { What version 7's C code (pjav7c.c) reads: the counters and the mixers'
@@ -658,6 +660,11 @@ threadvar
 procedure SetGivenTables(const t: TBytes);
 begin
   GivenTables := t;
+end;
+
+function GetGivenTables: TBytes;
+begin
+  Result := GivenTables;
 end;
 
 function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean; forward;

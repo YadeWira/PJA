@@ -2286,3 +2286,69 @@ Extracting is untouched. A mutant that changes one symbol in the symbol
 model's encoder is caught by the live check (and then by `VerifyStream`)
 at every thread count; with threads refused (test_threads' scarce
 BeginThread) the same streams come out.
+
+## A large file's header streams on threads (05/11/2026)
+
+With one file and threads to spare, the raw model's passes ran one after
+the other on the caller while the threads waited. A camera file with large
+APP segments and a thumbnail (corpus 0056.jpg, 4.7 MB, 1.55 MB raw) coded
+its raw bytes three times in series: the host's header stream
+(`HeadBytes(hj)`), the file's own (`HeadBytes(j)`, only to see whether the
+parts pay) and the verify's `DecodeHead`. Now, with two threads or more:
+
+- **`CompressAt`**: once the parts are found, the file's own header stream
+  is coded on a thread of its own (`StartHead`) while the caller builds the
+  host, rebuilds it and codes the host's. Only when it is needed (the
+  same `whole * 4 < size or size < 1 MB` rule) and only for 64 KB of raw
+  bytes or more (a thread and its fresh 16 MB of raw tables cost a few
+  milliseconds). The thread takes the caller's `GivenTables` (libpja's
+  tables-less JPEGs) and releases its models at the end; with one thread,
+  or none to be had, it runs on the caller as before.
+- When the parts do not pay after all, `CompressJpeg` is given that header
+  stream instead of coding the same bytes a second time.
+- **`CompressLive`**: the first round's band encoders start before the
+  header stream is coded and decoded (they need only `j`); the readers
+  start after `DecodeHead`. If it fails, the encoders run to their end (a
+  live stream keeps all it is given), are waited for, and the file fails
+  as before. `HeadBytes` copies the scans before `CodeScanBits` writes their
+  pad bits back, so the encoders read a `j` nobody writes.
+
+Every stream is the same: the codec suite (4-thread builds against the
+reference), `.github/test.sh`'s list (3387e58d...), the `.pja` of the
+repository's samples and of 14 raw-heavy corpus files at -th 1, 2 and 4,
+also with the helper forced on every file (`HELPER_RAW = 0`, whose codec
+suite passes too), and under TasksMax 1, 2, 3 and 5. The mutants (a
+reader off by one bit, an encoder that raises mid-band, and a
+`DecodeHead` that fails while the encoders run) are caught on every file
+that reaches `CompressLive`, without a hang and without a wrong `.pja`.
+
+Wall time, cores 28-31, A (0.9.0) and B alternated, best of 3 or 4 (the
+host's load went from 10 to 90 during the runs, so compare within a row):
+
+| file | -th | compress A | compress B | |
+|---|---|---|---|---|
+| 0056.jpg | 2 | 5.32 s | 4.77 s | -10% |
+| 0056.jpg | 4 | 6.35 s | 4.82 s | -24% |
+| 0047.jpg (1.16 MB raw) | 2 | 3.97 s | 3.30 s | -17% |
+| 0047.jpg | 4 | 4.22 s | 3.34 s | -21% |
+| 0046.jpg (593 KB raw) | 2 | 1.88 s | 1.63 s | -13% |
+| 0046.jpg | 4 | 2.65 s | 2.22 s | -16% |
+| 0049.jpg (571 KB raw) | 2 | 2.56 s | 1.80 s | -30% |
+| 0043.jpg (126 KB raw) | 2 | 2.41 s | 2.44 s | same |
+| Image40.jpg (24 MP, no raw) | 2 | 1.22 s | 1.22 s | same |
+
+Extract does not change (no code of it did). Ten b151 photos one at a
+time at -th 4: 5.93 / 5.73 s, extract 3.23 / 3.21 s; the same ten as one
+run (one thread per file, no helper): 2.09 / 2.07 s; eight arithmetic
+files: 0.947 / 0.949 s. The `CompressLive` overlap alone (`StartHead`
+off) gives nothing measurable: a photo with an ICC profile of 557 KB and
+no thumbnail, 2.14 / 2.33 s at -th 2 and 1.71 / 1.68 s at -th 4, inside
+the noise. Only the first round's encoders overlap the header stream's
+two passes, and they finish first. It stays because it costs nothing
+and the mutants still catch every failure. Every raw-heavy file of the
+corpus carries a thumbnail, so the parts' path is where the gain is.
+
+Not done: the host's bands could also be encoded while the two header
+streams are coded (they are the same bands with or without the parts),
+and the verify's `DecodeHead` (`SameAfter`, a whole `Decompress`) is
+still serial, 15.7% of 0056's instructions.
