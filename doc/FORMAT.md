@@ -1,5 +1,7 @@
 # PJA format
 
+Stable since 0.9.0: `doc/STABILITY.md`.
+
 **A `.pja` is ONE compressed file**: a JPEG or a JPEG-LS file, as the codec
 stream (`doc/CODEC.md`), together with the size, hash and extension of the
 original. The extension is `.pja`; dispatch is by magic, not by extension.

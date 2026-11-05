@@ -1,5 +1,7 @@
 # The PJA codec
 
+Its streams (versions 5, 6 and 7) are stable since 0.9.0: `doc/STABILITY.md`.
+
 Its own format, written from scratch in FreePascal. It is **not** compatible
 with packJPG's `.pjg`: packJPG is kept only as a yardstick for compression
 ratio. No encryption.

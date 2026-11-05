@@ -21,6 +21,10 @@ output's name unless it verified: compressing decompresses the result and
 compares it with the input before writing, and extracting checks the size
 and the BLAKE3 hash stored in the `.pja`.
 
+The formats are stable since 0.9.0: a `.pja`, a 7-Zip archive with PJA or
+a zpaq-std block written today opens in every later release
+([doc/STABILITY.md](doc/STABILITY.md)).
+
 PJA belongs to a family of recompressors that share that rule: the original
 comes back byte for byte, and nothing is written unless it verified.
 
@@ -191,7 +195,8 @@ and 7-Zip plugin][wLib],
 [building and testing][wBuild], [how it works][wHow], the [source
 layout][wLayout], [FreePascal pitfalls][wFpc] and the [release
 history][wRel]. The codec's full notes are in [doc/CODEC.md](doc/CODEC.md),
-the file format in [doc/FORMAT.md](doc/FORMAT.md).
+the file format in [doc/FORMAT.md](doc/FORMAT.md), what does not change in
+[doc/STABILITY.md](doc/STABILITY.md).
 
 ## Building
 

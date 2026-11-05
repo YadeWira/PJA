@@ -1,5 +1,8 @@
 # libpja: PJA as a library and a 7-Zip plugin
 
+The filter's streams and the C interface are stable since 0.9.0:
+`doc/STABILITY.md`.
+
 `libpja` is one shared object (`pja.so`, `pja.dll`, `pja.dylib`) that does
 two jobs:
 
