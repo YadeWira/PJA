@@ -2,9 +2,24 @@
 
 Stable since 0.9.0: `doc/STABILITY.md`.
 
-**A `.pja` is ONE compressed file**: a JPEG or a JPEG-LS file, as the codec
-stream (`doc/CODEC.md`), together with the size, hash and extension of the
+**A `.pja` is ONE compressed file**: a JPEG, a JPEG-LS file or, since
+0.9.5, a file of the JPEG 2000 family, as the codec stream
+(`doc/CODEC.md`), together with the size, hash and extension of the
 original. The extension is `.pja`; dispatch is by magic, not by extension.
+
+The files PJA takes are usually called (the extension each keeps, as it
+was written):
+
+| family | extensions | codec stream |
+|---|---|---|
+| JPEG | `jpg`, `jpeg`, `jpe`, `jfif`, `mpo`... | 5, 6, 7 |
+| JPEG-LS | `jls` | 5 |
+| JPEG 2000 (0.9.5) | `jp2`, `j2k`, `j2c`, `jpc`, `jpx`, `jpf`, `jpm`, `mj2`, `jph`, `jhc` | 8 |
+
+Any other name works too: the content decides, and a `.pja` without an
+extension kept is extracted as `.jpg`, `.jls`, `.mpo`, or for JPEG 2000
+`.j2k` (a raw codestream) or `.jp2`, `.jpx`, `.jpm`, `.mj2`, `.jph` (by the
+brand of its ftyp box).
 
 What the `.pja` adds over the bare codec stream, and why each thing:
 
@@ -92,6 +107,7 @@ Each row is a case with its expected result, and it is in the tests.
 | 0 to 7 bytes; a header with less than a whole descriptor | `ShortFile` |
 | wrong magic, garbage, zeros | `NotPja` |
 | version 5 or higher | `FutureVersion(n)` |
+| (the codec stream's own version, 9 or higher; `test_versions`) | `Codec(FutureVersion)` |
 | versions 0, 1 and 2 | `OldVersion(n)` |
 | any flag but bit 0 | `UnknownFlag` |
 | the stored flag on a codec stream (its length is not `orig_size`) | `BadOrigSize` |

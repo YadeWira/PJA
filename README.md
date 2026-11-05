@@ -171,6 +171,15 @@ lossless JPEG, and JPEG-LS, along with the oddities real encoders leave.
 Anything else goes through as bytes, and `pja a` says why
 ([details][wHandles]).
 
+**JPEG 2000** (JP2, JPX, JPM, Motion JPEG 2000, JPH and raw codestreams:
+`.jp2`, `.j2k`, `.j2c`, `.jpx`, `.mj2`...) is taken too since 0.9.5, in a
+stream of its own, but **not yet recompressed**: this first stage finds
+the file's codestreams and keeps them as bytes, through the same model as
+the rest of a file's bytes, which saves about half a percent. Modelling
+the codestreams themselves comes in the next stages, and the `.pja` files
+written now stay readable. The 7-Zip plugin and the zpaq-std codecs leave
+JPEG 2000 files as they are, for now.
+
 ## Install
 
 Download the command for your platform from the [latest release][relLink]:

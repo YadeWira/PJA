@@ -105,6 +105,18 @@ A 02 record comes just before the first 03 record that needs other tables
 than the decoder has. A decoder of 0.4.0 or before stops at 02 or 03 with
 a data error.
 
+**Tags 04 to FE are reserved** for records of later releases. A decoder
+that meets one stops there: with `PJA_E_VERSION` since 0.9.5 (a newer PJA
+wrote the stream), with a data error (`PJA_E_DATA`) before; it never skips
+the record nor reads it as something else, and what came before it may
+have been written already. The same holds for a `PJAF` version past 2, a
+`PJAB` version past 1, and a file record whose codec stream is of a
+version the decoder does not know (`doc/STABILITY.md`).
+
+The filter does not look for JPEG 2000 files yet (0.9.5 takes them in
+`pja_compress` and the command only): they stay among the raw bytes, for
+the compressor after it.
+
 Raw bytes are cut into records of 262,144 bytes counted from the end of the
 last file, so the stream depends only on the input: not on how it was read,
 not on the number of threads.
@@ -149,19 +161,31 @@ and no exception or signal leaves the library: errors are return codes.
 | function | does |
 |---|---|
 | `pja_version()` | `"pja 0.9.0"` |
-| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG or JPEG-LS file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
-| `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash |
+| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG, JPEG-LS or (0.9.5, through the raw bytes' model for now) JPEG 2000 file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
+| `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash; `PJA_E_VERSION` for one a newer PJA wrote |
 | `pja_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
 | `pja_filter_decode(read, ctx, write, ctx, threads)` | its stream → the bytes |
 | `pja_filter2_encode(read, ctx, write_a, ctx, write_b, ctx, threads)` | version 2: two streams, A for the archiver's compressor and B (PJA's data, deduplicated) to store as it is |
 | `pja_filter2_decode(read_a, ctx, read_b, ctx, write, ctx, threads)` | both streams → the bytes |
 | `pja_free(p)` | frees what the library returned |
 
+Return codes: `PJA_OK` (0), `PJA_E_NOT_TAKEN` (1), `PJA_E_DATA` (2:
+damaged, or not PJA's), `PJA_E_MEMORY` (3: out of memory or over a size
+limit), `PJA_E_READ` (4) and `PJA_E_WRITE` (5: the filter's callbacks),
+`PJA_E_ARG` (6), and since 0.9.5 `PJA_E_VERSION` (7): the input was
+written by a newer PJA, a `.pja` or codec stream version, a version 8
+codestream mode or flag, a filter version or record this release does not
+know, where 0.9.0 said `PJA_E_DATA`. More codes may come; a caller treats
+one it does not know as an error.
+
 `pas/lib/test_lib.c` is the test, and an example: each file through
 `pja_compress`/`pja_decompress`, all of them in one stream with bytes
 between them through the filter, read 1 byte to 1 MiB at a time (the same
 stream every time), the stream twice over through version 2 (the second
-copy deduplicated), and damaged and cut filter streams.
+copy deduplicated), damaged and cut filter streams, and what a newer PJA
+would write (a `.pja` of version 5, codec streams of versions 9 to 255,
+`PJAF` 03, `PJAB` 02, records 04 to FE, a file record of a later codec
+stream): `PJA_E_VERSION` every time.
 
 ## The 7-Zip plugin
 
@@ -187,6 +211,10 @@ bytes) goes to the next coder, its second (PJA's data) straight into the
 archive; 7-Zip binds them that way by itself. `PJA1` is version 1, one
 stream, what 0.2.0 wrote as `PJA`: it is there so that those archives
 open.
+
+A stream a newer PJA wrote (`PJA_E_VERSION`) comes out of the plugin as
+`E_NOTIMPL`, which 7-Zip reports as "Unsupported Method" for the block's
+files, and damaged data as "Data Error", as before (7-Zip 25.01, 0.9.5).
 
 `-mmt` sets the filter's threads when compressing; extracting, 7-Zip
 gives its thread count only to the first coder of the chain that takes one

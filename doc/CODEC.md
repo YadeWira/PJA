@@ -1,6 +1,7 @@
 # The PJA codec
 
-Its streams (versions 5, 6 and 7) are stable since 0.9.0: `doc/STABILITY.md`.
+Its streams (versions 5, 6 and 7) are stable since 0.9.0, version 8 (the
+JPEG 2000 family) since 0.9.5: `doc/STABILITY.md`.
 
 Its own format, written from scratch in FreePascal. It is **not** compatible
 with packJPG's `.pjg`: packJPG is kept only as a yardstick for compression
@@ -2093,3 +2094,151 @@ A last round of checks on what 0.9.0 fixes (`doc/STABILITY.md`):
   verify or a stream that does not rebuild), `pja a` on 18,348 damaged
   JPEG and JPEG-LS files, `7z t` on 15,994 damaged archives: no crash, no
   hang, nothing taken that did not come back.
+
+## JPEG 2000, stage A: stream version 8 (05/11/2026)
+
+The first stage of JPEG 2000 for 0.9.5: the container, not yet the model.
+A file of the JPEG 2000 family is taken as a stream of its own version,
+8, whose layout leaves room for the stages after it; in this stage its
+bytes go through the raw bytes' model (CodeRaw), as stream version 6's
+BYTES does for a JPEG PJA cannot take, and PJA saves what that model
+saves on them: a fraction of a percent on real files (below). The
+research behind it (a model of the code-blocks' decisions, about 8% on
+real codestreams) is for the later stages.
+
+**What is taken** (`pjaj2k.pas`): a raw codestream (`.j2k`, `.j2c`,
+`.jpc`: SOC and SIZ, `FF 4F FF 51`, first) and a file of boxes that
+starts with the JPEG 2000 signature box (`00 00 00 0C 6A 50 20 20 0D 0A
+87 0A`): JP2, JPX (`.jpx`, `.jpf`), JPM, Motion JPEG 2000, JPH (HTJ2K in
+a JP2-like file). Recognised by its first bytes, not by its extension.
+The box tree is walked: each box's length (LBox, XLBox when it is 1, to
+the end of the box that holds it when it is 0), into the superboxes of
+JP2, JPX and JPM (jp2h, res, uinf, asoc, jpch, jplh, cgrp, comp, drep,
+page, pcol, lobj, objc) and those of the ISO base media file format that
+Motion JPEG 2000 is built on (moov, trak, mdia, minf, stbl, dinf, edts,
+udta, mvex, moof, traf, and mdat, which holds an MJ2's frames as jp2c
+boxes). A codestream is the contents of a jp2c box that start with SOC
+and SIZ; a raw codestream runs from 0 to its EOC, found by walking its
+main header's segments and its tile-parts (Psot), or to the end of the
+file when they do not add up. Bounded: 16 levels of superboxes, 2^20
+boxes, 16,384 codestreams kept (any more stay among the other bytes); a
+box that does not fit where it is ends the walk at its level, and what
+follows it is plain bytes. A file cut short is taken as it is, with the
+codestreams that are whole.
+
+**The stream:**
+
+```
+byte 0          8
+byte 1          flags: none yet, 0
+4 bytes (LE)    K, the codestreams: 0 to 16,384
+K x 13 bytes    each codestream, in the order of the file and apart:
+                where it is in the file (u32), its length (u32, 1 or more),
+                its stream's length (u32), its mode (byte)
+the K streams   of the codestreams that have one, in order
+the rest        the host through the raw bytes' model (CodeRaw): the file
+                without the codestreams that have a stream of their own
+```
+
+Mode 0, raw, is the only one in this stage: the codestream's bytes stay in
+the host where they are, and its stream's length is 0; the table only
+says where it is. So a version 8 stream today is the file through the raw
+model and 6 + 13 x K bytes. The modes of the later stages cut their
+codestream out of the host and give it a stream after the table: stage B
+the packets' headers regenerated (tag trees, progressions, side
+information), stage C the code-blocks' coding passes decoded and coded
+again with PJA's model, each code-block that does not come back the same
+kept as bytes. A reader that does not know a mode, or a flag, refuses the
+stream as `FutureVersion` before it decodes anything, and never reads the
+stream as something else; a reader of a mode it knows checks each
+codestream's place (in order, apart, within the file). Files up to 4 GiB
+- 2 (the places are 32 bits); a larger one is refused as before. Version
+8 is never a part of a version 6 stream (`BadStream` there).
+
+**Dispatch** (`pjacodec.Compress`): a file that starts like either kind
+goes to version 8, and nothing else is tried on it (it does not start like
+a JPEG). Verified like every stream: decompressed and compared before it
+is handed out. `Pack` stores the file as it is when the stream is not
+smaller, as for any file. The JPEG and JPEG-LS paths are untouched: the
+same streams byte for byte (the suite's streams and their hash). Only with
+`parts` (the command, `pja_compress`): the zpaq-std plugin's codecs, which
+ask for version 5, refuse a JPEG 2000 file as before, and the 7-Zip
+filter does not look for one (pjafilter.c finds files by `FF D8 FF`; a
+filter record of version 8 is never written, though a reader would decode
+one).
+
+**The command and the library.** `pja a` takes the files (any extension:
+`.jp2`, `.j2k`, `.j2c`, `.jpc`, `.jpx`, `.jpf`, `.jpm`, `.mj2`, `.jph`,
+`.jhc` are what they are usually called) and keeps the extension in the
+`.pja` as for any file, and says `(JPEG 2000: as bytes for now)`; `pja
+list` says `JPEG 2000`; `pja x` of a `.pja` with no extension kept names
+the file by its content (`.j2k`, or `.jp2`, `.jpx`, `.jpm`, `.mj2`, `.jph`
+by the brand of its ftyp box). `pja_compress` and `pja_decompress` take
+them as well.
+
+**Tests.** `tests/j2k`: five files made with opj_compress from the
+repository's own JPEGs (a raw codestream, a JP2, three quality layers,
+lossless 5/3, 12 bits), and two put together from such codestreams by
+`pas/tests/mkj2k_boxes.py` (a JPX with two codestreams, one in an XLBox
+and one in a last box of length 0, an asoc superbox; an MJ2 whose mdat
+holds two frames). The codec's round trip (`test_codec`, the same stream
+with 1 and 4 threads and from every build), its damage test (every bit
+of the first 128 bytes of each stream and every truncation: 19,959
+variants, no exception), `cli.sh` (a and x of each, the extension by the
+content, a file cut in half, one bit flipped, a mode of a later release),
+`test_corruption` (the `.pja` end to end), libpja's test and 7-Zip with
+the plugin (the files in a solid block, left as they are).
+
+**The research corpus** (`/mnt/IA_LAB/agentes/pja/j2k2/corpus`: JPEG 2000
+files of the sample corpus, codestreams extracted from DICOM and PDF
+files, and downloads from OpenJPEG's, jpylyzer's, GDAL's and other test
+sets, the Library of Congress, Helioviewer, Sentinel-2), through `pja a`
+and `pja x`, every file compared:
+
+| set | files | of the family | taken | back byte for byte | size | `.pja` | saved |
+|---|---|---|---|---|---|---|---|
+| sample corpus (`samples/local`) | 18 | 15 | 15 (4 stored) | 15 | 18,138,400 | 18,040,859 | 0.54% |
+| codestreams from DICOM and PDF (`samples/extracted`) | 1,455 | 1,455 | 1,455 (93 stored) | 1,455 | 32,501,920 | 32,469,737 | 0.10% |
+| 400 downloads of 8 MB or less, drawn at random | 400 | 400 | 400 (54 stored) | 400 | 163,104,267 | 157,411,019 | 3.49% |
+| all | 1,873 | 1,870 | 1,870 | **1,870** | 213,744,587 | 207,921,615 | 2.72% |
+
+Every file of the family was taken and came back byte for byte; the three
+others (an `.icns`, a QuickTime image and a `.mov` with JPEG 2000 inside)
+are refused as before. The downloads' 3.49% is the test sets': fuzzing and
+conformance files whose codestreams are mostly padding or repeated
+packets (one of 579 KB comes out at 33 KB, an OpenJPH test stream of
+3.3 MB with 4x4 code-blocks at 2.7 MB). Real files save what a general
+compressor saves on them: the Internet Archive's book pages 0.27%,
+Helioviewer's solar images 1.08%, OSGeo's 0.92%, the sample corpus 0.54%,
+the extracted codestreams 0.10% (many are a few KB, where the `.pja`'s
+37 bytes and its extension weigh more than the model saves; 93 are stored,
+their stream no smaller than they are). The raw bytes'
+model is slow for this: about 0.45 MB/s a thread on this machine (a
+1.3 MB JP2: 3.2 s to compress without verifying, 6.1 s with, 2.9 s to
+extract); the files of a run go to several threads at once, a file's
+bytes to one.
+
+## Pre-1.0: what a later release writes (05/11/2026)
+
+The rule that lets a new kind of file come as a new stream (JPEG 2000
+above) is now tested and has an error code of its own:
+
+- **A codec stream of a later version.** A first byte past the last
+  version this release knows (9 to 255 now) is `FutureVersion`, at the top,
+  inside a PATCH stream (its repaired file's stream) and inside a `.pja`
+  (`Unpack` gives `Codec(FutureVersion)`); 0 to 4 are `BadStream`; so are
+  a version 8 flag or codestream mode this release does not know.
+  `pas/tests/test_versions.pas` sweeps the first byte of every stream of
+  the samples (versions 5, 6, 7 and 8, PATCH among them) over 0 to 255,
+  and hand-made ones (that byte alone, with a zero, with 999 bytes after
+  it): about 95,000 cells, no exception.
+- **`PJA_E_VERSION`** (7) in `pja.h`: `pja_decompress` returns it for a
+  `.pja` of a later version or whose codec stream is; the filter's
+  decoders for a filter version past theirs (`PJAF` 03, `PJAB` 02), a
+  record tag from 04 to FE (left for later records) and a file record
+  whose codec stream is of a later version. Until 0.9.0 all of these were
+  `PJA_E_DATA`; damaged data still is. The 7-Zip plugin maps it to
+  `E_NOTIMPL`, which 7-Zip 25.01 reports as "Unsupported Method" for the
+  files of the block, and damaged data to "Data Error", as before
+  (checked on archives with the filter's version, a record tag and a
+  codec stream's version changed, and with a byte of a stream flipped).

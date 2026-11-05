@@ -9,10 +9,12 @@ What may still change: speed, the encoder's choices, and the files PJA
 takes (more, never fewer). For a JPEG or JPEG-LS file a later release can
 write other bytes (a better repair of a damaged JPEG, a different choice of
 streams), in these same formats, which every release from 0.9.0 on reads.
-A new kind of file (JPEG 2000 is being studied) would come as a new codec
-stream version beside these, with its own zpaq-std codecs: the releases
-before it refuse such a stream cleanly ("a newer version"), and read
-everything else as before.
+A new kind of file comes as a new codec stream version beside these (and,
+later, its own zpaq-std codecs): the releases before it refuse such a
+stream cleanly ("a newer version": `FutureVersion`, `PJA_E_VERSION` in
+the library since 0.9.5, `PJA_E_DATA` before), and read everything else as
+before. The JPEG 2000 family came that way, as stream version 8, in 0.9.5
+(below).
 
 ## The `.pja` file
 
@@ -30,17 +32,43 @@ plugins carry for each file:
 | 5 | the zpaq-std codecs pja, pjals, pjall, pjalsx and their z and o and 8 | a JPEG or JPEG-LS file; model byte 0 (full) and 1 (fast, read only) |
 | 6 | pjax, pjax7 and their z and 8 | a JPEG with JPEGs inside it (MPO, Ultra HDR), 12-bit JPEG, DNL |
 | 7 | the command and the library since 0.1.0; pja7, pjax7 and their z and 8 | the coefficients through version 7's model |
+| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode, and its bytes through the raw bytes' model |
 
 With them, the parts stream, the PATCH stream (a repaired JPEG) and the
 bytes stream (a file stored as it is), as `doc/CODEC.md` describes them.
+Versions 0 to 4 are never written; 9 and up are left for later kinds of
+file, and a release refuses one it does not know as `FutureVersion`
+(`pas/tests/test_versions.pas`).
+
+Stream version 8 is fixed as 0.9.5 writes it: its layout (flags, the
+table of codestreams, their streams, the host), flag value 0 and
+codestream mode 0 (raw: the codestream's bytes stay in the host, coded
+with the other bytes) keep their meaning forever, and every release from
+0.9.5 on reads what 0.9.5 writes. JPEG 2000 comes in stages: in 0.9.5
+every codestream is raw, and its later stages (the packets and the
+code-blocks modelled) come in later releases of 0.9.5's series only as new
+codestream mode values, or new flags, in this same layout; nothing a
+release has written changes meaning. A release that does not know a mode
+or a flag refuses the stream as `FutureVersion` (`PJA_E_VERSION`) before
+decoding it, never reads it as something else: a `.pja` of a JPEG 2000
+file written by a later release with such a mode needs that release, or a
+later one, to be extracted. For the same file a later release may write
+other modes (smaller), which is the same rule as for a JPEG's streams
+above.
 
 ## The library and 7-Zip
 
 `doc/LIBRARY.md`. The filter's streams: `PJAF` version 1 (one stream:
 records 00 raw, 01 file, 02 tables, 03 file without tables, FF end), and
 `PJAF` version 2 with `PJAB` version 1 (two streams, PJA's data
-deduplicated). The C interface in `pja.h` keeps its functions and their
-meaning; new functions may come.
+deduplicated). Record tags 04 to FE are left for later records: a decoder
+that meets one stops with an error (`PJA_E_VERSION` since 0.9.5,
+`PJA_E_DATA` before), as it does at a `PJAF` or `PJAB` version past its
+own. The filter does not take JPEG 2000 files yet: it leaves them as raw
+records, as before. The C interface in `pja.h` keeps its functions and
+their meaning; new functions may come, and new error codes (0.9.5 added
+`PJA_E_VERSION`, 7, where `PJA_E_DATA` was returned for the same
+streams): a caller treats a code it does not know as an error.
 
 7-Zip methods: `PJA1` (one stream) and `PJA` (two streams), today under
 7-Zip's experimental IDs `03 7F 01` and `03 7F 02`. 1.0.0 brings IDs of
@@ -70,7 +98,8 @@ decoder, even for the same stream, is a new codec.
 | 24 to 29 | `pjals8`, `pjall8`, `pjalsx8`, `pjalsz8`, `pjallz8`, `pjalsxz8` | as 14 to 19 | 22,430, 13,901, 24,611, 23,046, 14,517, 25,244 | 0.8.0 |
 
 ZPAQL in bytes of PCOMP. zpaq-std's `-sa` uses the newest of each family;
-the others stay to read older archives.
+the others stay to read older archives. No codec takes JPEG 2000 yet: one
+would come at index 30 or after.
 
 ## Left as they are
 
