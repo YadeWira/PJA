@@ -2054,3 +2054,39 @@ suite runs the ten on segments, two in a block and through the LZ77
 Frozen in 0.8.0, codecs 20 to 29: pja78, pjax78, pja7z8, pjax7z8, pjals8,
 pjall8, pjalsx8, pjalsz8, pjallz8 and pjalsxz8, their streams and their
 ZPAQL never change under these names.
+
+## Before the formats are fixed: 0.9.0 (05/11/2026)
+
+A last round of checks on what 0.9.0 fixes (`doc/STABILITY.md`):
+
+- **The 8 codecs' decoders on damaged data.** 150 damaged segments for
+  each of the ten (bits flipped, bytes inserted, deleted or cut), through
+  libzpaq: 1,497 refused with libzpaq's error, 3 decoded without one
+  (zpaq-std's hash rejects them), no hang, no crash.
+- **Past 256 MiB.** A JPEG with 270 MB of random bytes after it: taken,
+  verified and given back byte for byte (6.4 min to compress, 3.5 to
+  extract, the raw model's speed).
+- **Threads the system refuses, for real.** Under systemd's TasksMax (a
+  cgroup's limit of threads), `pja a -th 16` died with "EThread: Failed to
+  create new thread" when it made its pool of file workers: the codec's
+  bands had been fixed (0.6.4), the command's pool not. The 7-Zip plugin
+  answered "Can't allocate required memory" for the same reason in the
+  filter's pool. Both now go on with the threads they get: with TasksMax 1
+  (no thread but the main one) to 8 the command writes the same `.pja`
+  files and extracts them; 7-Zip with PJA compresses and extracts at
+  TasksMax 4 and 5, where 0.8.0's plugin failed (at 3, 7-Zip's own threads
+  fail first).
+- **FAT and exFAT.** A new output takes its name through link(), which
+  never replaces a file; FAT has no hard links, so on a camera card the
+  output was written in place, and a run cut short left it truncated. On
+  Linux, renameat2 with RENAME_NOREPLACE does the same and FAT takes it:
+  checked on a vfat mount.
+- **The filter's tables record** now counts against what PJA saved, so a
+  small abbreviated JPEG no longer comes out larger than its raw bytes.
+- **PATCH's bounds** saturate instead of overflowing for a declared size
+  past 2^61 (the `.pja` ratio check already kept the command from it).
+- **Fuzzing**, 20 minutes on 12 workers with these builds: `pja x` on
+  135,730 damaged `.pja` (every one refused cleanly: a hash that does not
+  verify or a stream that does not rebuild), `pja a` on 18,348 damaged
+  JPEG and JPEG-LS files, `7z t` on 15,994 damaged archives: no crash, no
+  hang, nothing taken that did not come back.
