@@ -1370,7 +1370,7 @@ end;
 
 { PATCH: the edits, then the repaired file's stream }
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult;
-var p: SizeInt; e, i: Integer; pos, del, ins, grown, limit: Int64; edits: TEdits; fixed, inner: TBytes;
+var p: SizeInt; e, i: Integer; pos, del, ins, grown, limit, m, cap: Int64; edits: TEdits; fixed, inner: TBytes;
 begin
   jpeg := nil;
   if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
@@ -1380,7 +1380,10 @@ begin
   { the repaired file, where the edits are: at most MaxFiller larger than
     the original (a cut scan's filler can be longer than what is left of
     the file), and the original at most maxRaw }
-  limit := Min(Int64(maxRaw) + MaxFiller(maxRaw), High(SizeInt));
+  { an edit's numbers are 32 bits: a maxRaw past 2^40 (a crafted size, or
+    --max-output=0) bounds nothing more, and would overflow below }
+  m := Min(Int64(maxRaw), Int64(1) shl 40);
+  limit := Min(m + MaxFiller(m), High(SizeInt));
   p := 6; grown := 0;
   for i := 0 to e - 1 do begin
     if p + 12 > Length(stream) then Exit(CodecFail(ceBadStream));
@@ -1400,8 +1403,9 @@ begin
   { the repaired file is the original with what the edits take out and
     without what they put back: larger by what RepairJpeg holds to
     MaxFiller (a cut scan's filler), smaller by bytes taken out }
-  if (grown > MaxFiller(maxRaw)) or (maxRaw + grown < 0) then Exit(CodecFail(ceBadStream));
-  Result := DecompressAt(inner, fixed, SizeInt(Min(maxRaw + grown, High(SizeInt))), threads, 0, 0);
+  if (grown > MaxFiller(m)) or ((grown < 0) and (maxRaw + grown < 0)) then Exit(CodecFail(ceBadStream));
+  if grown > High(SizeInt) - maxRaw then cap := High(SizeInt) else cap := maxRaw + grown;
+  Result := DecompressAt(inner, fixed, SizeInt(cap), threads, 0, 0);
   if not Result.Ok then Exit;
   if not ApplyEdits(fixed, edits, maxRaw, jpeg) then Exit(CodecFail(ceBadStream));
 end;
