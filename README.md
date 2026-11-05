@@ -187,6 +187,24 @@ pja list packed/*.pja             # sizes and hashes
 
 The command's manual is [doc/CLI.md](doc/CLI.md).
 
+## Reporting a bug
+
+```sh
+pja report photo.jpg -o report.txt   # what happened, on which machine
+```
+
+It writes a plain-text report and prints a link that opens a [new
+issue][issues] with it filled in: add what you ran and what you expected.
+The report has PJA's version and build, the system, the processor and its
+SIMD path, the command line, and for the file its size, hash, structure
+(markers, frame, scans) and what PJA does with it. It does **not** have the
+image (no pixels), the contents of its metadata (EXIF, XMP, ICC, comments:
+only their sizes), or folder names. The file itself is attached only if you
+choose to: `--with-file` puts a copy beside the report. `pja info FILE`
+shows the same structure, `pja selftest` checks the binary on every SIMD
+path, and a run that hits a bug says so and exits with 3
+([details][wBugs], [doc/CLI.md](doc/CLI.md#checking-and-reporting)).
+
 ## More
 
 The [wiki][wiki] has the rest: [benchmarks][wComp], the
@@ -230,3 +248,5 @@ work of the Independent JPEG Group; see `NOTICE` for that and other credits.
 [wLayout]: https://github.com/YadeWira/PJA/wiki/Source-layout
 [wFpc]: https://github.com/YadeWira/PJA/wiki/FreePascal-pitfalls
 [wRel]: https://github.com/YadeWira/PJA/wiki/Releases
+[wBugs]: https://github.com/YadeWira/PJA/wiki/Reporting-bugs
+[issues]: https://github.com/YadeWira/PJA/issues

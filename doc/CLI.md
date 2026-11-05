@@ -4,6 +4,12 @@
 pja a [options] FILE...     compress:  photo.jpg -> photo.pja, scan.jls -> scan.pja
 pja x [options] FILE...     extract:   photo.pja -> photo.jpg (the original's extension)
 pja list FILE...            what each .pja holds: original size, stored size, hash
+pja t FILE...               test each .pja: extract and verify in memory, write nothing
+pja info FILE...            the structure of each file, and what PJA does with it
+pja report [FILE]           a bug report (no pixels, no metadata) and a link to open an issue
+pja bench FILE...           how fast this machine runs a, a --no-verify and x on them
+pja selftest                the samples inside the binary, on every SIMD path here
+pja --version, pja -V       the build, the compilers, the system and the SIMD path
 ```
 
 | switch | what it does |
@@ -17,12 +23,176 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, so does the check of a repaired JPEG, and the `.pja` is the same byte for byte |
 | `--fast` | `a`: accepted for older scripts, and changes nothing: since 0.1.0 the model `a` uses (stream version 7) is as fast as the fast model was and as small as the full one (`CODEC.md`). `x` reads every version |
 | `-n`, `--dry-run` | do everything but write: an output that exists, or that two inputs share, fails as it would for real |
-| `-q`, `--quiet` | only errors |
+| `-q`, `--quiet` | only errors (`--stats` lines still come out: they were asked for) |
+| `--stats` | `a`, `x`, `t`: after each file, where its time went (below), its threads and its bands; then a line for the run: files, bytes in and out, time, MB/s of the originals |
+| `--json` | `a`, `x`, `t`, `info`, `list`: one JSON object a line for each file, in the order of the inputs, then `{"summary": ...}`; errors still go to stderr as well |
+| `--cpu=PATH` | the models' SIMD path: `plain`, `sse41` or `avx2`, before or after the command. A path this processor or this build lacks is refused (exit 2) naming those it has. Every path writes and reads the same bytes: only the speed changes (`selftest` proves it) |
+| `-o REPORT` | `report`: the file the report goes to (never over an existing one) |
+| `--with-file` | `report`: also copy the file beside the report as `pja-report-NAME`, to attach if you choose to |
+| `-r N` | `bench`: runs of each measure, the best one counts (3 by default) |
 | `--` | everything after it is a file, even if it starts with a dash |
 
-Exit status: 0 when every file went through, 1 when any failed (each with
-its line on stderr), 2 for a usage error. All warnings and errors go to
-stderr.
+All warnings and errors go to stderr.
+
+| exit status | when |
+|---|---|
+| 0 | every file went through (`t`: every `.pja` verified; `selftest`: every check passed) |
+| 1 | a file failed: it is not what the command takes, it is damaged, it could not be read or written (each with its line on stderr); `selftest`: a check failed |
+| 2 | usage error: an unknown command or option, a value out of range, an option for another command, `--cpu` with a path not here |
+| 3 | a bug in PJA: an exception that is not about the file (a range check, an access violation, an assertion). The run ends with `This is a bug in PJA. Please run: pja report FILE and open an issue at https://github.com/YadeWira/PJA/issues` |
+
+A run time error the run time library does not turn into an exception (none
+is known) would end with its own number, which is 200 or more.
+
+## Checking and reporting
+
+These are for helping: telling what happened, on which machine, in a form
+that can be pasted into an issue, and checking a build before trusting it.
+
+### `pja t FILE...`
+
+What `x` does, without writing: the format, the declared size against
+`--max-output`, decoding, then the size and the BLAKE3-128. A line
+`NAME: OK` for each one that verifies, `pja: NAME: FAILED: why` on stderr for
+each that does not (exit 1). Takes `-th`, `-q`, `--max-output`, `--stats`
+and `--json`; `-o`, `-f`, `-n` and `--keep-corrupt` are refused (exit 2).
+
+### `pja info FILE...`
+
+Any file: what it is and what PJA does with it. Each format has a provider
+(`pas/pjainfo.pas`; a new format is one more unit):
+
+- **JPEG, MPO, JPEG-LS** (`pas/pjainfojpeg.pas`), from the markers alone:
+  every segment with its place and length (DQT's tables, DHT's, DRI's
+  interval, DNL's height, the known APP identifiers); the frame (SOF type,
+  coding, precision, size, each component's sampling and table); each
+  scan's components, band and bits (JPEG-LS: NEAR and the interleave), its
+  entropy-coded bytes and restarts; progressive, arithmetic, lossless,
+  hierarchical; what follows the EOI; the JPEGs inside APP segments and
+  after the EOI (a thumbnail, an MPO's images, a gain map), each with its
+  frame; the MPF index; anything that does not fit (`problems`).
+- **.pja** (`pas/pjainfopja.pas`): the container (version, flags, the
+  original's size, BLAKE3-128 and extension, stored or not) and the stream:
+  its version and model; for versions 5 and 7, the image its header stream
+  describes and the number of bands (only the raw bytes' model is decoded,
+  never the bands); for version 6, as bytes, PATCH (the edits, then the
+  repaired file's stream) or parts (each JPEG inside, then the host's).
+
+Then `pja: ...`: for a `.pja`, whether it extracts and verifies; for
+anything else, what `a --no-verify` would do: `takes it: stream version 7,
+1748 B -> 1431 B (81.86%)`, `takes it ..., as bytes: BadRst@1670` (PJA did
+not take it as a JPEG and why: the reason and the byte where it was found),
+`..., repaired: BadRst@...`, or `refuses it: Codec(Jpeg(NotJpeg@0))`.
+Exit 1 only for a file that cannot be read. `--json` gives the same tree.
+
+Metadata is never printed, only its size: `metadata_bytes: Exif 1818 B,
+XMP 0 B, ICC 0 B, other APP 16 B, 1 COM (19 B); contents not shown`.
+
+### `pja report [FILE] [-o REPORT.txt] [--with-file]`
+
+A plain-text bug report, to stdout or to `-o`'s file:
+
+- PJA: version, commit, build date, FPC's version, the C compiler, the
+  target; the system, the processor's name and features, the SIMD path in
+  use and those it could take, the processors, the threads;
+- the command line, each path cut to its name;
+- for FILE: its size, BLAKE3-128, what PJA does with it and its structure,
+  as `info` gives them (with `a`'s verification).
+
+**What is not in it**: no pixel and no coefficient, no metadata contents
+(EXIF, XMP, ICC, comments: only how many bytes), no folder names. A
+report on a file that hits a bug says so (`internal_error`) instead of
+ending.
+
+Then a link that opens a new issue on GitHub with the report in it
+(`https://github.com/YadeWira/PJA/issues/new?template=bug_report.yml&title=...&body=...`):
+a report too long for a link (about 6000 characters) is cut there, with a
+line saying to paste the whole report. `--with-file` copies FILE beside the
+report as `pja-report-NAME` (never over an existing file): it goes nowhere
+unless you attach it, which shows the very bytes; GitHub takes a `.jpg`,
+anything else (`.jls`, `.mpo`, `.pja`) zipped. Without FILE, the system
+part alone, for a problem with no file.
+
+### `pja bench FILE... [-r N] [-th N]`
+
+Prints the system part of the report, then for each file the best of N
+runs (3 by default) of `a`, `a --no-verify` and `x`, in milliseconds and
+MB/s (2^20 bytes) of the original, with where `a`'s and `x`'s time went,
+and the write of the `.pja` alone; then the totals. Everything is in
+memory but that write, which goes to a folder of its own in the system's
+temporary folder and is deleted: nothing is written beside the inputs. A
+`.pja` given is only extracted.
+
+### `pja selftest`
+
+The binary carries four small samples (a baseline JPEG in 4:2:0, a
+progressive one, an arithmetic-coded one with restarts, a near-lossless
+JPEG-LS: `pas/pjaselftest.inc`, written by `tools/gen_selftest.py` from
+`tests/`), and the `.pja` each one has to give. On every SIMD path the
+processor and the build have, with one thread and with two (two decode the
+bands while they are encoded), each is compressed, compared byte for byte
+with its expected `.pja` (whose BLAKE3-128 it prints), and extracted back.
+Exit 0 only if every check passed. CI runs it on every platform.
+
+### `pja --version`
+
+```
+pja 0.9.0
+commit: 1482334
+built: 2026/11/05
+fpc: 3.2.2
+c_compiler: gcc 14.2.0
+target: x86_64-linux
+system: Linux 6.12.115 x86_64
+cpu: Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz
+cpu_features: sse2 sse4.1 avx2
+cpu_path: avx2
+cpu_paths_supported: plain sse41 avx2
+processors: 64
+default_threads: 8
+```
+
+The commit comes from `PJA_COMMIT` at build time, as the zpaq-std plugin's
+(`pas/plugin/build.sh`): `.github/test.sh` and `pas/run_tests.sh` set it
+from git when it is not set, `release.yml` from the tag's commit; a build
+without it says `commit:` and nothing.
+
+### `--cpu=PATH`
+
+The coefficient models' loops exist as plain code and, on x86-64, as
+copies for SSE4.1 (both models) and AVX2 (version 7's, `pas/pjav7c.c`).
+The path is chosen at start from cpuid (`PJA_NOASM=1` and `PJA_NOAVX2=1`
+turn the copies off); `--cpu` chooses it instead, to compare speeds or to
+rule a path out when chasing a bug. 32-bit builds have the plain path only.
+
+### `--stats`
+
+```
+photo.jpg -> photo.pja  15.3 KB -> 12.2 KB  79.97%
+  stats: read 0.05 ms, parse 1.03 ms, encode 22.16 ms, verify 11.47 ms, hash 0.07 ms, write 0.12 ms; total 34.90 ms; 1 thread(s), 1 band(s)
+```
+
+The stages: `read` the input; `parse` taking the JPEG apart and checking
+that it comes back (`a`); `encode` the model; `verify` decoding the stream
+to compare it with the input (with two threads or more, a JPEG's bands are
+decoded while they are encoded, and that time is `encode`'s); `decode`
+(`x`, `t`); `hash` BLAKE3; `write` the output, verified and renamed;
+`other` what falls between. `threads` are the file's own (what `-th`
+leaves each file), `bands` the stream's.
+
+### `--json`
+
+One object a line, so that `python3 -c 'import json'` or `jq` read it
+line by line:
+
+```
+{"file":"photo.jpg","output":"photo.pja","input_size":15679,"output_size":12538,"ratio_percent":79.97,"stored":false,"ok":true}
+{"summary":{"command":"a","files":1,"failed":0,"bugs":0,"bytes_in":15679,"bytes_out":12538,"seconds":0.035,"threads":8}}
+```
+
+A file that failed has `"ok":false` and `"error"`; one that hit a bug,
+`"internal_error"`. `info`'s objects are its tree; `--stats` adds a
+`"stats"` object (each stage in ms, threads, bands).
 
 ## Nothing written that did not verify
 
@@ -91,7 +261,9 @@ measured against the old spelling.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (64 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (123 cells: round trips, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, outputs shared by two
-inputs, a write cut short, every usage error), and
+inputs, a write cut short, every usage error; `t`, `info`, `report` and its
+privacy, `bench`, `selftest`, `--cpu` on every path here, `--stats`,
+`--json`, and the end of a run that meets a bug), and
 on Windows by `pas/tests/windows.ps1` (28 cells, the wildcards among them).

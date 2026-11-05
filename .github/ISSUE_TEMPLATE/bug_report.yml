@@ -1,0 +1,54 @@
+name: Bug report
+description: Something PJA did wrong, refused, or crashed on
+title: "pja: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The quickest way to a fix is the output of
+        `pja report FILE` (on the file it happened with): it has PJA's build, the
+        system and the file's structure, and **not** the image, its metadata
+        contents or folder names. `pja report` prints a link that opens this form
+        with the report filled in below.
+  - type: textarea
+    id: body
+    attributes:
+      label: The output of pja report
+      description: Run `pja report FILE` (or `pja report` without a file) and paste all of it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you ran
+      description: The exact command line(s), and what it printed.
+      placeholder: |
+        pja a photo.jpg
+        pja: photo.jpg: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: The file (if you can share it)
+      description: |
+        `pja report --with-file FILE` puts a copy beside the report. GitHub takes a .jpg
+        as it is; zip a .jls, .mpo or .pja first. Only attach what you are free to share.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: "`pja selftest` passes on this machine (if it fails, say so above)"
+          required: false
