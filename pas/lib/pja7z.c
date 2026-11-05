@@ -185,6 +185,9 @@ static HRESULT result(const run_t *r, int res) {
     case 0: return S_OK;
     case 3: return E_OUTOFMEMORY;
     case 2: return S_FALSE;    /* 7-Zip's "data error" */
+    /* PJA_E_VERSION, a later PJA's stream: 7-Zip says "Unsupported
+       Method" for the files of the block, as for a method it lacks */
+    case 7: return E_NOTIMPL;
     default: return E_FAIL;
   }
 }

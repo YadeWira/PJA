@@ -16,7 +16,9 @@
    it): the filter must take it with the standard tables both times and
    give it back. A lossless JPEG (no DQT, and none needed) must be taken as
    it is, in a 01 record, smaller than it was. And version 2 with B's write
-   failing must stop there with PJA_E_WRITE, not read the rest.
+   failing must stop there with PJA_E_WRITE, not read the rest. And what a
+   newer PJA would write (a .pja, a codec stream, a filter version or
+   record) must give PJA_E_VERSION.
    Prints a line per check and "N checks, 0 failures" at the end. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,12 +202,77 @@ static void b_failure(const unsigned char *all, size_t alln) {
   free(a.d); free(b.d);
 }
 
+/* a filter stream (A, and B for version 2) through the decoder: its result */
+static int filter_result(const unsigned char *a, size_t an, const unsigned char *b, size_t bn) {
+  src_t ia = {a, an, 0, 4096}, ib = {b, bn, 0, 4096};
+  dst_t o = {0};
+  int r = b ? pja_filter2_decode(rd, &ia, rd, &ib, wr, &o, 1) : pja_filter_decode(rd, &ia, wr, &o, 1);
+  free(o.d);
+  return r;
+}
+
+/* what a newer PJA wrote: PJA_E_VERSION, never PJA_E_DATA nor a crash. A
+   .pja (its version, its codec stream's first byte from 9 to 255), the
+   filter's versions and its records 04 to FE, a file record whose codec
+   stream is of a later version. pja is a .pja of a JPEG, not stored, with
+   no extension (pja_compress's): its codec stream from byte 37 */
+static void versions(const unsigned char *pja, size_t pn) {
+  unsigned char *p = malloc(pn);
+  void *back = 0;
+  size_t bn = 0;
+  int bad = 0;
+  memcpy(p, pja, pn);
+  p[4] = 5;
+  check(pja_decompress(p, pn, &back, &bn, 0, 1) == PJA_E_VERSION, "a .pja of version 5: PJA_E_VERSION", "");
+  pja_free(back); back = 0;
+  memcpy(p, pja, pn);
+  for (int v = 9; v < 256; v++) {
+    p[37] = (unsigned char)v;
+    bad += pja_decompress(p, pn, &back, &bn, 0, 1) != PJA_E_VERSION;
+    pja_free(back); back = 0;
+  }
+  check(bad == 0, "codec stream versions 9 to 255 in a .pja: PJA_E_VERSION", "");
+  p[37] = 4;
+  check(pja_decompress(p, pn, &back, &bn, 0, 1) == PJA_E_DATA, "codec stream version 4: PJA_E_DATA", "");
+  pja_free(back);
+  free(p);
+  static const unsigned char f3[] = {'P', 'J', 'A', 'F', 3, 0xFF}, f1end[] = {'P', 'J', 'A', 'F', 1, 0xFF},
+    f1cut[] = {'P', 'J', 'A', 'F', 1}, f2[] = {'P', 'J', 'A', 'F', 2, 0xFF},
+    b1[] = {'P', 'J', 'A', 'B', 1}, b2[] = {'P', 'J', 'A', 'B', 2};
+  check(filter_result(f3, sizeof f3, 0, 0) == PJA_E_VERSION, "filter version 3: PJA_E_VERSION", "");
+  check(filter_result(f1end, sizeof f1end, 0, 0) == PJA_OK, "filter version 1, empty", "");
+  check(filter_result(f1cut, sizeof f1cut, 0, 0) == PJA_E_DATA, "filter version 1 cut short: PJA_E_DATA", "");
+  check(filter_result(f2, sizeof f2, 0, 0) == PJA_E_DATA, "version 2 to filter_decode: PJA_E_DATA", "");
+  check(filter_result(f1end, sizeof f1end, b1, sizeof b1) == PJA_E_DATA, "version 1 to filter2_decode: PJA_E_DATA", "");
+  check(filter_result(f2, sizeof f2, b1, sizeof b1) == PJA_OK, "filter version 2, empty", "");
+  check(filter_result(f3, sizeof f3, b1, sizeof b1) == PJA_E_VERSION, "filter2, A of version 3: PJA_E_VERSION", "");
+  check(filter_result(f2, sizeof f2, b2, sizeof b2) == PJA_E_VERSION, "filter2, B of version 2: PJA_E_VERSION", "");
+  bad = 0;
+  for (int t = 0x04; t < 0xFF; t++) {
+    /* a raw record first, then the unknown one */
+    unsigned char s1[] = {'P', 'J', 'A', 'F', 1, 0x00, 0x01, 'x', (unsigned char)t, 0x01, 0x01, 0xFF};
+    unsigned char s2[] = {'P', 'J', 'A', 'F', 2, 0x00, 0x01, 'x', (unsigned char)t, 0x01, 0x01, 0xFF};
+    bad += filter_result(s1, sizeof s1, 0, 0) != PJA_E_VERSION;
+    bad += filter_result(s2, sizeof s2, b1, sizeof b1) != PJA_E_VERSION;
+  }
+  check(bad == 0, "filter records 04 to FE: PJA_E_VERSION, both versions", "");
+  bad = 0;
+  for (int v = 9; v < 256; v++) {
+    /* a file of 100 bytes whose codec stream (10 bytes) is version v */
+    unsigned char s1[] = {'P', 'J', 'A', 'F', 1, 0x01, 100, 10, (unsigned char)v, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF};
+    bad += filter_result(s1, sizeof s1, 0, 0) != PJA_E_VERSION;
+  }
+  check(bad == 0, "a filter record whose codec stream is version 9 to 255: PJA_E_VERSION", "");
+  printf("what a newer PJA wrote: PJA_E_VERSION (.pja, codec stream, filter version and records)\n");
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", pja_version());
   unsigned char *all = 0;
   size_t alln = 0, taken = 0, insum = 0, outsum = 0;
   unsigned seed = 1;
+  int versioned = 0;
   for (int a = 1; a < argc; a++) {
     size_t n;
     unsigned char *d = slurp(argv[a], &n);
@@ -214,6 +281,10 @@ int main(int argc, char **argv) {
     size_t pn = 0, bn = 0;
     int r = pja_compress(d, n, &p, &pn, 2);
     check(r == PJA_OK || r == PJA_E_NOT_TAKEN, "compress", argv[a]);
+    if (r == PJA_OK && !versioned && pn > 40 && n > 4 && d[0] == 0xFF && d[1] == 0xD8 && !(((unsigned char *)p)[5] & 1)) {
+      versions(p, pn);
+      versioned = 1;
+    }
     if (r == PJA_OK) {
       void *p2 = 0;                                /* again, on the models the call parked */
       size_t pn2 = 0;
@@ -242,6 +313,7 @@ int main(int argc, char **argv) {
     free(d);
   }
   printf("%zu of %d files taken: %zu -> %zu bytes as .pja\n", taken, argc - 1, insum, outsum);
+  check(versioned, "a JPEG for the version checks", "");
   {                                                /* null pointers: an error, not a crash */
     static const unsigned char some[4] = {0xFF, 0xD8, 0xFF, 0xD9};
     void *p = 0;
