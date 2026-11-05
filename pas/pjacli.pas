@@ -527,7 +527,7 @@ begin
   ReleaseThreadModels;
 end;
 
-var i, workers: Integer; pool: array of TWorker; path: string;
+var i, n, workers: Integer; pool: array of TWorker; path: string;
 begin
   { On Unix only '/' separates: the RTL's ExtractFileName and ChangeFileExt
     also cut at '\', a plain character there, so 'a\x.jpg' and 'b\x.jpg'
@@ -567,7 +567,18 @@ begin
   InitCriticalSection(printLock);
   pool := nil;
   SetLength(pool, workers - 1);
-  for i := 0 to High(pool) do pool[i] := TWorker.Create(False);
+  { a thread the system refuses (a host at its limit) leaves the files to
+    the ones it gave and to this one: the same outputs, only slower }
+  n := 0;
+  while n < Length(pool) do begin
+    try
+      pool[n] := TWorker.Create(False);
+    except
+      on EThread do Break;
+    end;
+    Inc(n);
+  end;
+  SetLength(pool, n);
   Work;
   for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
   DoneCriticalSection(printLock);

@@ -231,8 +231,18 @@ begin
     p.encode := encode <> 0;
     SetLength(p.queue, 64);
     SetLength(p.workers, threads);
+    { a thread the system refuses (a host at its limit): the pool goes on
+      with the ones it gave; with none, the failure below }
     for k := 0 to threads - 1 do begin
-      p.workers[k] := TPoolThread.Create(True);
+      try
+        p.workers[k] := TPoolThread.Create(True);
+      except
+        on EThread do begin
+          if k = 0 then raise;
+          SetLength(p.workers, k);
+          Break;
+        end;
+      end;
       p.workers[k].pool := p;
       p.workers[k].Start;
     end;
