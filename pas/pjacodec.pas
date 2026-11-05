@@ -407,31 +407,149 @@ begin
   Result := True;
 end;
 
-{ JPEG-LS: the stream with each model, the smaller one kept. Both are
-  exact; which one wins depends on the file (the symbols win on
-  near-lossless, the samples on most lossless photos). }
-function AssembleJls(var jl: TJls; threads: Integer; out stream: TBytes): Boolean;
-var cd: TCoder; head, other: TBytes; jobs: array of TBandJob; nb, b: Integer; model: Integer;
+{ JPEG-LS: one model's header stream: the raw bytes, which model, and the
+  samples model's run lengths. Always on the caller's thread: CodeRaw reads
+  its threadvars (the raw tables, the tables a library host gave). }
+function JlsHead(var jl: TJls; model: Integer): TBytes;
+var cd: TCoder;
 begin
-  stream := nil;
-  for model := 0 to 1 do begin
-    cd.InitEncoder;
-    CodeRaw(cd, jl.raw, MaxInt);
-    cd.Direct(Cardinal(model), 1);
-    if model = 0 then begin
-      CodeJlsRuns(cd, jl, MaxInt);
-      nb := JlsBandCount(jl);
-    end else nb := 1;
-    head := cd.enc.Finish;
-    jobs := nil;
-    SetLength(jobs, nb);
-    for b := 0 to nb - 1 do begin
-      jobs[b] := Default(TBandJob);
-      jobs[b].jl := @jl; jobs[b].symbols := model = 1; jobs[b].band := b; jobs[b].encoding := True;
+  cd.InitEncoder;
+  CodeRaw(cd, jl.raw, MaxInt);
+  cd.Direct(Cardinal(model), 1);
+  if model = 0 then CodeJlsRuns(cd, jl, MaxInt);
+  Result := cd.enc.Finish;
+end;
+
+type
+  TBandJobs = array of TBandJob;
+
+  { One model's bands (RunBands) on a thread of its own, while the caller
+    codes the other model. }
+  TBandsThread = class(TThread)
+    jobs: ^TBandJobs;
+    threads: Integer;
+    procedure Execute; override;
+  end;
+
+procedure TBandsThread.Execute;
+begin
+  try
+    RunBands(jobs^, threads);
+  except
+    { a job that did not run is not ok, and its model is left out }
+  end;
+  ReleaseThreadModels;
+end;
+
+{ A JPEG-LS file's symbol stream checked as it was written: its framing
+  read back with Decompress's own BandRanges, and the samples its reader
+  decoded (into h, from the header stream as Decompress reads it) rebuilt
+  into a file that has to be the input. }
+function JlsLiveChecked(const jpeg, stream, head: TBytes; const enc, rd: TBandJob; const h: THead): Boolean;
+var r: array of TRange; back: TBytes;
+begin
+  Result := False;
+  if not enc.ok or not rd.ok then Exit;
+  if (Length(stream) < STREAM_HEADER + Length(head)) or (stream[0] <> STREAM_VERSION) or (stream[1] <> 0) or
+     (GetU32(stream, 2) <> Cardinal(Length(head))) or
+     ((Length(head) > 0) and not CompareMem(@stream[STREAM_HEADER], @head[0], Length(head))) then Exit;
+  r := nil; SetLength(r, 1);
+  if not BandRanges(stream, STREAM_HEADER + Length(head), 1, r) then Exit;
+  if (r[0].last - r[0].first <> Length(enc.output)) or
+     ((Length(enc.output) > 0) and not CompareMem(@stream[r[0].first], @enc.output[0], Length(enc.output))) then Exit;
+  if not RecomposeJls(h.jl, back).Ok or (Length(back) <> Length(jpeg)) or
+     ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then Exit;
+  Result := True;
+end;
+
+{ JPEG-LS: the stream with each model, the smaller one kept (the samples
+  model on a tie). Both are exact; which one wins depends on the file (the
+  symbols win on near-lossless, the samples on most lossless photos).
+
+  With two threads or more and verify, the symbol stream is decoded while
+  it is written (as CompressLive does a JPEG's bands), into a second copy
+  of the samples built from its header stream as Decompress builds it.
+  `checked`: that check passed and the stream kept is that one, so it need
+  not be decompressed again (the symbols won on every photo measured).
+  The samples model's bands run on a thread of their own next to the
+  symbol stream when a thread is left for them (three or more, or two
+  without verify), else after it. }
+function AssembleJls(var jl: TJls; threads: Integer; out stream: TBytes; const jpeg: TBytes;
+                     verify: Boolean; out checked: Boolean): Boolean;
+var head0, head1, s0, s1: TBytes; jobs0, jobs1: TBandJobs; rd: TBandJob; nb, b, t0: Integer;
+    ok0, ok1, live: Boolean; h: THead; th: TBandsThread; dt: TBandThread;
+begin
+  stream := nil; checked := False;
+  head0 := JlsHead(jl, 0);
+  head1 := JlsHead(jl, 1);
+  nb := JlsBandCount(jl);
+  jobs0 := nil; SetLength(jobs0, nb);
+  for b := 0 to nb - 1 do begin
+    jobs0[b] := Default(TBandJob);
+    jobs0[b].jl := @jl; jobs0[b].band := b; jobs0[b].encoding := True;
+  end;
+  jobs1 := nil; SetLength(jobs1, 1);
+  jobs1[0] := Default(TBandJob);
+  jobs1[0].jl := @jl; jobs1[0].symbols := True; jobs1[0].encoding := True;
+  live := False;
+  rd := Default(TBandJob);
+  h := Default(THead);
+  if threads < 2 then begin
+    RunBands(jobs0, threads);
+    RunBand(jobs1[0]);
+  end else begin
+    { the live check: the symbol stream's reader on a thread of its own,
+      into h (maxRaw: the input's size, as Decompress is given it) }
+    if verify then begin
+      live := DecodeHead(head1, Length(jpeg), h).Ok and h.isLs and h.symbols and (h.nb = 1);
+      if live then begin
+        jobs1[0].live := TLiveStream.Create;
+        rd.jl := @h.jl; rd.symbols := True; rd.encoding := False; rd.live := jobs1[0].live;
+      end;
     end;
+    { the samples model: on the threads the symbol stream leaves, or, with
+      none left (two threads and the check), after it on all of them }
+    t0 := threads - 1;
+    if live then Dec(t0);
+    th := nil;
+    if t0 >= 1 then
+      try
+        th := TBandsThread.Create(True);
+      except
+        th := nil;
+      end;
+    try
+      if th <> nil then begin
+        th.jobs := @jobs0; th.threads := t0; th.FreeOnTerminate := False;
+        th.Start;
+      end;
+      dt := nil;
+      if live then begin
+        dt := NewBandThread(@rd);
+        if dt <> nil then dt.Start;
+      end;
+      RunBand(jobs1[0]);
+      { no thread for the reader: it reads here (a live stream keeps all it
+        is given) }
+      if live and (dt = nil) then RunBand(rd);
+      if dt <> nil then begin dt.WaitFor; dt.Free; end;
+      if th = nil then RunBands(jobs0, threads);
+    finally
+      { waited for in any case, never left on jobs about to be freed }
+      if th <> nil then begin th.WaitFor; th.Free; end;
+    end;
+  end;
+  try
     { a model that cannot code this file leaves the other }
-    if not Assemble(head, jobs, threads, other) then Continue;
-    if (stream = nil) or (Length(other) < Length(stream)) then stream := other;
+    ok0 := Build(head0, jobs0, s0);
+    ok1 := Build(head1, jobs1, s1);
+    if ok0 then stream := s0;
+    if ok1 and ((stream = nil) or (Length(s1) < Length(stream))) then begin
+      stream := s1;
+      checked := live and JlsLiveChecked(jpeg, s1, head1, jobs1[0], rd, h);
+    end;
+  finally
+    if live then jobs1[0].live.Free;
   end;
   Result := stream <> nil;
 end;
@@ -541,15 +659,15 @@ function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; veri
 
 function CompressOne(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                      model: TModelKind): TCodecResult;
-var j: TJpeg; jl: TJls;
+var j: TJpeg; jl: TJls; checked: Boolean;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
   if IsJls(jpeg) then begin
     Result.jpeg := VerifyJls(jpeg, jl);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
-    if not AssembleJls(jl, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
-    Result := VerifyStream(jpeg, stream, verify, threads);
+    if not AssembleJls(jl, threads, stream, jpeg, verify, checked) then Exit(CodecFail(ceNoRoundTrip));
+    if not checked then Result := VerifyStream(jpeg, stream, verify, threads);
   end else begin
     Result.jpeg := VerifyRoundTrip(jpeg, j);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;

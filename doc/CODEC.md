@@ -2244,3 +2244,45 @@ in locals for the whole call (+2.4% instructions encoding, +2.5%
 decoding: the register pressure spills more than the memory state cost),
 and the counter as one 32-bit word on top of that (+6%), as in version
 7's loop.
+
+## JPEG-LS: both models at once, the symbols checked as they are written (05/11/2026)
+
+A single JPEG-LS file gave nothing to threads: `pja a` coded the samples
+model, then the symbol model (one stream), then decompressed the winner to
+verify it, all in series. photo6.jls took the same 4.4 s at `-th 1`, 2 and
+8. Now (`AssembleJls`, no stream changes):
+
+- with verify and two threads or more, the symbol stream is decoded while
+  it is written (a `TLiveStream`, as `CompressLive` does a JPEG's bands),
+  into a second copy of the samples built from its header stream as
+  `Decompress` builds it; the framing is read back with `BandRanges` and
+  the samples are rebuilt into a file that has to be the input. When the
+  symbols win and that check passed, the stream is not decompressed again;
+  when the samples win (or the check fails), `VerifyStream` runs as before;
+- the samples model's bands run on a thread of their own next to the symbol
+  stream when one is left (three threads or more, or two without verify),
+  else after it on all of them. The two header streams are still coded on
+  the caller's thread (the raw tables and a library host's tables are
+  threadvars). The selection is the same: the samples model on a tie.
+
+The symbols won on all 16 photos (8 gray, 8 colour); the samples only on
+small synthetic files. At two threads the live check is worth more than
+running the two models side by side: photo6, 3.58 / 3.66 / 3.60 s against
+4.36 / 4.30 / 4.41 s.
+
+Compress with verify, best of three alternated runs (4 cores, a shared
+machine):
+
+| | `-th 1` | `-th 2` | `-th 3` | `-th 8` |
+|---|---|---|---|---|
+| photo6.jls (786 KB), before | 4.71 s | 4.75 s | 4.32 s | 4.44 s |
+| after | 4.64 s | **3.26 s** (-31%) | **2.72 s** (-37%) | **2.72 s** (-39%) |
+| photo7.jls (1.39 MB), before | 9.42 s | 9.21 s | 8.72 s | 8.85 s |
+| after | 9.45 s | **6.33 s** (-31%) | **5.36 s** (-38%) | **5.35 s** (-40%) |
+
+One thread, and many files on few threads (the 16 photos at `-th 4`:
+17.90 against 17.97 s), are unchanged: there the threads go to files.
+Extracting is untouched. A mutant that changes one symbol in the symbol
+model's encoder is caught by the live check (and then by `VerifyStream`)
+at every thread count; with threads refused (test_threads' scarce
+BeginThread) the same streams come out.
