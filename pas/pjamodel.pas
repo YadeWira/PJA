@@ -157,7 +157,9 @@ var
 type
   { The raw-byte model's loop (CodeRawBytes) in C, pjav7c.c: len bytes of
     raw coded with the counters o0, o1, o2, which it puts back as new at
-    the end (RawReset). coder is cd.enc or cd.dec, as for V7Code. }
+    the end (RawReset's walk; from RAW_RESET_WHOLE bytes on it leaves them,
+    and CodeRawBytes refills the tables whole). coder is cd.enc or cd.dec,
+    as for V7Code. }
   TRawCode = procedure(encoding: Boolean; coder: Pointer; o0, o1, o2: PAdaptiveBit; raw: PByte; len: SizeInt);
 
 var
@@ -705,6 +707,8 @@ begin
     if len > 0 then begin
       if cd.encoding then coder := @cd.enc else coder := @cd.dec;
       RawCode(cd.encoding, coder, @o0[0], @o1[0], @o2[0], @raw[0], len);
+      { the C walks the counters back only below RAW_RESET_WHOLE bytes }
+      if len >= RAW_RESET_WHOLE then RawReset(raw, len);
     end;
     RawDirty := False;
     Exit(True);

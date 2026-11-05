@@ -421,6 +421,7 @@ int pjav7_component_e(aenc_t *e, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t 
    mixer starts fresh on every call, as CodeRawBytes's does; the counters
    are the caller's, and the ones this call touched are put back as new at
    the end (pjamodel.RawReset). */
+#define RAW_RESET_WHOLE 65536   /* pjamodel's RAW_RESET_WHOLE */
 static inline uint32_t rawhash2(uint32_t c2, uint32_t c1) {
   return ((c2 << 8 | c1) * 2654435761u) >> (32 - 22 + 8);   /* pjamodel's Hash2, O2_BITS = 22 */
 }
@@ -473,8 +474,12 @@ static inline __attribute__((always_inline)) void raw_loop(int enc, void *coder,
     if (!enc) raw[i] = (uint8_t)(node - 256);
     c2 = c1; c1 = node - 256;
   }
-  /* the counters back as new (pjamodel.RawReset) */
+  /* the counters back as new (pjamodel.RawReset's walk). From
+     RAW_RESET_WHOLE bytes on the caller refills the tables whole instead,
+     which is cheaper than this walk's random stores into the 16 MB order-2
+     table, and leaves them in the same state. */
   c1 = c2 = 0;
+  if (len >= RAW_RESET_WHOLE) return;
   for (intptr_t i = 0; i < len; i++) {
     uint32_t h = rawhash2(c2, c1), node = 1, byte = raw[i];
     abit_t *q1 = o1 + (c1 << 8), *q2 = o2 + (h << 8);
