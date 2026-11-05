@@ -60,7 +60,7 @@ end;
 { the host or repaired stream at the end of a version 6 stream; nil if
   there is none, or the stream is damaged }
 function InnerStream(const s: TBytes): TBytes;
-var p, k, n, e, i: Int64; flags: Integer;
+var p, k, n, e, i: Int64; flags: Integer;   { while loops: 32-bit FPC has no Int64 counters }
 begin
   Result := nil;
   if (Length(s) < 6) or (s[0] <> STREAM_PARTS) then Exit;
@@ -69,9 +69,11 @@ begin
   if flags = V6_PATCH then begin
     e := GetU32(s, 2);
     p := 6;
-    for i := 1 to e do begin
+    i := 0;
+    while i < e do begin
       if p + 12 > Length(s) then Exit;
       p := p + 12 + GetU32(s, p + 8);
+      Inc(i);
     end;
     if p > Length(s) then Exit;
     Exit(Copy(s, p, Length(s) - p));
@@ -87,9 +89,11 @@ begin
     if p + 4 > Length(s) then Exit;
     p := p + 4 + 8 * GetU32(s, p);
   end;
-  for i := 0 to n - 1 do begin
+  i := 0;
+  while i < n do begin
     k := 6 + PART_ENTRY * i;
     if s[k + 12] and PART_COPY = 0 then p := p + GetU32(s, k + 8);
+    Inc(i);
   end;
   if p > Length(s) then Exit;
   Result := Copy(s, p, Length(s) - p);

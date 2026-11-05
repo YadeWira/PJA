@@ -46,6 +46,7 @@ var
   { --stats, --json; report's --with-file; bench's -r }
   stats, jsonOut, withFile: Boolean;
   runs: Integer;
+  runsGiven: Boolean;
   { -th or --threads given }
   thGiven: Boolean;
   { --cpu }
@@ -268,7 +269,8 @@ begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
   fastModel := False; noVerify := False;
-  stats := False; jsonOut := False; withFile := False; runs := 3; thGiven := False; cpuGiven := False;
+  stats := False; jsonOut := False; withFile := False; runs := 3; runsGiven := False; thGiven := False;
+  cpuGiven := False;
   threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
   ReadArgs;
@@ -324,6 +326,7 @@ begin
       v := NextValue;
       if not TryStrToInt(v, n) or (n < 1) or (n > 1000) then UsageError('-r: a number from 1 to 1000, not "' + v + '"');
       runs := n;
+      runsGiven := True;
     end else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
       if a = '-th' then v := NextValue else v := Copy(a, 11, MaxInt);
       if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
@@ -350,7 +353,7 @@ begin
   if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
     UsageError('--json is for a, x, t, info and list');
   if withFile and (command <> cmReport) then UsageError('--with-file is for report');
-  if (runs <> 3) and (command <> cmBench) then UsageError('-r is for bench');
+  if runsGiven and (command <> cmBench) then UsageError('-r is for bench');
   if (command in [cmTest, cmInfo, cmReport, cmBench, cmSelftest]) and (force or dryRun or keepCorrupt) then
     UsageError('-f, -n and --keep-corrupt are for a and x');
   if (command = cmReport) and (outDir <> '') then UsageError('report: -o names the report');

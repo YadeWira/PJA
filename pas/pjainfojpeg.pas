@@ -164,7 +164,7 @@ end;
 
 { An APP2 MPF index (CIPA DC-007): its entries, type and size each }
 procedure DescribeMpf(const d: TBytes; first, last: SizeInt; n: TInfoNode);
-var base, ifd, count, k, e, entries, eoff, ecount: Int64; little: Boolean; tag: Integer;
+var base, ifd, count, e, entries, eoff, ecount: Int64; k: Integer; little: Boolean; tag: Integer;
     mpf, list, it: TInfoNode; attr, size, off: LongWord;
 
   function R16(p: Int64): Integer;
@@ -188,7 +188,8 @@ begin
   if (ifd < 8) or (base + ifd + 2 > last) then begin mpf.Str('problem', 'index out of the segment'); Exit; end;
   count := R16(base + ifd);
   eoff := -1; ecount := 0;
-  for k := 0 to count - 1 do begin
+  { (an Integer counter: 32-bit FPC has no Int64 ones; count < 2^16) }
+  for k := 0 to Integer(count) - 1 do begin
     e := base + ifd + 2 + 12 * k;
     if e + 12 > last then begin mpf.Str('problem', 'index cut short'); Break; end;
     tag := R16(e);
@@ -201,7 +202,8 @@ begin
   if eoff < 0 then Exit;
   list := mpf.List('entries');
   entries := 0;
-  for k := 0 to ecount - 1 do begin
+  { ecount < 2^28 }
+  for k := 0 to Integer(ecount) - 1 do begin
     if entries >= MAX_MPF then begin mpf.Num('entries_not_listed', ecount - entries); Break; end;
     e := base + eoff + 16 * k;
     if (e < base) or (e + 16 > last) then begin mpf.Str('problem', 'entries out of the segment'); Break; end;
