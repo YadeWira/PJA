@@ -1860,6 +1860,16 @@ const
   SYM_TEX = 2 * 256 * 4;  { [first component or not][texture][energy] }
 
 type
+  { Mapped's view of a line: in the fast build a bare pointer, so the
+    hottest routine of JPEG-LS holds no managed local (no reference counts
+    and no implicit try/finally per sample, about 15% of its instructions);
+    the reference build keeps the dynamic array and its range checks. }
+  {$ifdef PJA_FAST}
+  TJlsLine = PInteger;
+  {$else}
+  TJlsLine = array of Integer;
+  {$endif}
+
   TJlsSymModel = class(TJlsSymbols)
     cd: ^TCoder;
     f1, f2, f3, f4, f5, f6, f7: TBits;
@@ -1935,10 +1945,13 @@ begin
 end;
 
 procedure TJlsSymModel.Sample(c, i, x: Integer);
-var t: array of Integer; k: Integer;
+var t: Pointer; k: Integer;
 begin
   if i = 0 then begin
-    t := lines[c, 2]; lines[c, 2] := lines[c, 1]; lines[c, 1] := lines[c, 0]; lines[c, 0] := t;
+    { the three lines rotated as bare references: a pure swap leaves every
+      count as it was, without a managed local here }
+    t := Pointer(lines[c, 2]); Pointer(lines[c, 2]) := Pointer(lines[c, 1]);
+    Pointer(lines[c, 1]) := Pointer(lines[c, 0]); Pointer(lines[c, 0]) := t;
   end;
   lines[c, 0][i + 2] := x;
   k := pendTex[c];
@@ -1973,21 +1986,21 @@ end;
 
 function TJlsSymModel.Mapped(m, c, i, k, ctx, px, sgn: Integer; inv: Boolean; out v: Integer): Boolean;
 var kind, kk, nb, x, e, t, sel, b, bit, act, q, tex, ex, me, eb, mb: Integer;
-    row, l0, l1, l2: array of Integer;
+    row, l0, l1, l2: TJlsLine;
     wa, wwa, nn, nw, ne, nnb, nne, dh, dv, p2, p3, delta: Integer;
     c1, c2, c3, c4, c5, c6, c7: ^TAdaptiveBit;
 begin
   v := 0;
   if ctx >= 365 then kind := 1 + ctx - 365 else kind := 0;
   kk := Min(k, SYM_K - 1);
-  row := vals[c];
+  row := TJlsLine(vals[c]);
   { left, above, above right: the line above is still there right of i }
   nb := Clip(FineLog(Int64(row[i]) + row[i + 1] + row[i + 2] div 2), SYM_NB - 1);
   if (c > 0) and sameAsFirst[c] then x := Clip(FineLog(vals[0][i + 1]), SYM_X - 2) else x := SYM_X - 1;
   q := 2 * near + 1;
   { a second prediction, CALIC's GAP with its error feedback, and the
     mapped value JPEG-LS would see if it were right }
-  l0 := lines[c, 0]; l1 := lines[c, 1]; l2 := lines[c, 2];
+  l0 := TJlsLine(lines[c, 0]); l1 := TJlsLine(lines[c, 1]); l2 := TJlsLine(lines[c, 2]);
   wa := l0[i + 1]; wwa := l0[i]; nn := l1[i + 2]; nw := l1[i + 1]; ne := l1[i + 3];
   nnb := l2[i + 2]; nne := l2[i + 3];
   dh := Abs(wa - wwa) + Abs(nn - nw) + Abs(nn - ne);

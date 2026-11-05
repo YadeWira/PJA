@@ -2122,3 +2122,33 @@ The gain is the tail: it grows with the spread of sizes and shrinks as the
 files outnumber the threads (on 151 photos and 4 threads there is none to
 take). A single large file that holds back the others (the corpus's 4.7 MB
 0056, the jlsphoto's 1.4 MB photo7, both last by name) gains the most.
+
+## JPEG-LS's symbols model without managed locals (05/11/2026)
+
+TJlsSymModel.Mapped, the hottest routine of a JPEG-LS file (its symbols
+model is tried on every file when compressing, and decodes it when
+extracting), took its four rows as local `array of Integer`, and Sample
+rotated the three lines through a fourth: each call cost FPC's reference
+counts and an implicit try/finally (fpc_dynarray_assign, fpc_finalize,
+fpc_pushexceptaddr, about 9% of compressing photo6.jls). In the fast
+build the rows are now bare pointers (TJlsLine), and the lines are
+rotated as bare references (a pure swap: every count stays as it was);
+the reference build keeps the dynamic arrays and their range checks. The
+same arithmetic, the same streams.
+
+Callgrind, photo3.jls (136 KB), one thread: compress 5.87 G to 4.98 G
+instructions (-15%), extract 1.85 G to 1.41 G (-24%). Wall time, one
+thread, four rounds alternated, best:
+
+| | before | after |
+|---|---|---|
+| photo6.jls (786 KB), compress | 3.18 s | **2.89 s** |
+| photo6.jls, extract | 1.28 s | **1.13 s** |
+| photo7.jls (1.4 MB), compress | 6.54 s | **5.84 s** |
+| photo7.jls, extract | 2.61 s | **2.21 s** |
+| gray7.jls (460 KB), compress | 2.60 s | **2.29 s** |
+| gray7.jls, extract | 1.01 s | **0.87 s** |
+
+JPEG photos do not go through this code (20 photos: the same within the
+noise). What is left of the managed overhead in JPEG-LS is
+fpc_dynarray_rangecheck from pjajls, whose $R+ is mandatory.
