@@ -63,3 +63,22 @@ with line interleave given a restart interval of 4 lines (CharLS 2.4
 writes none: PJA's own JPEG-LS encoder, pjajls.RecomposeJls, rebuilt it
 with a DRI segment, and checked it decodes back). Small enough for the
 ZPAQL decoder's test in the Python interpreter.
+
+## `j2k/`
+
+The JPEG 2000 family (stream version 8). Each image is one of `jpg/`'s,
+decoded with libjpeg's `djpeg -pnm` and encoded with OpenJPEG 2.5's
+`opj_compress` (the system's, Debian 13); none comes from elsewhere.
+
+| file | made with |
+|---|---|
+| `plasma_cs.j2k` | `baseline_color.jpg` (64x64) → `opj_compress -r 20`: a raw codestream |
+| `plasma.jp2` | `color_plasma.jpg` (320x240) → `opj_compress -r 60`: a JP2 |
+| `layers.jp2` | `prog_huffman.jpg` (120x80) → `opj_compress -r 80,40,20`: three quality layers |
+| `lossless53.j2k` | `grayscale.jpg` (64x64) → `opj_compress` (its default: lossless, the 5/3 wavelet) |
+| `gray12.jp2` | `grayscale.jpg` scaled to 12 bits (ImageMagick, `convert -depth 12`, a PGM of maxval 4095) → `opj_compress -r 10`: 12 bits a sample |
+| `two_codestreams.jpx` | `pas/tests/mkj2k_boxes.py jpx`, around `plasma_cs.j2k` and `lossless53.j2k`: a JPX with two codestreams, the first in a box with a 64-bit length (XLBox), the second in a last box of length 0 (to the end of the file), with an asoc superbox and a codestream header box |
+| `two_frames.mj2` | `pas/tests/mkj2k_boxes.py mj2`, around `plasma_cs.j2k` and `baseline_444.jpg` → `opj_compress -r 20`: the boxes of a Motion JPEG 2000 file (signature, ftyp `mjp2`, an mdat with two jp2c frames), without the moov box a player needs |
+
+No tool at hand writes JPX or Motion JPEG 2000, hence the last two, put
+together box by box.

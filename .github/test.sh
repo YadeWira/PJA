@@ -47,7 +47,7 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 # shellcheck disable=SC2086
 ${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $RP
-"$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* README.md > "$OUT/lib/test.txt" \
+"$OUT/lib/test_lib$EXE" tests/jpg/* tests/jls/* tests/j2k/* README.md > "$OUT/lib/test.txt" \
   || { cat "$OUT/lib/test.txt"; echo "FAIL: libpja's test"; exit 1; }
 tail -4 "$OUT/lib/test.txt"
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
@@ -67,7 +67,7 @@ else
   Z="$OUT/7z"; rm -rf "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
   cp "$SEVEN/7z$EXE" "$SEVEN/$SLIB" "$Z/"
   cp "$LIBF" "$Z/Codecs/"
-  cp tests/jpg/* tests/jls/* README.md "$OUT/7in/"
+  cp tests/jpg/* tests/jls/* tests/j2k/* README.md "$OUT/7in/"
   "$Z/7z$EXE" i | grep -q '37F01 PJA' || { echo "FAIL: 7-Zip does not list PJA"; exit 1; }
   (cd "$OUT/7in" && "../7z/7z$EXE" a -bso0 -bsp0 -m0=PJA -m1=LZMA2 ../a.7z .)
   "$Z/7z$EXE" x -bso0 -bsp0 -o"$OUT/7x" "$OUT/a.7z"
@@ -78,7 +78,7 @@ else
 fi
 
 echo "== the command: every sample, a then x"
-cp tests/jpg/* tests/jls/* "$OUT/in/"
+cp tests/jpg/* tests/jls/* tests/j2k/* "$OUT/in/"
 "$OUT/pja$EXE" a -q --output-dir="$OUT/p" "$OUT"/in/*
 "$OUT/pja$EXE" x -q --output-dir="$OUT/x" "$OUT"/p/*.pja
 n=0

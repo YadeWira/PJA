@@ -18,7 +18,7 @@ echo "== build"
 # the C part (stream version 7's model), and the same without SSE2
 "$PAS/build_c.sh" "$OUT/c"
 "$PAS/build_c.sh" "$OUT/cplain" -DPJA_V7_PLAIN
-for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt test_threads; do
+for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt test_threads test_versions; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -72,6 +72,11 @@ PJA_BANDS_REVERSE=1 PJA_TEST_V7=1 "$OUT/test_codec" "$SAMP" 2 | tail -2
 "$OUT/test_threads" "$SAMP/y13c12.jpg" | tail -1
 for d in ${dirs[@]+"${dirs[@]}"}; do "$OUT/test_codec" "$d" 1 | tail -2; done
 for d in ${dirs[@]+"${dirs[@]}"}; do PJA_TEST_V7=1 "$OUT/test_codec" "$d" 1 | tail -2; done
+echo "-- stream version 8 (the JPEG 2000 family): every sample back, and damaged streams"
+"$OUT/test_codec" "$PJA/tests/j2k" 7 | tail -2
+"$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
+echo "-- what a later release writes: FutureVersion (codec byte 0 from 9 to 255, PATCH, version 8, .pja)"
+"$OUT/test_versions" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -2
 
 echo "== the fast build (PJA_FAST, with and without asm) writes the same streams as the reference"
 FAST=$OUT/fast; PLAIN=$OUT/plain; mkdir -p "$FAST" "$PLAIN"
@@ -82,7 +87,7 @@ $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/dump_st
 # version 7 with the C part built without SSE2 (and so without its SSE4.1 copy)
 $FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/cplain" -FU"$PLAIN" -FE"$PLAIN" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" ${dirs[@]+"${dirs[@]}"} "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
+SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" ${dirs[@]+"${dirs[@]}"} "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
 for d in ${dirs[@]+"${dirs[@]}"}; do SRC_DIRS+=("v7:$d"); done
 for d in "${SRC_DIRS[@]}"; do
   # fast:DIR = the same, with the fast model; v7:DIR, with stream version 7's

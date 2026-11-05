@@ -1,7 +1,9 @@
 { Layer 4 against damaged streams: every JPEG in the directory is compressed,
   and then every bit of the stream (up to the first max bytes) is flipped
   and every truncation tried. So is the stream of the first file cut in
-  half, which PJA takes only as bytes (stream version 6, BYTES). Decompress may give an error or a JPEG (a
+  half, which PJA takes only as bytes (stream version 6, BYTES); a
+  directory of the JPEG 2000 family has none such (stream version 8 takes
+  a file cut short as it is). Decompress may give an error or a JPEG (a
   different one is caught later by the container's size and hash); an
   exception is a FAILURE. The variants run on every processor (corrupt_par).
 
@@ -19,7 +21,7 @@ var
   { the inputs: each original, its stream, its name; the last one may be the
     stream of a file cut in half, which went as bytes }
   orig, streams: array of TBytes; names: array of string; totals: array of Int64;
-  d, st: TBytes; r: TCodecResult; bytesDone, fast, v7: Boolean; c: TVariantCounts;
+  d, st: TBytes; r: TCodecResult; bytesDone, anyJpeg, fast, v7: Boolean; c: TVariantCounts;
 
 procedure AddInput(const o, s: TBytes; const name: string);
 var n: Integer;
@@ -65,8 +67,10 @@ begin
   { PJA_TEST_FAST=1: the streams of the fast model; PJA_TEST_V7=1: version 7's }
   fast := GetEnvironmentVariable('PJA_TEST_FAST') = '1';
   v7 := GetEnvironmentVariable('PJA_TEST_V7') = '1';
+  anyJpeg := False;
   for i := 0 to files.Count - 1 do begin
     d := ReadFile(files[i]);
+    if (Length(d) >= 2) and (d[0] = $FF) and (d[1] = $D8) then anyJpeg := True;
     if Compress(d, st, True, 1, fast, True, v7).Ok then AddInput(d, st, ExtractFileName(files[i]));
   end;
   { a file cut in half goes as bytes: that stream damaged the same way }
@@ -81,7 +85,7 @@ begin
     Break;
   end;
   c := RunVariants(totals, @TryVariant);
-  if not bytesDone then begin Inc(c.failures); Writeln('  FAIL no file cut in half went as bytes'); end;
+  if anyJpeg and not bytesDone then begin Inc(c.failures); Writeln('  FAIL no file cut in half went as bytes'); end;
   { decoded but different is expected: the codec does not verify, the
     container does (size and hash of the original) }
   Writeln(files.Count, ' files, ', c.variants, ' variants, ', c.taken, ' decoded (', c.same,

@@ -1,8 +1,8 @@
-{ The pja command: JPEG and JPEG-LS files to .pja and back. doc/CLI.md has
-  the switches and the reasons behind them.
+{ The pja command: JPEG, JPEG-LS and JPEG 2000 files to .pja and back.
+  doc/CLI.md has the switches and the reasons behind them.
 
     pja a [options] FILE...     compress: photo.jpg -> photo.pja
-    pja x [options] FILE...     extract:  photo.pja -> photo.jpg (or .jls, .mpo)
+    pja x [options] FILE...     extract:  photo.pja -> photo.jpg (or .jls, .mpo, .jp2...)
     pja list FILE...            what each .pja holds
 
   Nothing is written under an output's name unless it verified: `a` checks
@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel, pjaj2k;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -134,6 +134,7 @@ end;
 procedure Usage(code: Integer);
 begin
   Writeln('pja ', PJA_VERSION, ' - lossless recompression of JPEG and JPEG-LS files');
+  Writeln('        (JPEG 2000 files are taken too, for now through the bytes'' model)');
   Writeln;
   Writeln('usage: pja a [options] FILE...     compress to .pja');
   Writeln('       pja x [options] FILE...     extract from .pja');
@@ -411,6 +412,8 @@ function BytesNote(const r: TPackResult): string;
 begin
   if r.codec.asBytes then Result := '  (as bytes: ' + r.codec.jpeg.Text + ')'
   else if r.codec.repaired then Result := '  (repaired: ' + r.codec.jpeg.Text + ')'
+  { stage A of JPEG 2000: its codestreams are found, not yet modelled }
+  else if r.codec.j2k then Result := '  (JPEG 2000: as bytes for now)'
   else Result := '';
 end;
 
@@ -443,6 +446,7 @@ begin
   if r.ext <> '' then ext := '.' + r.ext
   else if IsJls(orig) then ext := '.jls'
   else if IsMpo(orig) then ext := '.mpo'
+  else if J2kExtension(orig) <> '' then ext := '.' + J2kExtension(orig)
   else ext := '.jpg';
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), ext));
   { a hash that does not match goes through Save as well: it deletes it, or
@@ -456,6 +460,13 @@ begin
   if ext = '' then Result := '' else Result := ', as .' + ext;
 end;
 
+{ a file of the JPEG 2000 family (codec stream version 8) }
+function KindNote(const p: TPja): string;
+begin
+  if not p.stored and (Length(p.payload) > 0) and (p.payload[0] = STREAM_J2K) then Result := ', JPEG 2000'
+  else Result := '';
+end;
+
 procedure ListOne(const f: string);
 var d: TBytes; p: TPja; r: TPjaResult; i: Integer; hex: string;
 begin
@@ -465,7 +476,7 @@ begin
   hex := '';
   for i := 0 to 15 do hex := hex + LowerCase(IntToHex(p.hash[i], 2));
   Say(f + '  original ' + IntToStr(p.orig_size) + ' B, .pja ' + IntToStr(Length(d)) + ' B' +
-      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + ExtNote(p.ext) + '  blake3-128 ' + hex);
+      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + ExtNote(p.ext) + KindNote(p) + '  blake3-128 ' + hex);
 end;
 
 var

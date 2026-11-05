@@ -122,6 +122,29 @@ check "  with --no-verify: the very same .pja" bash -c "
   '$PJA' a -q -f --no-verify '$W/cutlong.jpg' -o '$W/cl2.pja' && cmp -s '$W/cl.pja' '$W/cl2.pja'"
 check "list shows the original size" bash -c "'$PJA' list '$W/pja/color_plasma.pja' | grep -q 'original $(wc -c < "$W/in/color_plasma.jpg" | tr -d ' ') B'"
 
+if [ -e "$W/in/plasma.jp2" ]; then
+  echo "--- the JPEG 2000 family (stream version 8)"
+  check "a says JPEG 2000, list too, x gives it back as .jp2" bash -c "
+    '$PJA' a -f '$W/in/plasma.jp2' -o '$W/j2k/p.pja' | grep -q 'JPEG 2000' && '$PJA' list '$W/j2k/p.pja' | grep -q 'as .jp2, JPEG 2000' &&
+    '$PJA' x -q '$W/j2k/p.pja' -o '$W/j2k/x/' && cmp -s '$W/in/plasma.jp2' '$W/j2k/x/p.jp2'"
+  check "an extension the format does not keep: .jp2, .j2k, .jpx, .mj2 by the content" bash -c "
+    for f in plasma.jp2 plasma_cs.j2k two_codestreams.jpx two_frames.mj2; do
+      cp '$W/in/'\$f '$W/j2k/odd.x y' && '$PJA' a -q -f '$W/j2k/odd.x y' -o '$W/j2k/odd.pja' &&
+      rm -rf '$W/j2k/ox' && '$PJA' x -q '$W/j2k/odd.pja' -o '$W/j2k/ox/' && cmp -s '$W/in/'\$f '$W/j2k/ox/odd.'\${f##*.} || exit 1
+    done"
+  check "a JPEG 2000 file cut in half: taken, back byte for byte" bash -c "
+    head -c 1800 '$W/in/plasma.jp2' > '$W/j2k/half.jp2' && '$PJA' a -q -f '$W/j2k/half.jp2' &&
+    '$PJA' x -q '$W/j2k/half.pja' -o '$W/j2k/hx/' && cmp -s '$W/j2k/half.jp2' '$W/j2k/hx/half.jp2'"
+  python3 -I -c "
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) // 2] ^= 8; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/bad.pja"
+  check "one bit in a version 8 stream: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bad.pja' 2>/dev/null && [ ! -e '$W/j2k/bad.jp2' ]"
+  # p.pja keeps the extension jp2: its stream from byte 40, the first codestream's mode 18 bytes in
+  python3 -I -c "
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 1; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
+  check "a codestream mode of a later release: rc 1, says FutureVersion" bash -c "
+    ! '$PJA' x '$W/j2k/mode.pja' 2> '$W/j2k/err.txt' && grep -q 'FutureVersion' '$W/j2k/err.txt' && [ ! -e '$W/j2k/mode.jp2' ]"
+fi
+
 echo "--- existing outputs"
 cp "$W/in/grayscale.jpg" "$W/g.jpg"; "$PJA" a -q "$W/g.jpg"
 echo old > "$W/g.jpg"
