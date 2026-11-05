@@ -2153,7 +2153,8 @@ stream as `FutureVersion` before it decodes anything, and never reads the
 stream as something else; a reader of a mode it knows checks each
 codestream's place (in order, apart, within the file). Files up to 4 GiB
 - 2 (the places are 32 bits); a larger one is refused as before. Version
-8 is never a part of a version 6 stream (`BadStream` there).
+8 is a whole file, as BYTES is: never a part of a version 6 stream, nor
+the repaired file's stream inside a PATCH stream (`BadStream` in both).
 
 **Dispatch** (`pjacodec.Compress`): a file that starts like either kind
 goes to version 8, and nothing else is tried on it (it does not start like
@@ -2181,7 +2182,13 @@ repository's own JPEGs (a raw codestream, a JP2, three quality layers,
 lossless 5/3, 12 bits), and two put together from such codestreams by
 `pas/tests/mkj2k_boxes.py` (a JPX with two codestreams, one in an XLBox
 and one in a last box of length 0, an asoc superbox; an MJ2 whose mdat
-holds two frames). The codec's round trip (`test_codec`, the same stream
+holds two frames). `test_j2k` checks the codestreams the walk finds in
+each of them (K, each one's place and length) and in the version 8
+stream's table, and in files of boxes it builds (a jp2c at the top, in an
+XLBox, of length 0, in an mdat, in a box that is not a superbox, of other
+bytes, after a box that does not fit, superboxes 16 deep and 17): a round
+trip alone would not show a lost codestream, since mode 0 keeps every byte
+in the host. The codec's round trip (`test_codec`, the same stream
 with 1 and 4 threads and from every build), its damage test (every bit
 of the first 128 bytes of each stream and every truncation: 19,959
 variants, no exception), `cli.sh` (a and x of each, the extension by the
@@ -2225,19 +2232,30 @@ above) is now tested and has an error code of its own:
 
 - **A codec stream of a later version.** A first byte past the last
   version this release knows (9 to 255 now) is `FutureVersion`, at the top,
-  inside a PATCH stream (its repaired file's stream) and inside a `.pja`
-  (`Unpack` gives `Codec(FutureVersion)`); 0 to 4 are `BadStream`; so are
-  a version 8 flag or codestream mode this release does not know.
+  inside a PATCH stream (its repaired file's stream), inside a part of a
+  version 6 stream and inside a `.pja` (`Unpack` gives
+  `Codec(FutureVersion)`); so are a version 8 flag or codestream mode this
+  release does not know (1 to 255 now). 0 to 4 are `BadStream`, and so is
+  version 8 where it never goes (a part, a PATCH's repaired file).
   `pas/tests/test_versions.pas` sweeps the first byte of every stream of
-  the samples (versions 5, 6, 7 and 8, PATCH among them) over 0 to 255,
-  and hand-made ones (that byte alone, with a zero, with 999 bytes after
-  it): about 95,000 cells, no exception.
+  the samples (versions 5, 6, 7 and 8, PATCH among them), of the first
+  part of each version 6 stream with parts, and of each PATCH's repaired
+  file over 0 to 255, version 8's flags and modes too, and hand-made ones
+  (that byte alone, with a zero, with 999 bytes after it): no exception.
 - **`PJA_E_VERSION`** (7) in `pja.h`: `pja_decompress` returns it for a
   `.pja` of a later version or whose codec stream is; the filter's
   decoders for a filter version past theirs (`PJAF` 03, `PJAB` 02), a
   record tag from 04 to FE (left for later records) and a file record
   whose codec stream is of a later version. Until 0.9.0 all of these were
-  `PJA_E_DATA`; damaged data still is. The 7-Zip plugin maps it to
+  `PJA_E_DATA`; other damage still is. Damage cannot be told apart from a
+  newer release in those very bytes: a damaged byte that lands on a codec
+  stream's first byte (and makes it 9 to 255), on version 8's flags or on
+  one of its K mode bytes (making it other than 0), on a filter version or
+  on a record tag (making it 04 to FE) is reported as `PJA_E_VERSION` too
+  (in a `.pja` the stream is decoded before the hash, which covers the
+  original, is checked). Version 8 adds one such byte per codestream. So
+  `PJA_E_VERSION` says "not this release's to read": a newer PJA wrote it,
+  or one of those bytes is damaged. The 7-Zip plugin maps it to
   `E_NOTIMPL`, which 7-Zip 25.01 reports as "Unsupported Method" for the
   files of the block, and damaged data to "Data Error", as before
   (checked on archives with the filter's version, a record tag and a

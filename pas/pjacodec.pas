@@ -1373,6 +1373,9 @@ begin
     if parts[i].copyOf >= 0 then part := Copy(jpeg, parts[parts[i].copyOf].off, parts[i].len)
     else begin
       Result := DecompressAt(parts[i].stream, part, parts[i].len, threads, parts[i].len, depth + 1);
+      { a part a later release wrote (or version 7 without pjav7): why the
+        stream does not read, as at the top }
+      if Result.err = ceFutureVersion then begin jpeg := nil; Exit; end;
       if not Result.Ok or (Length(part) <> parts[i].len) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
     end;
     if parts[i].mode and PART_ZEROS <> 0 then begin
@@ -1418,8 +1421,11 @@ begin
     p := p + 12 + Length(edits[i].ins);
   end;
   inner := Copy(stream, p, Length(stream) - p);
-  { the repaired file: neither repaired again nor as bytes }
-  if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) then
+  { the repaired file: a JPEG's stream, neither repaired again nor as
+    bytes, nor a file of the JPEG 2000 family (version 8, a whole file as
+    BYTES is) }
+  if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) or
+     (inner[0] = STREAM_J2K) then
     Exit(CodecFail(ceBadStream));
   { the repaired file is the original with what the edits take out and
     without what they put back: larger by what RepairJpeg holds to

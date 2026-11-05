@@ -44,7 +44,9 @@ Stream version 8 is fixed as 0.9.5 writes it: its layout (flags, the
 table of codestreams, their streams, the host), flag value 0 and
 codestream mode 0 (raw: the codestream's bytes stay in the host, coded
 with the other bytes) keep their meaning forever, and every release from
-0.9.5 on reads what 0.9.5 writes. JPEG 2000 comes in stages: in 0.9.5
+0.9.5 on reads what 0.9.5 writes. It is a whole file, as BYTES is: never
+a part of a version 6 stream nor the repaired file inside a PATCH stream
+(a reader refuses it there as `BadStream`). JPEG 2000 comes in stages: in 0.9.5
 every codestream is raw, and its later stages (the packets and the
 code-blocks modelled) come in later releases of 0.9.5's series only as new
 codestream mode values, or new flags, in this same layout; nothing a

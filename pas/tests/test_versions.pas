@@ -6,7 +6,10 @@
     hand-made ones (that byte alone, with a zero, with 999 bytes after it):
     FutureVersion; set to 0 to 4: BadStream; to anything: no exception;
   - a PATCH stream whose repaired file's stream starts with 9 to 255:
-    FutureVersion;
+    FutureVersion; a PATCH stream around a version 8 stream (never
+    written: version 8 is a whole file): BadStream;
+  - a version 6 stream with parts whose first part's stream starts with 9
+    to 255: FutureVersion, not BadStream;
   - a version 8 stream with a flag set, or a codestream of a mode other
     than raw (1 to 255): FutureVersion;
   - a .pja whose codec stream starts with 9 to 255: Unpack gives
@@ -19,6 +22,11 @@ uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjapack, pjaf
 
 const
   J2K_ENTRY = 13;
+  PART_ENTRY = 13;
+  FLAG_QUIRKS = 1;
+  FLAG_BYTES = 2;
+  FLAG_CORRECTION = 4;
+  FLAG_PATCH = 8;
 
 var cells, failures: Integer;
 
@@ -65,7 +73,7 @@ end;
 
 var
   files: TStringList; sr: TSearchRec; i, d, b, k, p, e: Integer; data, st, pja, m, back: TBytes;
-  r: TCodecResult; pr: TPackResult; h: THash16; seen: array[0..8] of Integer; patch, v8: Integer;
+  r: TCodecResult; pr: TPackResult; h: THash16; seen: array[0..8] of Integer; patch, v8, inparts: Integer;
   raised: Boolean; name: string; pjas: Integer;
 begin
   files := TStringList.Create; files.Sorted := True;
@@ -74,7 +82,7 @@ begin
       repeat if (sr.Attr and faDirectory) = 0 then files.Add(ParamStr(d) + '/' + sr.Name); until FindNext(sr) <> 0;
       FindClose(sr);
     end;
-  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0;
+  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0; inparts := 0;
   FillChar(seen, SizeOf(seen), 0);
   { hand-made }
   RandSeed := 8;
@@ -102,10 +110,32 @@ begin
         Sweep(st, p, name + ' (PATCH)', 9);
         Inc(patch);
       end;
+      if (st[0] = STREAM_PARTS) and (st[1] and (FLAG_PATCH or FLAG_BYTES) = 0) then begin
+        { parts: the table, the quirks' and corrections' scans, then the
+          first part's stream (the first part is never a copy) }
+        e := Integer(GetU32(st, 2)); p := 6 + PART_ENTRY * e;
+        if st[1] and FLAG_QUIRKS <> 0 then p := p + 4 + 4 * Integer(GetU32(st, p));
+        if st[1] and FLAG_CORRECTION <> 0 then p := p + 4 + 8 * Integer(GetU32(st, p));
+        if e > 0 then begin
+          Sweep(st, p, name + ' (part)', 9);
+          Inc(inparts);
+        end;
+      end;
       if st[0] = STREAM_J2K then begin
         { the flags, then each codestream's mode }
         Sweep(st, 1, name + ' (flags)', 1);
         for e := 0 to Integer(GetU32(st, 2)) - 1 do Sweep(st, 6 + J2K_ENTRY * e + 12, name + ' (mode)', 1);
+        { as a PATCH's repaired file (one edit, none or one byte put in
+          front): never written, refused }
+        for e := 0 to 1 do begin
+          m := nil; SetLength(m, 6 + 12 + e);
+          m[0] := STREAM_PARTS; m[1] := FLAG_PATCH; m[2] := 1;
+          if e = 1 then begin m[14] := 1; m[18] := Ord('Z'); end;
+          SetLength(m, Length(m) + Length(st));
+          Move(st[0], m[Length(m) - Length(st)], Length(st));
+          Check(Verdict(m, raised) = ceBadStream, Format('%s: version 8 inside PATCH (%d)', [name, e]));
+          Check(not raised, name + ': version 8 inside PATCH raised');
+        end;
         Inc(v8);
       end;
       { in a .pja, written as the command writes it }
@@ -126,9 +156,10 @@ begin
       Inc(pjas);
     end;
   end;
-  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d; PATCH %d, .pja %d', [seen[5], seen[6], seen[7], seen[8], patch, pjas]));
+  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d; PATCH %d, with parts %d, .pja %d',
+                 [seen[5], seen[6], seen[7], seen[8], patch, inparts, pjas]));
   { each kind met, so that none of the sweeps above ran empty }
-  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (v8 > 0) and (pjas > 0),
+  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (inparts > 0) and (v8 > 0) and (pjas > 0),
         'every kind of stream among the samples');
   Writeln(files.Count, ' files, ', cells, ' cells, ', failures, ' failures');
   if (failures > 0) or (cells < 10000) then Halt(1);

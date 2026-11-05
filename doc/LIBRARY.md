@@ -175,8 +175,13 @@ limit), `PJA_E_READ` (4) and `PJA_E_WRITE` (5: the filter's callbacks),
 `PJA_E_ARG` (6), and since 0.9.5 `PJA_E_VERSION` (7): the input was
 written by a newer PJA, a `.pja` or codec stream version, a version 8
 codestream mode or flag, a filter version or record this release does not
-know, where 0.9.0 said `PJA_E_DATA`. More codes may come; a caller treats
-one it does not know as an error.
+know, where 0.9.0 said `PJA_E_DATA`. Those bytes can also be damaged, and
+nothing tells the two apart there (a `.pja`'s hash covers the original,
+checked after its stream is decoded): a damaged byte that makes a codec
+stream's first byte 9 to 255, a version 8 flag or mode byte other than 0,
+or a filter record tag 04 to FE gives `PJA_E_VERSION` as well; damage
+anywhere else gives `PJA_E_DATA`. More codes may come; a caller treats one
+it does not know as an error.
 
 `pas/lib/test_lib.c` is the test, and an example: each file through
 `pja_compress`/`pja_decompress`, all of them in one stream with bytes
@@ -214,7 +219,8 @@ open.
 
 A stream a newer PJA wrote (`PJA_E_VERSION`) comes out of the plugin as
 `E_NOTIMPL`, which 7-Zip reports as "Unsupported Method" for the block's
-files, and damaged data as "Data Error", as before (7-Zip 25.01, 0.9.5).
+files, and damaged data as "Data Error", as before (7-Zip 25.01, 0.9.5);
+damage on one of the version bytes above shows as "Unsupported Method".
 
 `-mmt` sets the filter's threads when compressing; extracting, 7-Zip
 gives its thread count only to the first coder of the chain that takes one

@@ -49,7 +49,8 @@ enum {
   PJA_E_ARG = 6,        /* a null pointer or a bad argument */
   PJA_E_VERSION = 7     /* written by a newer PJA: a .pja version, a codec stream
                            version or mode, a filter version or record this
-                           release does not know (until 0.9.0: PJA_E_DATA) */
+                           release does not know (until 0.9.0: PJA_E_DATA);
+                           also damage that lands on one of those bytes */
 };
 
 /* Error codes may be added; a caller treats one it does not know as an
