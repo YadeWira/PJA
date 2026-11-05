@@ -33,6 +33,11 @@
     distance reaches 2^$1 and no segment comes out larger than 2^$1 bytes.
     zpaq-std makes the LZ77 and its native path (the expansion in C, then
     this plugin's decompress); the plugin never sees it.
+  - The o codecs (14 .. 19, 0.7.0): pjalso, pjallo, pjalsxo and their z,
+    pjalszo, pjallzo, pjalsxzo. Each is pjals, pjall, pjalsx (or its z)
+    with the same streams, H and functions, and a ZPAQL half the size or
+    less (ozpaql.inc: the same programs compiled with zpaqlc's opt=2): every
+    block carries its decoder, so a smaller one pays off in small blocks.
   - zpaqstd_detect_v1: 1 if the codec named takes the file, looking only at
     its bytes: only what its ZPAQL decoder covers. pja: a JPEG, Huffman or
     arithmetic, sequential or progressive, that PJA's layer 1 rebuilds byte
@@ -66,6 +71,7 @@ uses
   SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3;
 
 {$I lzzpaql.inc}
+{$I ozpaql.inc}
 
 const
   ZS_DATA_ZPAQL = 2;
@@ -539,8 +545,17 @@ var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; 
 begin
   Result := 0;
   if (codecName = nil) or (n < 4) or (n > MAX_BLOCK) then Exit;
-  { a z codec takes what its codec does: pjaz, pja's files, and so on }
   k := StrLen(codecName);
+  { an o codec takes what its codec does: pjalso, pjals' files; pjalszo,
+    pjalsz's, and so on }
+  if (k >= 2) and (k < Length(base)) and (codecName[k - 1] = 'o') then begin
+    StrLCopy(@base[0], codecName, k - 1);
+    if (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) or
+       (StrComp(@base[0], 'pjalsz') = 0) or (StrComp(@base[0], 'pjallz') = 0) or (StrComp(@base[0], 'pjalsxz') = 0) then
+      Exit(zpaqstd_detect_v1(@base[0], src, n));
+    Exit;
+  end;
+  { a z codec takes what its codec does: pjaz, pja's files, and so on }
   if (k >= 2) and (k < Length(base)) and (codecName[k - 1] = 'z') then begin
     StrLCopy(@base[0], codecName, k - 1);
     if (StrComp(@base[0], 'pja') = 0) or (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjax') = 0) or
@@ -686,6 +701,16 @@ end;
 var
   InfoZ, InfoLsZ, InfoXZ, InfoLlZ, InfoLsxZ: AnsiString;
   Info7, InfoX7, Info7Z, InfoX7Z: AnsiString;
+  InfoLsO, InfoLlO, InfoLsxO, InfoLsZO, InfoLlZO, InfoLsxZO: AnsiString;
+
+{ the o codecs' cards: their codec's, renamed, and what differs }
+function OCard(const name, card: AnsiString): AnsiString;
+var base: AnsiString;
+begin
+  base := Copy(card, 6, Pos(#10, card) - 6);
+  Result := 'name=' + name + Copy(card, Pos(#10, card), MaxInt);
+  Result := StringReplace(Result, 'notes=', 'notes=' + base + '''s streams, files and H, its ZPAQL compiled with zpaqlc''s opt=2 (about half the bytes); ', []);
+end;
 
 { the version 7 codecs' cards: pja's and pjax's, version 7's coefficients }
 function Card7(const name, base, stream: AnsiString; z: Boolean): AnsiString;
@@ -787,6 +812,36 @@ end;
 function LsxZData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
   Result := DataOf(PJALSXZ_ZPAQL, InfoLsxZ, what, size);
+end;
+
+function LsOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSO_ZPAQL, InfoLsO, what, size);
+end;
+
+function LlOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALLO_ZPAQL, InfoLlO, what, size);
+end;
+
+function LsxOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSXO_ZPAQL, InfoLsxO, what, size);
+end;
+
+function LsZOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSZO_ZPAQL, InfoLsZO, what, size);
+end;
+
+function LlZOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALLZO_ZPAQL, InfoLlZO, what, size);
+end;
+
+function LsxZOData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJALSXZO_ZPAQL, InfoLsxZO, what, size);
 end;
 
 const
@@ -912,6 +967,44 @@ const
     bound: @CodecBound; compress_: @X7Compress; decompress_: @X7Decompress;
     query: @X7Query; data: @X7ZData);
 
+  { the o codecs (0.7.0): their codec's library field, streams and
+    functions; only the ZPAQL differs }
+  ZsCodecLsO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalso'; library_: 'pja stream v5 jpeg-ls (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsCompress; decompress_: @CodecDecompress;
+    query: @LsQuery; data: @LsOData);
+
+  ZsCodecLlO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjallo'; library_: 'pja stream v5 lossless jpeg (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LlCompress; decompress_: @CodecDecompress;
+    query: @LlQuery; data: @LlOData);
+
+  ZsCodecLsxO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalsxo'; library_: 'pja stream v5 jpeg-ls subsampled (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsxCompress; decompress_: @CodecDecompress;
+    query: @LsxQuery; data: @LsxOData);
+
+  ZsCodecLsZO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalszo'; library_: 'pja stream v5 jpeg-ls, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsCompress; decompress_: @CodecDecompress;
+    query: @LsQuery; data: @LsZOData);
+
+  ZsCodecLlZO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjallzo'; library_: 'pja stream v5 lossless jpeg, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LlCompress; decompress_: @CodecDecompress;
+    query: @LlQuery; data: @LlZOData);
+
+  ZsCodecLsxZO: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: 'pjalsxzo'; library_: 'pja stream v5 jpeg-ls subsampled, lz77 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @LsxCompress; decompress_: @CodecDecompress;
+    query: @LsxQuery; data: @LsxZOData);
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -934,6 +1027,12 @@ begin
     11: Result := @ZsCodecX7;
     12: Result := @ZsCodec7Z;
     13: Result := @ZsCodecX7Z;
+    14: Result := @ZsCodecLsO;
+    15: Result := @ZsCodecLlO;
+    16: Result := @ZsCodecLsxO;
+    17: Result := @ZsCodecLsZO;
+    18: Result := @ZsCodecLlZO;
+    19: Result := @ZsCodecLsxZO;
   else Result := nil;
   end;
 end;
@@ -967,4 +1066,10 @@ begin
   InfoX7 := Card7('pjax7', 'pjax', 'stream v6 pjax, v7', False);
   Info7Z := Card7('pja7z', 'pja', 'stream v7, LZ77', True);
   InfoX7Z := Card7('pjax7z', 'pjax', 'stream v6 pjax, v7, LZ77', True);
+  InfoLsO := OCard('pjalso', INFO_LS);
+  InfoLlO := OCard('pjallo', INFO_LL);
+  InfoLsxO := OCard('pjalsxo', INFO_LSX);
+  InfoLsZO := OCard('pjalszo', InfoLsZ);
+  InfoLlZO := OCard('pjallzo', InfoLlZ);
+  InfoLsxZO := OCard('pjalsxzo', InfoLsxZ);
 end.

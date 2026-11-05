@@ -1955,3 +1955,49 @@ AVX2 copies still go by cpuid.
   freed. The bands with no thread now run on the caller's thread, after
   the others were started, and those are waited for: the same stream and
   the same JPEG (`tests/test_threads.pas` refuses threads to check it).
+
+## The o codecs: half the ZPAQL for JPEG-LS and lossless JPEG (04/11/2026)
+
+zpaq-std groups a format's files in blocks and every block carries its
+codec's whole ZPAQL; split in blocks of 1 to 4 MB for zpaq 7.15 to
+extract them in parallel, the decoder came to 0.6 to 1.9% of the archive.
+zpaqII proposed emulating subroutines to shrink it: zpaqlc has always
+done that (a call stores a call-site number and long-jumps, the function
+returns through a chain of comparisons), so nothing was inlined. The
+weight came from the optimizations: pjals, pjall and pjalsx were frozen
+compiled without any, and their z with opt; only version 7's decoders had
+opt=2. zpaq-std's `-sa` uses those three and their z.
+
+The same programs compiled with opt=2 (the sources and every other
+decoder unchanged, byte for byte), PCOMP bytes:
+
+| codec | frozen | o (opt=2) |
+|---|---|---|
+| pjals / pjalso | 55,989 | **24,076** |
+| pjalsz / pjalszo | 32,984 | **24,724** |
+| pjall / pjallo | 30,508 | **15,058** |
+| pjallz / pjallzo | 18,003 | **15,693** |
+| pjalsx / pjalsxo | 60,776 | **25,623** |
+| pjalsxz / pjalsxzo | 36,110 | **26,278** |
+
+Their H is their codec's to the word (gen_pjadec checks it), so the
+codec's query sizes them, and they read the same streams: the o codecs
+are their codec with another ZPAQL, codecs 14 to 19 of
+`zpaqstd_codecs_v1`. The smaller program is faster too: libzpaq (zpaq
+7.15's engine, JIT) on the same segments, the frozen decoder against the
+o one, every file back with both:
+
+| set | files | frozen | o |
+|---|---|---|---|
+| JPEG-LS (pjals) | 24 | 78.5 s | **36.2 s** |
+| lossless JPEG (pjall) | 36 | 2.8 s | **1.2 s** |
+| subsampled JPEG-LS (pjalsx) | 67 | 410.9 s | **178.6 s** |
+
+The same compile of pja and pjax gave 29,237 and 28,541 bytes (from
+62,294 and 57,709), but zpaq-std no longer writes them: pja7 and pjax7
+are its codecs for those files. The suite runs the six o decoders on
+segments, alone, two in a block and through the LZ77.
+
+Frozen in 0.7.0, for zpaq-std: pjalso, pjallo, pjalsxo, pjalszo, pjallzo
+and pjalsxzo, their streams and their ZPAQL never change under these
+names.

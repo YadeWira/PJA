@@ -10,6 +10,9 @@ block, as zpaq-std groups them.
     test_pjadec.py --pjalsx <segment dir> <jls> ...  pjalsx's (pjalsxzpaql.inc)
     test_pjadec.py --pja7 <segment dir> <jpeg> ...   pja7's (v7zpaql.inc), stream version 7
     test_pjadec.py --pjax7 <segment dir> <jpeg> ...  pjax7's (v7zpaql.inc)
+    test_pjadec.py --o [--lz] [--pjall|--pjalsx] <segment dir> <file> ...
+        the o codecs' (ozpaql.inc): pjalso's for JPEG-LS files (or pjallo's,
+        pjalsxo's), and with --lz their z (pjalszo, ...); JPEGs, pja's as before
     test_pjadec.py --lz [--pjax|...] <segment dir> <file> ...
         the z codec's instead (lzzpaql.inc; v7zpaql.inc's for --pja7 and
         --pjax7), per decoder on ONE block: its
@@ -32,6 +35,10 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 
 args = sys.argv[1:]
 # --lz: the z codec's decoder, on the segments as LZ77
+# --o: the o codecs' decoders (the same programs, compiled with opt=2)
+ozp = '--o' in args[:3]
+if ozp:
+    args.remove('--o')
 lz = '--lz' in args[:2]
 if lz:
     args.remove('--lz')
@@ -70,6 +77,13 @@ def zconfig(name, incname='lzzpaql.inc'):
     return '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", part, re.M)) + '\n'
 
 
+if ozp:
+    o = 'PJALLO' if pjall else 'PJALSXO' if pjalsx else 'PJALSO'
+    cfgs = {False: cfgs[False], True: zconfig(o, 'ozpaql.inc')}
+    if pjall or pjalsx:
+        cfgs = {False: cfgs[True], True: cfgs[True]}
+
+
 if pja7 or pjax7:
     v7 = zconfig('PJAX7' if pjax7 else 'PJA7', 'v7zpaql.inc')
     cfgs = {False: v7, True: v7}
@@ -78,6 +92,11 @@ if pja7 or pjax7:
 if lz:
     z = 'PJAXZ' if pjax else 'PJALLZ' if pjall else 'PJALSXZ' if pjalsx else None
     cfgs = {False: zconfig(z or 'PJAZ'), True: zconfig(z or 'PJALSZ')}
+    if ozp:
+        zo = (z or 'PJALSZ') + 'O'
+        cfgs = {False: cfgs[False], True: zconfig(zo, 'ozpaql.inc')}
+        if pjall or pjalsx:
+            cfgs = {False: cfgs[True], True: cfgs[True]}
     if pja7 or pjax7:
         z7 = zconfig('PJAX7Z' if pjax7 else 'PJA7Z', 'v7zpaql.inc')
         cfgs = {False: z7, True: z7}
