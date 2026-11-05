@@ -243,9 +243,15 @@ begin
   Result := V7Compiler;
 end;
 
+{$ifdef MSWINDOWS}
+type
+  { RTL_OSVERSIONINFOW is OSVERSIONINFOW }
+  TRtlGetVersion = function(var v: TOSVersionInfoW): LongInt; stdcall;
+{$endif}
+
 function SystemName: string;
 {$ifdef UNIX} var u: UtsName; {$endif}
-{$ifdef MSWINDOWS} var v: TOSVersionInfoA; {$endif}
+{$ifdef MSWINDOWS} var v: TOSVersionInfoA; w: TOSVersionInfoW; get: TRtlGetVersion; {$endif}
 begin
   Result := '';
   {$ifdef UNIX}
@@ -255,8 +261,15 @@ begin
   {$ifdef MSWINDOWS}
   FillChar(v, SizeOf(v), 0);
   v.dwOSVersionInfoSize := SizeOf(v);
-  { Windows past 8.1 answers 6.2 without a manifest; the build number is still its own }
-  if GetVersionExA(@v) then
+  FillChar(w, SizeOf(w), 0);
+  w.dwOSVersionInfoSize := SizeOf(w);
+  { GetVersionEx says 6.2 on any Windows past 8 to a program without a
+    manifest: ntdll's RtlGetVersion tells the truth (on XP too) }
+  get := TRtlGetVersion(GetProcAddress(GetModuleHandle('ntdll.dll'), 'RtlGetVersion'));
+  if (@get <> nil) and (get(w) = 0) then begin
+    v.dwMajorVersion := w.dwMajorVersion; v.dwMinorVersion := w.dwMinorVersion; v.dwBuildNumber := w.dwBuildNumber;
+  end;
+  if (w.dwMajorVersion <> 0) or GetVersionExA(@v) then
     Result := 'Windows ' + IntToStr(v.dwMajorVersion) + '.' + IntToStr(v.dwMinorVersion) + ' build ' +
               IntToStr(v.dwBuildNumber)
   else Result := 'Windows';
