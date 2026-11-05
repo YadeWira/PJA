@@ -2093,3 +2093,32 @@ A last round of checks on what 0.9.0 fixes (`doc/STABILITY.md`):
   verify or a stream that does not rebuild), `pja a` on 18,348 damaged
   JPEG and JPEG-LS files, `7z t` on 15,994 damaged archives: no crash, no
   hang, nothing taken that did not come back.
+
+## The largest files first (05/11/2026)
+
+`pja -th N` took its files in the order of the arguments, one per worker.
+With sizes ten times apart, the last big file often started when the other
+workers had nothing left, and they waited for it: simulated on 30 of the
+b151 photos in name order, the run took 1.31 times the ideal. Now, with more
+than one worker, the workers take the largest first (the input's size: the
+JPEG for `a`, the `.pja` for `x` and `list`; a file that cannot be read
+counts as 0), which brings it to 1.04. The lines still come out in the order
+of the inputs, `a` still takes its outputs in that order before the workers
+start, and with one worker nothing changes. Every `.pja` and every extracted
+file is the same, and so is what the command prints.
+
+Wall time, `-th 4` on 4 cores, A (0.9.0) and B alternated, best of the
+rounds (the machine was loaded):
+
+| set | compress A → B | extract A → B |
+|---|---|---|
+| 30 b151 photos, name order (5 rounds) | 4.780 → 4.466 s (−6.6%) | 2.482 → 2.330 s (−6.1%) |
+| corpus-jpg, 78 files (4 rounds) | 21.335 → 17.215 s (−19%) | 9.296 → 7.553 s (−19%) |
+| jlsphoto, 16 JPEG-LS (3 rounds) | 23.301 → 15.649 s (−33%) | 9.231 → 6.210 s (−33%) |
+| arith, 244 small files (4 rounds) | 5.502 → 5.423 s | 2.323 → 2.378 s (noise) |
+| all 151 b151 photos (3 rounds) | 33.736 → 33.818 s | 16.801 → 16.794 s |
+
+The gain is the tail: it grows with the spread of sizes and shrinks as the
+files outnumber the threads (on 151 photos and 4 threads there is none to
+take). A single large file that holds back the others (the corpus's 4.7 MB
+0056, the jlsphoto's 1.4 MB photo7, both last by name) gains the most.
