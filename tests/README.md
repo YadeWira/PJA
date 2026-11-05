@@ -76,9 +76,11 @@ decoded with libjpeg's `djpeg -pnm` and encoded with OpenJPEG 2.5's
 | `plasma.jp2` | `color_plasma.jpg` (320x240) → `opj_compress -r 60`: a JP2 |
 | `layers.jp2` | `prog_huffman.jpg` (120x80) → `opj_compress -r 80,40,20`: three quality layers |
 | `lossless53.j2k` | `grayscale.jpg` (64x64) → `opj_compress` (its default: lossless, the 5/3 wavelet) |
-| `gray12.jp2` | `grayscale.jpg` scaled to 12 bits (ImageMagick, `convert -depth 12`, a PGM of maxval 4095) → `opj_compress -r 10`: 12 bits a sample |
+| `gray_12bit.jp2` | `grayscale.jpg` scaled to 12 bits (ImageMagick, `convert -depth 12`, a PGM of maxval 4095) → `opj_compress -r 10`: 12 bits a sample |
 | `two_codestreams.jpx` | `pas/tests/mkj2k_boxes.py jpx`, around `plasma_cs.j2k` and `lossless53.j2k`: a JPX with two codestreams, the first in a box with a 64-bit length (XLBox), the second in a last box of length 0 (to the end of the file), with an asoc superbox and a codestream header box |
 | `two_frames.mj2` | `pas/tests/mkj2k_boxes.py mj2`, around `plasma_cs.j2k` and `baseline_444.jpg` → `opj_compress -r 20`: the boxes of a Motion JPEG 2000 file (signature, ftyp `mjp2`, an mdat with two jp2c frames), without the moov box a player needs |
 
 No tool at hand writes JPX or Motion JPEG 2000, hence the last two, put
-together box by box.
+together box by box. Their names are apart from `jpg/`'s and `jls/`'s
+(`gray_12bit.jp2`, not `gray12.jp2`): the suites put every sample in one
+folder, and two inputs with the same name give the same `.pja`.
