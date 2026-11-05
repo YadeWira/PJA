@@ -210,5 +210,155 @@ check "an unknown command: rc 2" test "$(rc "$PJA" mix "$W/in/grayscale.jpg")" -
 check "no files: rc 2" test "$(rc "$PJA" a)" -eq 2
 check "--help: rc 0" "$PJA" --help
 
+echo "--- version, selftest, --cpu"
+check "--version: the build, the compilers, the SIMD path" bash -c "
+  o=\$('$PJA' --version) && head -1 <<< \"\$o\" | grep -q '^pja [0-9]' &&
+  for k in commit built fpc c_compiler target system cpu_features cpu_path cpu_paths_supported processors; do
+    grep -q \"^\$k: \" <<< \"\$o\" || exit 1; done"
+check "-V: the same" bash -c "[ \"\$('$PJA' -V)\" = \"\$('$PJA' --version)\" ]"
+check "selftest: every check passed, rc 0" bash -c "'$PJA' selftest | grep -q 'checks passed'"
+check "selftest -q: the summary alone" bash -c "[ \$('$PJA' selftest -q | wc -l) -eq 1 ]"
+PATHS=$("$PJA" --version | sed -n 's/^cpu_paths_supported: //p')
+check "--cpu: every path here ($PATHS) gives the very same .pja, and x takes it back" bash -c "
+  '$PJA' a -q -f '$W/in/color_plasma.jpg' '$W/in/prog_huffman.jpg' '$W/in/gray8.jls' -o '$W/cpu/' || exit 1
+  for p in $PATHS; do
+    '$PJA' --cpu=\$p a -q -f '$W/in/color_plasma.jpg' '$W/in/prog_huffman.jpg' '$W/in/gray8.jls' -o '$W/cpu_'\$p/ || exit 1
+    for f in color_plasma prog_huffman gray8; do cmp -s '$W/cpu/'\$f.pja '$W/cpu_'\$p/\$f.pja || exit 1; done
+    '$PJA' x -q -f --cpu=\$p '$W/cpu_'\$p/color_plasma.pja -o '$W/cpu_x_'\$p.jpg &&
+      cmp -s '$W/in/color_plasma.jpg' '$W/cpu_x_'\$p.jpg || exit 1
+  done"
+check "--cpu with a path that is no path: rc 2" test "$(rc "$PJA" --cpu=avx512 selftest)" -eq 2
+for p in plain sse41 avx2; do
+  case " $PATHS " in *" $p "*) ;; *)
+    check "--cpu=$p, which this machine lacks: rc 2, naming those it has" bash -c "
+      ! '$PJA' --cpu=$p selftest 2> '$W/cpuerr.txt' && grep -q 'it has: plain' '$W/cpuerr.txt'" ;;
+  esac
+done
+
+echo "--- t"
+mkdir -p "$W/t"; cp "$W/pja/grayscale.pja" "$W/pja/color_plasma.pja" "$W/pja/gray2.pja" "$W/t/"
+cp "$W/p.pja" "$W/t/damaged.pja"
+check "t: OK for each good .pja, rc 0" bash -c "
+  [ \$('$PJA' t '$W/t/grayscale.pja' '$W/t/color_plasma.pja' '$W/t/gray2.pja' | grep -c ': OK') -eq 3 ]"
+check "t -q -th 4: nothing printed, rc 0" bash -c "[ -z \"\$('$PJA' t -q -th 4 '$W/t/grayscale.pja' '$W/t/color_plasma.pja')\" ]"
+check "t on a damaged .pja: FAILED, rc 1" bash -c "
+  ! '$PJA' t '$W/t/grayscale.pja' '$W/t/damaged.pja' > '$W/t.out' 2> '$W/t.err' &&
+  grep -q 'grayscale.pja: OK' '$W/t.out' && grep -q 'damaged.pja: FAILED' '$W/t.err'"
+check "  and t wrote nothing" test "$(ls "$W/t" | wc -l)" -eq 4
+check "t on a JPEG: rc 1" test "$(rc "$PJA" t "$W/in/grayscale.jpg")" -eq 1
+check "t -o: rc 2 (t writes nothing)" test "$(rc "$PJA" t -o "$W/t/x" "$W/t/grayscale.pja")" -eq 2
+check "t --max-output below the original: rc 1" test "$(rc "$PJA" t --max-output=100 "$W/t/grayscale.pja")" -eq 1
+
+echo "--- info"
+check "info on a JPEG: its frame, its scans, and that PJA takes it" bash -c "
+  o=\$('$PJA' info '$W/in/prog_huffman.jpg') && grep -q 'format: JPEG' <<< \"\$o\" &&
+  grep -q 'SOF2 at' <<< \"\$o\" && grep -q 'progressive: true' <<< \"\$o\" && grep -q 'pja: takes it: stream version 7' <<< \"\$o\""
+check "info on an MPO: its MPF index and the image after the EOI" bash -c "
+  o=\$('$PJA' info '$W/in/stereo.mpo') && grep -q 'format: MPO' <<< \"\$o\" && grep -q 'multi-frame disparity' <<< \"\$o\" &&
+  grep -q 'after the EOI, ' <<< \"\$o\" && grep -q 'stream version 6 (parts)' <<< \"\$o\""
+check "info on a JPEG-LS: NEAR and the interleave" bash -c "
+  '$PJA' info '$W/in/color_sample_near2.jls' | grep -q 'NEAR 2, interleave 2'"
+check "info on a JPEG PJA repairs: says why" bash -c "'$PJA' info '$W/in/restarts_misnumbered.jpg' | grep -q 'repaired: BadRst'"
+check "info on a .pja: the container and its stream" bash -c "
+  o=\$('$PJA' info '$W/pja/two_images.pja') && grep -q 'format: PJA' <<< \"\$o\" && grep -q 'original_size: ' <<< \"\$o\" &&
+  grep -q 'kind: parts' <<< \"\$o\" && grep -q 'bands: ' <<< \"\$o\" && grep -q 'pja: extracts it' <<< \"\$o\""
+check "info on a damaged .pja: does not extract it, rc 0" bash -c "'$PJA' info '$W/t/damaged.pja' | grep -q 'does not extract it'"
+check "info on something else: PJA refuses it, rc 0" bash -c "'$PJA' info '$W/text.jpg' | grep -q 'refuses it: '"
+check "info on a missing file: rc 1" test "$(rc "$PJA" info "$W/missing.jpg")" -eq 1
+
+echo "--- report"
+python3 -I -c "
+import sys, struct
+d = open(sys.argv[1], 'rb').read()
+ex = b'Exif\0\0MM\0*\0\0\0\x08' + b'PRIVATE-EXIF-OWNER-NAME' * 3
+com = b'PRIVATE-COMMENT-TEXT'
+xmp = b'http://ns.adobe.com/xap/1.0/\0<x:xmpmeta>PRIVATE-XMP-TEXT</x:xmpmeta>'
+seg = lambda m, p: b'\xff' + bytes([m]) + struct.pack('>H', len(p) + 2) + p
+open(sys.argv[2], 'wb').write(d[:2] + seg(0xE1, ex) + seg(0xE1, xmp) + seg(0xFE, com) + d[2:])" \
+  "$W/in/grayscale.jpg" "$W/private.jpg"
+mkdir -p "$W/rep"
+check "report: the system, the file's hash, its structure, what PJA does" bash -c "
+  '$PJA' report '$W/private.jpg' > '$W/rep/r.txt' && grep -q '^cpu_path: ' '$W/rep/r.txt' &&
+  grep -q '^blake3_128: ' '$W/rep/r.txt' && grep -q 'APP1 Exif at 2' '$W/rep/r.txt' && grep -q 'COM at ' '$W/rep/r.txt' &&
+  grep -q '^pja: takes it' '$W/rep/r.txt'"
+check "  privacy: no EXIF, XMP or COM text in it, only their sizes" bash -c "
+  ! grep -q 'PRIVATE' '$W/rep/r.txt' && grep -q 'Exif 83 B, XMP ' '$W/rep/r.txt' && grep -q '1 COM (20 B)' '$W/rep/r.txt'"
+check "  privacy: the file's name, never its folders" bash -c "
+  ! grep -q '$(basename "$W")/' '$W/rep/r.txt' && grep -q '^pja report private.jpg$' '$W/rep/r.txt'"
+check "  a link to a new issue, its body the report, under 6000 characters" bash -c "
+  u=\$(grep '^https://' '$W/rep/r.txt') &&
+  [[ \$u == https://github.com/YadeWira/PJA/issues/new?template=bug_report.yml\&title=*\&body=PJA%20bug%20report* ]] &&
+  [ \${#u} -le 6000 ] && ! grep -q PRIVATE <<< \"\$u\""
+check "  a long one: the link cut, saying so" bash -c "
+  u=\$('$PJA' report '$W/scans1024.jpg' | grep '^https://') && [ \${#u} -le 6000 ] && grep -q '%5Bcut' <<< \"\$u\""
+check "report -o: the report in that file, the link on the screen" bash -c "
+  '$PJA' report '$W/private.jpg' -o '$W/rep/out.txt' | grep -q '^https://github.com/YadeWira/PJA/issues/new' &&
+  grep -q '^PJA bug report' '$W/rep/out.txt' && ! grep -q PRIVATE '$W/rep/out.txt'"
+check "  an existing report is not replaced: rc 1" bash -c "
+  echo keep > '$W/rep/keep.txt' && ! '$PJA' report '$W/private.jpg' -o '$W/rep/keep.txt' 2>/dev/null &&
+  [ \"\$(cat '$W/rep/keep.txt')\" = keep ]"
+check "report --with-file: the file copied beside the report, byte for byte" bash -c "
+  '$PJA' report --with-file '$W/private.jpg' -o '$W/rep/w.txt' > /dev/null && cmp -s '$W/private.jpg' '$W/rep/pja-report-private.jpg'"
+check "report with no file: the system part, rc 0" bash -c "'$PJA' report | grep -q '^== No file'"
+check "report with two files: rc 2" test "$(rc "$PJA" report "$W/private.jpg" "$W/in/grayscale.jpg")" -eq 2
+check "--with-file is for report: rc 2" test "$(rc "$PJA" a --with-file "$W/private.jpg")" -eq 2
+
+echo "--- --stats and --json"
+check "a --stats: each stage, the threads and bands, and a summary" bash -c "
+  o=\$('$PJA' a -f --stats -th 1 '$W/in/color_plasma.jpg' '$W/in/gray2.jls' -o '$W/st/') &&
+  [ \$(grep -c '  stats: read .*parse .*encode .*verify .*write .*; 1 thread(s), 1 band(s)' <<< \"\$o\") -eq 2 ] &&
+  grep -q '^pja: 2 file(s), ' <<< \"\$o\""
+check "x --stats: decode and hash" bash -c "
+  '$PJA' x -f --stats '$W/st/color_plasma.pja' -o '$W/st/' | grep -q 'stats: read .*decode .*hash .*write'"
+check "t --stats -q: the stats alone" bash -c "
+  o=\$('$PJA' t -q --stats '$W/st/color_plasma.pja') && ! grep -q OK <<< \"\$o\" && grep -q 'stats: read' <<< \"\$o\""
+check "--stats is not for list: rc 2" test "$(rc "$PJA" list --stats "$W/st/color_plasma.pja")" -eq 2
+JS="import json, sys
+lines = sys.stdin.read().splitlines()
+objs = [json.loads(l) for l in lines]
+assert objs and 'summary' in objs[-1], objs[-1:]
+for o in objs[:-1]: assert 'file' in o and o['ok'] in (True, False)
+assert len(objs) - 1 == int(sys.argv[1]), len(objs)"
+check "a --json: a JSON object a file and a summary" bash -c "
+  '$PJA' a -f --json --stats '$W/in/grayscale.jpg' '$W/in/cut_short.jpg' '$W/text.jpg' -o '$W/js/' 2>/dev/null |
+  python3 -I -c \"\$1\" 3" _ "$JS"
+check "  with the failure as ok false and its error" bash -c "
+  '$PJA' a -f --json '$W/text.jpg' -o '$W/js/' 2>/dev/null | head -1 |
+  python3 -I -c 'import json,sys; o=json.load(sys.stdin); assert o[\"ok\"] is False and \"Codec\" in o[\"error\"]'"
+check "x --json" bash -c "'$PJA' x -f --json '$W'/js/*.pja -o '$W/js/' | python3 -I -c \"\$1\" 2" _ "$JS"
+check "t --json" bash -c "'$PJA' t --json '$W/t/grayscale.pja' '$W/t/damaged.pja' 2>/dev/null | python3 -I -c \"\$1\" 2" _ "$JS"
+check "list --json" bash -c "'$PJA' list --json '$W'/js/*.pja | python3 -I -c \"\$1\" 2" _ "$JS"
+check "info --json, a JPEG, an MPO, a JPEG-LS, a .pja" bash -c "
+  '$PJA' info --json '$W/in/thumbs_twice.jpg' '$W/in/stereo.mpo' '$W/in/color_line.jls' '$W/pja/two_images.pja' |
+  python3 -I -c \"\$1\" 4" _ "$JS"
+check "--json is not for bench: rc 2" test "$(rc "$PJA" bench --json "$W/in/grayscale.jpg")" -eq 2
+
+echo "--- bench"
+mkdir -p "$W/bench"; cp "$W/in/grayscale.jpg" "$W/pja/gray2.pja" "$W/bench/"
+check "bench: a, a --no-verify and x, each with MB/s, rc 0" bash -c "
+  o=\$('$PJA' bench -r 2 -th 2 '$W/bench/grayscale.jpg' '$W/bench/gray2.pja') && grep -q '^cpu_path: ' <<< \"\$o\" &&
+  grep -q '^  a --no-verify .* MB/s' <<< \"\$o\" && [ \$(grep -c '^  x .* MB/s' <<< \"\$o\") -eq 3 ]"
+check "  and nothing written beside the inputs" test "$(ls "$W/bench" | wc -l)" -eq 2
+check "bench -r 0: rc 2" test "$(rc "$PJA" bench -r 0 "$W/bench/grayscale.jpg")" -eq 2
+check "bench on something else: rc 1" test "$(rc "$PJA" bench "$W/text.jpg")" -eq 1
+
+echo "--- a bug in PJA"
+cp "$W/in/grayscale.jpg" "$W/bug.jpg"
+check "an internal error (a range check): its own exit code, 3, and what to do" bash -c "
+  PJA_TEST_CRASH=range '$PJA' a -f '$W/bug.jpg' -o '$W/bug.pja' 2> '$W/bug.txt'; [ \$? -eq 3 ] &&
+  grep -q 'internal error: ERangeError' '$W/bug.txt' &&
+  grep -q 'This is a bug in PJA. Please run: pja report .*bug.jpg and open an issue at https://github.com/YadeWira/PJA/issues' '$W/bug.txt'"
+check "  and nothing written" test ! -e "$W/bug.pja"
+check "an access violation, in a worker thread: rc 3" bash -c "
+  PJA_TEST_CRASH=access '$PJA' a -f -th 4 '$W/bug.jpg' '$W/in/solid_color.jpg' -o '$W/bugs/' 2> '$W/bug2.txt'; [ \$? -eq 3 ] &&
+  grep -q 'EAccessViolation' '$W/bug2.txt' && grep -q 'This is a bug in PJA' '$W/bug2.txt'"
+check "a file that fails as a file is not a bug: rc 1" bash -c "'$PJA' a '$W/text.jpg' 2> '$W/nb.txt'; [ \$? -eq 1 ] && ! grep -q 'bug' '$W/nb.txt'"
+
+echo "--- usage"
+check "selftest with a file: rc 2" test "$(rc "$PJA" selftest "$W/bug.jpg")" -eq 2
+check "info -o: rc 2" test "$(rc "$PJA" info -o "$W/x.txt" "$W/bug.jpg")" -eq 2
+check "-r for a: rc 2" test "$(rc "$PJA" a -r 2 "$W/bug.jpg")" -eq 2
+check "report -f: rc 2" test "$(rc "$PJA" report -f "$W/bug.jpg")" -eq 2
+
 echo "$cells cells, $failures failures"
-[ "$failures" -eq 0 ] && [ "$cells" -ge 40 ]
+[ "$failures" -eq 0 ] && [ "$cells" -ge 100 ]
