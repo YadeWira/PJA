@@ -41,33 +41,38 @@ give the JPEG back byte for byte too, against `pja` 0.6.2. Measured on
 file decompressed and compared with the original; a file a tool does not
 take, or that does not come back the same, counts at its own size.
 
-| set | files | size | packJPG 5.0g | JPEG XL | PJA 0.7.0 |
-|---|---|---|---|---|---|
-| photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 79.80% | **72.60%** |
-| corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 86.03% (takes 56) | **70.39%** |
-| MPO (stereo pairs) | 6 | 41.0 MB | 86.54% | takes none | **73.38%** |
-| arithmetic-coded JPEG | 244 | 6.7 MB | 78.52% | takes none | **74.59%** |
-| generated JPEGs | 640 | 18.3 MB | 77.48% | 85.35% (takes 528) | **73.72%** |
-| 12-bit JPEG, small | 10 | 83 KB | takes none | takes none | **88.14%** |
-| 12-bit JPEG from camera RAWs | 12 | 27.7 MB | takes none | takes none | **84.80%** |
-| lossless JPEG | 36 | 390 KB | takes none | takes none | **96.04%** |
+| set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.7.0 |
+|---|---|---|---|---|---|---|---|
+| photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 79.80% | 79.42% (takes 136) | 77.98% | **72.60%** |
+| corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 86.03% (takes 56) | 85.11% (takes 55) | 75.36% (takes 64) | **70.39%** |
+| MPO (stereo pairs) | 6 | 41.0 MB | 86.54% | takes none | 87.65% | 87.71% | **73.38%** |
+| arithmetic-coded JPEG | 244 | 6.7 MB | 78.52% | takes none | takes none | takes none | **74.59%** |
+| generated JPEGs | 640 | 18.3 MB | 77.48% | 85.35% (takes 528) | 83.95% (takes 511) | 79.69% (takes 604) | **73.72%** |
+| 12-bit JPEG, small | 10 | 83 KB | takes none | takes none | takes none | takes none | **88.14%** |
+| 12-bit JPEG from camera RAWs | 12 | 27.7 MB | takes none | takes none | takes none | takes none | **84.80%** |
+| lossless JPEG | 36 | 390 KB | takes none | takes none | takes none | takes none | **96.04%** |
 
 And how fast, on the 151 photos (two Xeon E5-2697A v4, 64 threads, with
 other work running). "8 at once": `pja -th 8`; the others, 8 processes of
-one file each, best of three runs for one thread. PJA and packJPG verify
-what they write; `cjxl` does not.
+one file each, best of three runs for one thread. PJA, packJPG and Lepton
+verify what they write; `cjxl` and `cbrunsli` do not. Lepton (Dropbox,
+commit `f34c7f4`, `-singlethread -allowprogressive`) and brunsli (Google,
+commit `c18b962`) were built from their repositories.
 
-| | packJPG 5.0g | JPEG XL | PJA 0.7.0 |
-|---|---|---|---|
-| compress, 1 thread | 72.2 s | **27.0 s** | 66.2 s |
-| decompress, 1 thread | 37.3 s | **10.9 s** | 32.5 s |
-| compress, 8 at once | 10.3 s | **4.2 s** | 9.4 s |
-| decompress, 8 at once | 5.3 s | **1.5 s** | 4.7 s |
+| | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.7.0 |
+|---|---|---|---|---|---|
+| compress, 1 thread | 72.2 s | 27.0 s | 40.8 s | **13.3 s** | 66.2 s |
+| decompress, 1 thread | 37.3 s | 10.9 s | 15.3 s | **9.0 s** | 32.5 s |
+| compress, 8 at once | 10.3 s | 4.2 s | 5.8 s | **1.9 s** | 9.4 s |
+| decompress, 8 at once | 5.3 s | 1.5 s | 2.2 s | **1.4 s** | 4.7 s |
 
-PJA is the smallest on every set and the only one that takes every file:
-5.5% smaller than packJPG on photos and 9 to 15% faster, and 9.9% smaller
-than JPEG XL, which is 2.2 to 3.1 times faster but takes no arithmetic,
-12-bit or lossless JPEG nor MPO.
+PJA is the smallest on every set and the only one that takes every file.
+On photos it is 5.5% smaller than packJPG and 9 to 15% faster; 7.4% smaller
+than brunsli, the fastest (3.4 to 5 times PJA's speed); 9.4% smaller than
+Lepton (1.6 to 2.1 times as fast, and it leaves 15 of the 151 photos as
+they are); 9.9% smaller than JPEG XL (2.2 to 3.1 times as fast). None of
+the four takes 12-bit or lossless JPEG, and only packJPG takes
+arithmetic-coded ones.
 
 ## Against archivers
 
