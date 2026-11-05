@@ -1,14 +1,18 @@
 # What does not change
 
-From 0.9.0, every format PJA writes is fixed: a file written by 0.9.0 or
-later, or by any earlier release, is read by every release after it. 1.0.0
-adds one thing, 7-Zip method IDs of PJA's own (below); nothing it reads or
-writes otherwise changes.
+From 0.9.0, every format PJA writes is fixed: a file written by 0.9.0, or
+by any earlier release, is read by every release after it, and none of
+these formats changes again. 1.0.0 adds 7-Zip method IDs of PJA's own
+(below).
 
-What may still change: speed, the files PJA takes (more, never fewer), and
-the encoder's choices. A later release can write other bytes for the same
-file (a better repair of a damaged JPEG, a different choice of streams),
-in the same formats: every release from 0.9.0 on reads them.
+What may still change: speed, the encoder's choices, and the files PJA
+takes (more, never fewer). For a JPEG or JPEG-LS file a later release can
+write other bytes (a better repair of a damaged JPEG, a different choice of
+streams), in these same formats, which every release from 0.9.0 on reads.
+A new kind of file (JPEG 2000 is being studied) would come as a new codec
+stream version beside these, with its own zpaq-std codecs: the releases
+before it refuse such a stream cleanly ("a newer version"), and read
+everything else as before.
 
 ## The `.pja` file
 
