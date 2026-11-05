@@ -595,7 +595,8 @@ begin
   jobs := nil;
   begin
     { ownHead: another file's header stream with these bands (a host's,
-      whose bands are the file's), verified elsewhere }
+      whose bands are the file's), verified elsewhere; or this file's own,
+      HeadBytes(j), already coded by CompressAt to weigh the parts }
     if Length(ownHead) > 0 then head := ownHead
     else begin
       cd.InitEncoder;
@@ -849,7 +850,7 @@ end;
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                     model: TModelKind; depth: Integer; huffOnly: Boolean = False): TCodecResult;
 var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from, nextFF: SizeInt; n, i, c: Integer;
-    sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TQuirks;
+    sub, ps, host, hs, hostHead, ownHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TQuirks;
 begin
   stream := nil;
   { huffOnly (the zpaq-std plugin's pjax): Huffman JPEGs and parts of one
@@ -914,7 +915,7 @@ begin
     end;
     if not ok then Inc(k);
   end;
-  hostHead := nil;
+  hostHead := nil; ownHead := nil;
   if n > 0 then begin
     { the host }
     host := nil; SetLength(host, Length(jpeg));
@@ -945,16 +946,19 @@ begin
     if (whole * 4 < Length(jpeg)) or (Length(jpeg) < 1 shl 20) then begin
       withParts := 6 + PART_ENTRY * n + STREAM_HEADER + Length(hostHead);
       for i := 0 to n - 1 do Inc(withParts, Length(parts[i].stream));
-      without := STREAM_HEADER + Length(HeadBytes(j));
+      { the file's own header stream: if the parts lose, it is the one
+        CompressJpeg would code again, so it goes there as it is }
+      ownHead := HeadBytes(j);
+      without := STREAM_HEADER + Length(ownHead);
       if not NoQuirks(quirks) then without := without + 6;
       if withParts >= without then n := 0;
     end;
   end;
-  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model));
+  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model, ownHead));
   { the host's stream: its header stream and the bands, coded once from the
     file, whose bands they are; the file's own with no parts }
   if n > 0 then Result := CompressJpeg(jpeg, j, hs, False, threads, model, hostHead)
-  else Result := CompressJpeg(jpeg, j, hs, False, threads, model);
+  else Result := CompressJpeg(jpeg, j, hs, False, threads, model, ownHead);
   if not Result.Ok then Exit;
   len := 6 + PART_ENTRY * n + Length(hs);
   for i := 0 to n - 1 do Inc(len, Length(parts[i].stream));

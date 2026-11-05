@@ -2181,3 +2181,66 @@ that a short walk leaves alone. The command, `-th 1`, best of 4 or 5 alternated 
 
 Photos (20 of the 151) and JPEG-LS do not change: their raw parts are
 small.
+
+## The raw bytes' model in C (05/11/2026)
+
+The bytes PJA keeps as they are (APP segments, ICC profiles, what follows
+the EOI) go through orders 0, 1 and 2 mixed by a 4-input mixer. In Pascal
+that cost about 350 instructions a bit (four Add calls, Mix calling the
+SSE4.1 dot product, CodeP calling Encode, Update calling its SSE4.1 copy,
+three counter updates), as much as one of version 7's mixed decisions,
+and it is serial: on a camera or Photoshop JPEG with a large profile it
+was half of compressing (corpus 0046: 52%) and the bound of `-th 8`.
+
+`pjav7c.c` now has the loop (`pjav7_raw_d`, `pjav7_raw_e`), the same
+arithmetic step by step: the dot product in 32 bits, TruncShr(dot, 16),
+the squash clamped, pr shl 4 into the version-5 coder (dbit and ebit are
+pjaarith's Decode and Encode; the encoder's bytes go out through the 4 KB
+buffer), err = ((bit shl 12) - pr) * MIX_LR and each weight's step
+clamped to ±2^17, the counters by learn() (TAdaptiveBit.Update at limit
+255). The lanes 4..7 of the Pascal mixer hold zeros and never move, so
+they are left out. RawReset is folded in at the end. `pjav7.pas` installs
+it at start-up (`pjamodel.RawCode`); `PJA_NOASM=1`, the zpaq-std plugin
+and a `PJA_COSTS` run keep the Pascal. It is compiled a second time for
+SSE4.1 (the four weights in pmulld), taken by cpuid like the coefficient
+loop. The cache lines of the order-1 and order-2 counters are prefetched:
+encoding, the next byte's whole path through the tree (the byte is
+known); decoding, the first four lines of the byte's 256 counters, and the
+line of nodes 64..255 two bits before it is read. The suite compresses
+the samples with the C and with the Pascal, and extracts each one's
+`.pja` with the other (`tests/cli.sh`); the fast build without asm is the
+Pascal against the reference in `run_codec_tests.sh`, and the C without
+SSE2 is there for version 7.
+
+And one exact saving around it: when a file's parts lose, CompressAt has
+already coded the file's own header stream (HeadBytes, to weigh them)
+and now hands it to CompressJpeg instead of coding it again.
+
+Every stream the same: corpus-jpg (78), b151 (151), the arithmetic set
+(244), the MPO set and jlsphoto, each compressed with 0.9.0, with this and
+with this under `PJA_NOASM=1`, and each one's extracted by the others;
+`.github/test.sh` still gives 3387e58d... The C objects build for
+`clang -m32`, `gcc -m32`, both MinGW-w64 and aarch64 with no undefined
+symbol, and the win64 `pja.exe` links.
+
+Instructions (callgrind, one thread): 0046 compress 10.10 G -> 7.23 G
+(-28%), extract 4.01 G -> 3.08 G (-23%); the raw model is now about 160
+instructions a bit, with RawReset. 3 b151 photos: 8.54 G -> 8.36 G
+(-2.1%) and 4.02 G -> 3.96 G (-1.5%). Wall, cores 20-23 of a shared
+machine, A (0.9.0) and B alternated, best of 4 (3 for the sets):
+
+| file | 0.9.0 a / x | C raw a / x |
+|---|---|---|
+| 0046, -th 1 | 3.21 / 1.27 s | 2.55 / 1.12 s (-21% / -12%) |
+| 0056, -th 1 | 11.73 / 4.35 s | 8.54 / 3.59 s (-27% / -17%) |
+| 0047, -th 1 | 7.07 / 2.50 s | 5.30 / 2.14 s (-25% / -15%) |
+| 0056, -th 8 (4 cores) | 12.46 / 4.20 s | 8.56 / 3.09 s (-31% / -27%) |
+| corpus-jpg (78), -th 1 | 68.4 / 31.9 s | 57.7 / 26.8 s (-16% / -16%) |
+| 20 b151 photos, -th 1 | 15.14 / 6.99 s | 15.22 / 7.06 s (noise) |
+| 20 b151 photos, -th 8 (4 cores) | 3.75 / 1.95 s | 3.67 / 1.58 s |
+
+What did not help: the coder's interval and the decoder's position kept
+in locals for the whole call (+2.4% instructions encoding, +2.5%
+decoding: the register pressure spills more than the memory state cost),
+and the counter as one 32-bit word on top of that (+6%), as in version
+7's loop.

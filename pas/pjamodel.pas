@@ -154,6 +154,17 @@ var
     plugin) has no C and does not code version 7 }
   V7Code: TV7Code = nil;
 
+type
+  { The raw-byte model's loop (CodeRawBytes) in C, pjav7c.c: len bytes of
+    raw coded with the counters o0, o1, o2, which it puts back as new at
+    the end (RawReset). coder is cd.enc or cd.dec, as for V7Code. }
+  TRawCode = procedure(encoding: Boolean; coder: Pointer; o0, o1, o2: PAdaptiveBit; raw: PByte; len: SizeInt);
+
+var
+  { set by pjav7's initialization, unless PJA_NOASM=1: then, and in the
+    zpaq-std plugin, the Pascal loop (the suite compares the two) }
+  RawCode: TRawCode = nil;
+
 procedure V7FillTables(out t: TV7Tables);
 
 const
@@ -679,7 +690,7 @@ end;
 
 function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
 var mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
-    o0, o1, o2: TBits;
+    o0, o1, o2: TBits; coder: Pointer;
 begin
   {$ifdef PJA_COSTS}CostKind := ckRaw;{$endif}
   len := cd.Direct(Cardinal(Length(raw)), 32);
@@ -690,6 +701,14 @@ begin
   end;
   RawDirty := True;
   o0 := RawO0; o1 := RawO1; o2 := RawO2;
+  if (RawCode <> nil) {$ifdef PJA_COSTS}and not CollectCosts{$endif} then begin
+    if len > 0 then begin
+      if cd.encoding then coder := @cd.enc else coder := @cd.dec;
+      RawCode(cd.encoding, coder, @o0[0], @o1[0], @o2[0], @raw[0], len);
+    end;
+    RawDirty := False;
+    Exit(True);
+  end;
   mx.Init(4, 8);
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin

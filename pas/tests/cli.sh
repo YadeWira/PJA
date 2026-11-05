@@ -26,6 +26,12 @@ check "x, all at once" "$PJA" x -q "$W"/pja/*.pja -o "$W/out/"
 same=0
 for f in "$W"/in/*; do cmp -s "$f" "$W/out/$(basename "$f")" && same=$((same + 1)); done
 check "  every file back byte for byte, with its extension ($same of $n)" test "$same" -eq "$n"
+# the raw bytes' model in C (pjav7c.c) and in Pascal (PJA_NOASM=1): the
+# same .pja, and each one's extracted by the other
+check "the raw model in C = in Pascal: the same .pja, each extracted by the other" bash -c "
+  PJA_NOASM=1 '$PJA' a -q '$W'/in/* -o '$W/pjan/' && for f in '$W'/pja/*.pja; do cmp -s \"\$f\" '$W/pjan/'\$(basename \"\$f\") || exit 1; done &&
+  PJA_NOASM=1 '$PJA' x -q '$W'/pja/*.pja -o '$W/outn/' && '$PJA' x -q '$W'/pjan/*.pja -o '$W/outc/' &&
+  for f in '$W'/in/*; do b=\$(basename \"\$f\"); cmp -s \"\$f\" '$W/outn/'\$b && cmp -s \"\$f\" '$W/outc/'\$b || exit 1; done"
 check "the same .pja with 1 thread and with 4" bash -c "
   '$PJA' a -q -th 1 '$W/in/color_plasma.jpg' -o '$W/t1.pja' && '$PJA' a -q --threads=4 '$W/in/color_plasma.jpg' -o '$W/t4.pja' &&
   cmp -s '$W/t1.pja' '$W/t4.pja'"
