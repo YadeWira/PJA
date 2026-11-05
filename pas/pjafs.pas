@@ -69,7 +69,7 @@ function Parent(const p: RawByteString; out q: RawByteString): Boolean;
 implementation
 
 uses
-  {$ifdef MSWINDOWS} Windows {$else} BaseUnix {$endif};
+  {$ifdef MSWINDOWS} Windows {$else} BaseUnix {$ifdef linux}, initc{$endif} {$endif};
 
 function TFsResult.Ok: Boolean; begin Result := error = feNone; end;
 function TFsResult.Text: string;
@@ -180,11 +180,33 @@ function DeleteEntry(const p: RawByteString): Boolean;
 begin Result := fpUnlink(PChar(p)) = 0; end;
 function RenameEntry(const a, b: RawByteString): Boolean;
 begin Result := fpRename(PChar(a), PChar(b)) = 0; end;
-{ link() never replaces nor follows a link at `b`: EEXIST if the name is
-  taken. A file system without hard links answers something else (EPERM on
-  FAT): the caller then writes the old way. }
+{$ifdef linux}
+{ glibc 2.28 and later: a rename that fails with EEXIST instead of
+  replacing (Linux 3.15; FAT, exFAT and the usual file systems take it) }
+function renameat2(olddirfd: cint; oldpath: PChar; newdirfd: cint; newpath: PChar; flags: cuint): cint;
+  cdecl; external 'c' name 'renameat2';
+const
+  AT_FDCWD = -100;
+  RENAME_NOREPLACE = 1;
+{$endif}
+
+{ The temporary takes the name only if it is free. On Linux, renameat2
+  with RENAME_NOREPLACE, which FAT and exFAT (camera cards, USB sticks)
+  take too. Otherwise link(), which never replaces nor follows a link at
+  `b`: EEXIST if the name is taken. A file system without either answers
+  something else (link: EPERM on FAT): the caller then writes the old way. }
 function MoveNoReplace(const a, b: RawByteString; out code: LongInt): Boolean;
+{$ifdef linux} var e: cint; {$endif}
 begin
+  {$ifdef linux}
+  if renameat2(AT_FDCWD, PChar(a), AT_FDCWD, PChar(b), RENAME_NOREPLACE) = 0 then begin
+    code := 0;
+    Exit(True);
+  end;
+  e := fpgetCerrno;
+  if e = ESysEEXIST then begin code := e; Exit(False); end;
+  { ENOSYS (an old kernel) or EINVAL (a file system without it): link }
+  {$endif}
   Result := fpLink(PChar(a), PChar(b)) = 0;
   if not Result then begin code := LastError; Exit; end;
   code := 0;
