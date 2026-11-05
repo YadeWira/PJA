@@ -2152,3 +2152,32 @@ thread, four rounds alternated, best:
 JPEG photos do not go through this code (20 photos: the same within the
 noise). What is left of the managed overhead in JPEG-LS is
 fpc_dynarray_rangecheck from pjajls, whose $R+ is mandatory.
+
+## The raw model's reset, for large raw parts (05/11/2026)
+
+After each use the raw model puts back as new only the counters its bytes
+touched (`RawReset`), walking the bytes again: three stores per bit, those
+of the order-2 table at random in its 16 MB. For a few KB that is nothing;
+for an ICC profile of 600 KB it is 14 million stores, mostly cache misses,
+on every one of the raw model's passes (encode, the trial without the
+parts, the verify's decode). From 64 KB of raw bytes on, the three tables
+are now refilled whole with the initial counter instead: the same state,
+so the same streams (checked on corpus-jpg's 78 files, 10 photos, 10
+arithmetic files and 4 JPEG-LS files, and by the suites).
+
+Walk against refill alone, one thread: 16 KB of raw bytes 1.2-1.5 ms
+against 0.9-1.5 ms (the break-even), 64 KB 7.1-7.4 ms against 0.9-1.5 ms,
+600 KB 61-75 ms against about 1 ms. The threshold sits at 64 KB rather
+than at the break-even: below it the gain is a few ms a file, too little
+to see, and a refill writes 16 MB, through a cache other threads share,
+that a short walk leaves alone. The command, `-th 1`, best of 4 or 5 alternated runs:
+
+| file (raw bytes) | compress before | after | extract before | after |
+|---|---|---|---|---|
+| 0046 (593 KB) | 3.01 s | 2.75 s (-8.5%) | 1.26 s | 1.11 s (-11.7%) |
+| 0047 (1.16 MB) | 7.48 s | 6.82 s (-8.7%) | 2.96 s | 2.80 s (-5.4%) |
+| 0049 (571 KB) | 2.10 s | 1.74 s (-16.8%) | 0.71 s | 0.58 s (-17.9%) |
+| 0056 (1.55 MB) | 10.17 s | 8.77 s (-13.8%) | 4.07 s | 3.93 s (-3.3%) |
+
+Photos (20 of the 151) and JPEG-LS do not change: their raw parts are
+small.

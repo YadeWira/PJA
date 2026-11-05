@@ -596,11 +596,17 @@ threadvar
   { The raw model's tables, kept for the next file in this thread: the
     order-2 one has 4M counters (16 MB), and a JPEG's raw bytes touch a few
     thousand of them. After each use, only the counters it touched are put
-    back as new (RawReset); RawDirty says a use did not finish, and then all
+    back as new (RawReset; from RAW_RESET_WHOLE bytes on, all of them);
+    RawDirty says a use did not finish, and then all
     of them are. The same tables as freshly allocated ones, so the same
     streams. }
   RawO0, RawO1, RawO2: TBits;
   RawDirty: Boolean;
+
+const
+  { from this many raw bytes on, RawReset refills the tables instead of
+    walking the bytes again }
+  RAW_RESET_WHOLE = 65536;
 
 procedure RawReset(const raw: TBytes; len: SizeInt);
 var e: TAdaptiveBit; i, b, node, c1, c2: SizeInt; h: Cardinal; o0, o1, o2: TBits;
@@ -608,6 +614,17 @@ begin
   { the threadvars once: each use of one is a call to find this thread's }
   o0 := RawO0; o1 := RawO1; o2 := RawO2;
   e := Default(TAdaptiveBit); e.Init;
+  {$if SizeOf(TAdaptiveBit) = 4}
+  { many bytes: the walk's stores land at random in the 16 MB order-2 table
+    and cost more than refilling the tables whole, which leaves them in the
+    same state (every counter new) }
+  if len >= RAW_RESET_WHOLE then begin
+    FillDWord(o0[0], Length(o0), PLongWord(@e)^);
+    FillDWord(o1[0], Length(o1), PLongWord(@e)^);
+    FillDWord(o2[0], Length(o2), PLongWord(@e)^);
+    Exit;
+  end;
+  {$endif}
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
     node := 1;
