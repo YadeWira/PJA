@@ -62,6 +62,8 @@ function Unpack(const pja: TBytes; maxOutput: QWord; out original: TBytes; out e
 
 implementation
 
+uses pjastage;
+
 const
   ERROR_NAMES: array[TPackError] of string = ('Ok', 'Format', 'Codec', 'TooLarge', 'SizeMismatch', 'HashMismatch');
 
@@ -93,6 +95,7 @@ begin
   Result := PackFail(ukOk);
   Result.codec := Compress(original, stream, verify, threads, fast, True, v7);
   if not Result.codec.Ok then begin Result.err := ukCodec; Exit; end;
+  StageEnter(stHash);
   if Length(stream) >= Length(original) then
     Result.fmt := WritePja(original, Blake3_128(original), Length(original), pja, True, e)
   else
@@ -115,12 +118,14 @@ begin
   { the raw part of the stream can never be longer than the whole file }
   cap := p.orig_size;
   if cap > QWord(High(SizeInt)) then cap := QWord(High(SizeInt));
+  StageEnter(stDecode);
   if p.stored then original := p.payload
   else begin
     Result.codec := Decompress(p.payload, original, SizeInt(cap), threads, SizeInt(cap));
     if not Result.codec.Ok then begin original := nil; Result.err := ukCodec; Exit; end;
   end;
   if QWord(Length(original)) <> p.orig_size then begin original := nil; Exit(PackFail(ukSizeMismatch)); end;
+  StageEnter(stHash);
   actual := Blake3_128(original);
   if not CompareMem(@actual[0], @expected[0], SizeOf(THash16)) then Result.err := ukHashMismatch;
 end;

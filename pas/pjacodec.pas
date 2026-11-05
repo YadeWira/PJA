@@ -126,7 +126,7 @@ function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boole
 
 implementation
 
-uses Classes, Math, pjaarith, pjamodel;
+uses Classes, Math, pjaarith, pjamodel, pjastage;
 
 type
   { scan numbers: version 6's quirks }
@@ -523,11 +523,14 @@ end;
   decoder is given it) and compared with the input; a difference is a bug,
   and nothing is handed out }
 function VerifyStream(const jpeg: TBytes; var stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
-var r: TCodecResult; back: TBytes;
+var r: TCodecResult; back: TBytes; was: TStage;
 begin
   Result := CodecFail(ceOk);
   if not verify then Exit;
+  { --stats: the time it takes, apart (pjastage) }
+  was := StageEnter(stVerify);
   r := Decompress(stream, back, Length(jpeg), threads);
+  StageEnter(was);
   if not r.Ok or (Length(back) <> Length(jpeg)) or
      ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then begin
     stream := nil;
@@ -545,13 +548,16 @@ var j: TJpeg; jl: TJls;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
+  StageEnter(stParse);
   if IsJls(jpeg) then begin
     Result.jpeg := VerifyJls(jpeg, jl);
+    StageEnter(stEncode);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
     if not AssembleJls(jl, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
     Result := VerifyStream(jpeg, stream, verify, threads);
   end else begin
     Result.jpeg := VerifyRoundTrip(jpeg, j);
+    StageEnter(stEncode);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
     { a scan without its restarts needs version 6, which says so }
     if HasIgnoredRestarts(j) then begin
@@ -839,11 +845,13 @@ function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; t
 
 { The file and its version 6 stream decompressed: the same bytes }
 function SameAfter(const jpeg, stream: TBytes; threads, depth: Integer): Boolean;
-var back: TBytes;
+var back: TBytes; was: TStage;
 begin
+  was := StageEnter(stVerify);
   { maxRaw as every caller gives it: the original's exact size }
   Result := DecompressAt(stream, back, Length(jpeg), threads, Length(jpeg), depth).Ok and (Length(back) = Length(jpeg)) and
             ((Length(back) = 0) or CompareMem(@back[0], @jpeg[0], Length(back)));
+  StageEnter(was);
 end;
 
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
@@ -862,7 +870,9 @@ begin
   { the file as PJA takes it today, decoded once: it gives the parts' places
     and, with none, the stream itself }
   Result := CodecFail(ceOk);
+  StageEnter(stParse);
   Result.jpeg := VerifyRoundTrip(jpeg, j);
+  StageEnter(stEncode);
   if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
   { pjax's ZPAQL knows the DRI's quirk, not the correction bits' }
   if huffOnly and (j.arithmetic or j.lossless or HasCorrectionLimits(j)) then begin

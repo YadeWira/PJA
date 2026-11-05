@@ -408,3 +408,20 @@ int pjav7_component_e(aenc_t *e, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t 
   if (e->n > 0) { T.put(e->ctx, e->buf, e->n); e->n = 0; }
   return ok;
 }
+
+/* Which copies of the loop this object has, for the command's --version,
+   --cpu and selftest: 1 the SSE4.1 one, 2 the AVX2 one, 4 SSE2 in the
+   plain one. Which runs is still T.sse41 and T.avx2. */
+int pjav7_paths(void) {
+  int r = 0;
+#ifdef V7_SSE41
+  r |= 1;
+#endif
+#ifdef V7_AVX2
+  r |= 2;
+#endif
+#ifdef V7_SSE2
+  r |= 4;
+#endif
+  return r;
+}
