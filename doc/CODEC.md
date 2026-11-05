@@ -2081,8 +2081,11 @@ A last round of checks on what 0.9.0 fixes (`doc/STABILITY.md`):
   output was written in place, and a run cut short left it truncated. On
   Linux, renameat2 with RENAME_NOREPLACE does the same and FAT takes it:
   checked on a vfat mount.
-- **The filter's tables record** now counts against what PJA saved, so a
-  small abbreviated JPEG no longer comes out larger than its raw bytes.
+- **The filter's tables record** stays out of the decision to keep a file
+  compressed, as designed: it is written once for every file after it with
+  the same tables, so a small file is not charged for all of it. (The
+  audit had asked for it to count; libpja's test of the standard tables,
+  a 2 KB JPEG that the record alone would outweigh, showed why not.)
 - **PATCH's bounds** saturate instead of overflowing for a declared size
   past 2^61 (the `.pja` ratio check already kept the command from it).
 - **Fuzzing**, 20 minutes on 12 workers with these builds: `pja x` on
