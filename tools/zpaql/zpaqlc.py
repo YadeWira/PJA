@@ -50,7 +50,12 @@ And the variables' places by use: the program is compiled twice more, the
 variables placed by how often the code before named them (R8 .. R255
 first, then H[0 .. 255], which d= N reaches in one instruction, then the
 rest), and the smallest of the three is kept. Without opt the output is
-byte for byte what it always was."""
+byte for byte what it always was.
+
+opt=3 (programs not frozen yet, from 0.8.0): opt=2, plus functions inlined
+(inline_plan; the program compiled with and without, the smaller kept),
+the right operand through B when the left is a constant or a variable,
+return values in B, and no jmp to the next instruction."""
 import ast, sys
 
 M32 = 0xFFFFFFFF
@@ -254,7 +259,7 @@ class Func:
 
 
 class Compiler:
-    def __init__(self, tree, opt=False, plan=None):
+    def __init__(self, tree, opt=False, plan=None, inline=()):
         self.opt = opt        # shortest constants, known A and B reused (new programs only)
         self.known = None     # with opt, in straight-line code: {'a': value, 'b': value}
         self.cbest = {}
@@ -273,6 +278,8 @@ class Compiler:
         self.lreset = None    # where reset() goes, once something calls it
         self.loops = []
         self.cur = None
+        self.inline = set(inline)   # opt=3: functions whose calls are their bodies
+        self.rets = []              # opt=3: where a return goes in an inlined body
         self.collect(tree)
 
     # ----------------------------------------------------------- module
@@ -558,6 +565,15 @@ class Compiler:
             return True
         return False
 
+    def plain(self, node):
+        """A constant or a variable: into A without touching B (opt=3)"""
+        try:
+            self.const_eval(node)
+            return True
+        except CompileError:
+            pass
+        return isinstance(node, ast.Name) and node.id not in self.arrays
+
     def is_small_const(self, node):
         try:
             v = self.const_eval(node)
@@ -588,6 +604,12 @@ class Compiler:
                     and not self.has_call(node.left):
                 self.expr(node.left, depth)
                 a.op('b=r %d' % self.lookup(node.right, node.right.id).n)
+                a.op(op + 'b'); return
+            if self.opt >= 3 and self.plain(node.left):
+                # opt=3: a left side that loads without B: the right one
+                # into B through A, no temporary
+                self.expr(node.right, depth); a.op('b=a')
+                self.expr(node.left, depth)
                 a.op(op + 'b'); return
             t = self.temp(depth)
             self.expr(node.right, depth + 1); self.store_a(t)
@@ -684,6 +706,10 @@ class Compiler:
             k = self.is_small_const(right)
             if k is not None:
                 self.expr(left, depth); a.op('%s %d' % (op, k)); return sense
+            if self.opt >= 3 and self.plain(left):
+                self.expr(right, depth); a.op('b=a')
+                self.expr(left, depth)
+                a.op(op + 'b'); return sense
             t = self.temp(depth)
             self.expr(right, depth + 1); self.store_a(t)
             self.expr(left, depth + 1)
@@ -836,6 +862,19 @@ class Compiler:
         else:
             for x, p in zip(args, f.params):
                 self.expr(x, depth); self.store_a(f.vars[p])
+        if name in self.inline:
+            # opt=3: the body here, its returns to the end of it; its
+            # variables are its own places, as in a call
+            caller, end = self.cur, a.label()
+            self.cur = f
+            self.rets.append(end)
+            self.stmts(f.node.body)
+            self.rets.pop()
+            self.cur = caller
+            a.put(end)
+            if want:
+                a.op('a=b')
+            return
         site = len(f.sites) + 1
         if site > 255:
             err(node, 'more than 255 calls to ' + name)
@@ -845,7 +884,10 @@ class Compiler:
         a.jmp('jmp', f.entry)
         a.put(back)
         if want:
-            self.load_a(f.rv)
+            if self.opt >= 3:
+                a.op('a=b')
+            else:
+                self.load_a(f.rv)
 
     def load_b_keep(self, s):
         """B := slot, keeping A."""
@@ -967,8 +1009,14 @@ class Compiler:
         if isinstance(s, ast.Return):
             f = self.cur
             if s.value is not None:
-                self.expr(s.value); self.store_a(f.rv)
-            a.jmp('jmp', f.exit); return
+                self.expr(s.value)
+                if self.opt >= 3:
+                    # opt=3: the value comes back in B, which the return
+                    # chain (A and F only) leaves alone
+                    a.op('b=a')
+                else:
+                    self.store_a(f.rv)
+            a.jmp('jmp', self.rets[-1] if self.rets and self.rets[-1] is not None else f.exit); return
         if isinstance(s, ast.Expr):
             if isinstance(s.value, ast.Call):
                 self.call(s.value, 0, want=False); return
@@ -982,6 +1030,7 @@ class Compiler:
 
     def function(self, f):
         a = self.asm
+        self.rets = [None]
         self.cur = f
         a.put(f.entry)
         self.stmts(f.node.body)
@@ -1055,7 +1104,7 @@ class Compiler:
             self.load_a(self.arrays[name][0]); a.op('d=a')
             if self.known is not None:
                 self.known['a'] = None
-            if self.opt == 2:
+            if self.opt >= 2:
                 # H is zero here (as the program starts, and after reset()):
                 # a table's zeros are only stepped over
                 skip = 0
@@ -1082,6 +1131,7 @@ class Compiler:
         a.jmp('jmp', self.funcs['main'].entry)
         # main first, then the rest, in the order written
         order = ['main'] + [n for n in self.funcs if n != 'main']
+        order = [n for n in order if n not in self.inline]
         for n in order:
             self.function(self.funcs[n])
         for n in order:
@@ -1103,8 +1153,8 @@ class Compiler:
                 if not (self.unpacker and r == R_MBASE):
                     a.op('r=a %d' % r)
             a.op('halt')
-        if self.opt == 2:
-            peephole(a.items)
+        if self.opt >= 2:
+            peephole(a.items, self.opt >= 3)
         return a.assemble()
 
 
@@ -1118,10 +1168,22 @@ def places(uses):
     return plan
 
 
-def peephole(items):
+def peephole(items, jumps=False):
     """opt=2, in straight-line code (no label or jump between): a=r N
     right after r=a N goes (A holds it), and so does a b=a whose B is
-    written again before anything reads it"""
+    written again before anything reads it. opt=3 (jumps): a jmp to the
+    place right after it goes too (an inlined body's last return)"""
+    if jumps:
+        kept = []
+        for i, it in enumerate(items):
+            if it[0] == 'j' and it[1] == 'jmp':
+                k = i + 1
+                while k < len(items) and items[k][0] == 'label' and items[k][1] != it[2]:
+                    k += 1
+                if k < len(items) and items[k][0] == 'label' and items[k][1] == it[2]:
+                    continue
+            kept.append(it)
+        items[:] = kept
     out = []
     for it in items:
         if (it[0] == 'i' and out and out[-1][0] == 'i' and it[1].startswith('a=r ') and
@@ -1199,8 +1261,61 @@ def overlay_places(c):
     return plan
 
 
-def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False):
-    if opt == 2:
+def inline_plan(src):
+    """opt=3: the functions to inline, from an opt=2 compile: each body's
+    bytes against what its calls cost (the call-site number stored and the
+    long jump, about 7 bytes a call, and its return chain, about 7 a site
+    and 3 more): one with one call always, others when the copies cost
+    less than the calls. A body counted with its own calls in it."""
+    any_size = getattr(Asm, 'any_size', False)
+    Asm.any_size = True
+    try:
+        c = Compiler(ast.parse(src), 2)
+        c.program()
+        c = Compiler(ast.parse(src), 2, overlay_places(c))
+        c.program()
+    finally:
+        Asm.any_size = any_size
+    pos = c.asm.positions
+    order = ['main'] + [n for n in c.funcs if n != 'main']
+    starts = sorted((pos[c.funcs[n].entry], n) for n in order)
+    size = {}
+    exits = min(pos[c.funcs[n].exit] for n in order)
+    for k, (st, n) in enumerate(starts):
+        nx = starts[k + 1][0] if k + 1 < len(starts) else exits
+        size[n] = nx - st
+    plan = set()
+    for n, f in c.funcs.items():
+        if n in ('main', 'onbyte') or not f.sites:
+            continue
+        k = len(f.sites)
+        if k == 1 or size[n] * (k - 1) < 14 * k + 3:
+            plan.add(n)
+    return plan
+
+
+def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False, inline=None):
+    if opt == 3:
+        # opt=2 with the functions inline_plan picks (or those given)
+        # inlined; with none given, also with none inlined: the smaller
+        Asm.any_size = True
+        try:
+            plans = [set(inline)] if inline is not None else [inline_plan(src), set()]
+            best = None
+            for inl in plans:
+                c = Compiler(ast.parse(src), 3, None, inl)
+                c.program()
+                for _ in range(2):
+                    c = Compiler(ast.parse(src), 3, overlay_places(c), inl)
+                    l3, s3 = c.program()
+                    if best is None or s3 < best[2]:
+                        best = (c, l3, s3)
+            c2, lines, size = best
+        finally:
+            Asm.any_size = False
+        if size > 65535:
+            raise CompileError('program too big: %d bytes (ZPAQL allows 65535)' % size)
+    elif opt == 2:
         # placed by use with frames overlaid (overlay_places): its passes
         # may be over the limit until the last
         Asm.any_size = True
@@ -1222,7 +1337,7 @@ def compile_source(src, name='zl', ph='24', pm='$1+1', opt=False):
     else:
         c2 = Compiler(ast.parse(src), opt)
         lines, size = c2.program()
-    if opt and opt != 2:
+    if opt and opt not in (2, 3):
         # again with the variables placed by how often the code before named
         # them, twice: the smallest of the three
         c = c2

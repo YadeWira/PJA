@@ -13,6 +13,10 @@ block, as zpaq-std groups them.
     test_pjadec.py --o [--lz] [--pjall|--pjalsx] <segment dir> <file> ...
         the o codecs' (ozpaql.inc): pjalso's for JPEG-LS files (or pjallo's,
         pjalsxo's), and with --lz their z (pjalszo, ...); JPEGs, pja's as before
+    test_pjadec.py --v8 [--lz] [--pja7|--pjax7|--pjall|--pjalsx] <segment dir> <file> ...
+        the 8 codecs' (v8zpaql.inc): pja78's, pjax78's, pjals8's, pjall8's,
+        pjalsx8's, and with --lz their z; without a codec flag, JPEG-LS files
+        through pjals8 (JPEGs, pja's as before)
     test_pjadec.py --lz [--pjax|...] <segment dir> <file> ...
         the z codec's instead (lzzpaql.inc; v7zpaql.inc's for --pja7 and
         --pjax7), per decoder on ONE block: its
@@ -39,6 +43,10 @@ args = sys.argv[1:]
 ozp = '--o' in args[:3]
 if ozp:
     args.remove('--o')
+# --v8: the 8 codecs' decoders (opt=3)
+v8 = '--v8' in args[:3]
+if v8:
+    args.remove('--v8')
 lz = '--lz' in args[:2]
 if lz:
     args.remove('--lz')
@@ -89,6 +97,12 @@ if pja7 or pjax7:
     cfgs = {False: v7, True: v7}
 
 
+if v8 and not lz:
+    n8 = 'PJAX78' if pjax7 else 'PJA78' if pja7 else 'PJALL8' if pjall else 'PJALSX8' if pjalsx else 'PJALS8'
+    c8 = zconfig(n8, 'v8zpaql.inc')
+    cfgs = {False: c8 if (pja7 or pjax7 or pjall or pjalsx) else cfgs[False], True: c8}
+
+
 if lz:
     z = 'PJAXZ' if pjax else 'PJALLZ' if pjall else 'PJALSXZ' if pjalsx else None
     cfgs = {False: zconfig(z or 'PJAZ'), True: zconfig(z or 'PJALSZ')}
@@ -100,6 +114,10 @@ if lz:
     if pja7 or pjax7:
         z7 = zconfig('PJAX7Z' if pjax7 else 'PJA7Z', 'v7zpaql.inc')
         cfgs = {False: z7, True: z7}
+    if v8:
+        n8 = 'PJAX7Z8' if pjax7 else 'PJA7Z8' if pja7 else 'PJALLZ8' if pjall else 'PJALSXZ8' if pjalsx else 'PJALSZ8'
+        c8 = zconfig(n8, 'v8zpaql.inc')
+        cfgs = {False: c8 if (pja7 or pjax7 or pjall or pjalsx) else cfgs[False], True: c8}
     fails = 0
     for ls in (False, True):
         group = sorted((j for j in jpegs if j.lower().endswith('.jls') == ls), key=os.path.getsize)[:2][::-1]

@@ -2001,3 +2001,54 @@ segments, alone, two in a block and through the LZ77.
 Frozen in 0.7.0, for zpaq-std: pjalso, pjallo, pjalsxo, pjalszo, pjallzo
 and pjalsxzo, their streams and their ZPAQL never change under these
 names.
+
+## The 8 codecs: zpaqlc's opt=3 (05/11/2026)
+
+What the decoders' bytes go to, in pja7z (opt=2, 35,829 bytes): places in
+R loaded and stored, 42%; calls and returns, about 6 KB (a call stores its
+call-site number and long-jumps, 7 bytes; its return chain compares and
+long-jumps back, 7 more); the tables written at start-up, 4.5 KB. ZPAQL has
+no indirect jump, so calls cannot be made much cheaper; three things in
+the code around them can, as zpaqlc's opt=3:
+
+- **Inlining.** A function called from one place, or one whose copies
+  take fewer bytes than its calls, is compiled where it is called: its
+  returns go to the end of the copy. Each program is also compiled with
+  nothing inlined and the smaller is kept (pjalsx's grows with inlining).
+  A search, function by function, found 184 bytes more on pja7: the
+  estimate is close enough.
+- **The right operand through B.** With a constant or a variable on the
+  left, `b=a` and the left loaded (4 bytes) in place of a temporary stored
+  and read back (7).
+- **Return values in B.** The return chain uses A and F only, so a
+  function's value stays in B: `b=a` and `a=b`, a byte each, where a place
+  of its own took two.
+
+PCOMP bytes, the same streams and H as their codecs:
+
+| codec | frozen | opt=3 |
+|---|---|---|
+| pja7 / pja78 | 35,104 | **32,954** |
+| pja7z / pja7z8 | 35,829 | **33,603** |
+| pjax7 / pjax78 | 35,211 | **33,197** |
+| pjax7z / pjax7z8 | 35,987 | **33,949** |
+| pjalso / pjals8 | 24,076 | **22,430** |
+| pjalszo / pjalsz8 | 24,724 | **23,046** |
+| pjallo / pjall8 | 15,058 | **13,901** |
+| pjallzo / pjallz8 | 15,693 | **14,517** |
+| pjalsxo / pjalsx8 | 25,623 | **24,611** |
+| pjalsxzo / pjalsxz8 | 26,278 | **25,244** |
+
+libzpaq (zpaq 7.15's engine, JIT) on the same segments, every file back
+with both: 30 photos 69.3 -> 68.0 s, 18 MPO and 12-bit JPEGs (pjax7)
+216.4 -> 206.2 s, 24 JPEG-LS 33.1 -> 32.4 s, 36 lossless JPEGs 1.33 ->
+1.25 s, 67 subsampled JPEG-LS 180.8 -> 170.4 s: 2 to 6% faster. On Windows
+XP, zpaq 7.15 (32-bit, no plugin) extracts byte for byte archives that
+zpaq-std 2.2.2 wrote with pja78, pjax78, pjals8, pjall8 and pjalsx8 (87
+files), and the x86 plugin round-trips each set with each of the ten. The
+suite runs the ten on segments, two in a block and through the LZ77
+(test_pjadec --v8).
+
+Frozen in 0.8.0, codecs 20 to 29: pja78, pjax78, pja7z8, pjax7z8, pjals8,
+pjall8, pjalsx8, pjalsz8, pjallz8 and pjalsxz8, their streams and their
+ZPAQL never change under these names.

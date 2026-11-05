@@ -11,8 +11,8 @@ build time only; nothing of them goes into PJA itself.
 | `zpaqlc.py` | compiles a small language (a subset of Python: 32-bit unsigned values, arrays in ZPAQL's H, functions without recursion, signed comparisons and shifts) to a ZPAQL PCOMP program |
 | `zpaqlvm.py` | runs a PCOMP program as libzpaq does, one instruction at a time, to test and debug it |
 | `test_zpaqlc.py` | random expressions against exact 32-bit arithmetic, and programs for control flow, calls, arrays, signed helpers, long jumps and variables spilled to H |
-| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`) and `pas/plugin/pjalsxzpaql.inc` (pjalsx, subsampled JPEG-LS, with `jls.zl` and `jlsx.zl`), and the z codecs' five decoders (each its codec's with `lz.zl` in front, compiled with `opt`) into `pas/plugin/lzzpaql.inc`, and the version 7 codecs' four (pja7, pjax7 and their z: `model7.zl` in place of `model.zl`'s component, `opt=2`) into `pas/plugin/v7zpaql.inc`, and the o codecs' six (pjals, pjall and pjalsx and their z, the same programs with `opt=2`) into `pas/plugin/ozpaql.inc`; `--check` only verifies all nine are current |
-| `test_pjadec.py` | those decoders run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG or JPEG-LS file back byte for byte (`--o`: the o codecs') |
+| `gen_pjadec.py` | builds the plugin's decoders: `pas/plugin/zpaql/consts.zl` from the Pascal sources (the model's constants, tables and mixers, so the two cannot drift apart), then `pas/plugin/zpaql/` compiled into `pas/plugin/pjazpaql.inc` (JPEG, with `huff.zl`) `pas/plugin/pjalszpaql.inc` (JPEG-LS, with `jls.zl`, whose constants it checks against the Pascal ones) `pas/plugin/pjaxzpaql.inc` (pjax, with `huff.zl` and `pjax.zl`) and `pas/plugin/pjallzpaql.inc` (pjall, lossless JPEG, with `jls.zl` and `ljpeg.zl`) and `pas/plugin/pjalsxzpaql.inc` (pjalsx, subsampled JPEG-LS, with `jls.zl` and `jlsx.zl`), and the z codecs' five decoders (each its codec's with `lz.zl` in front, compiled with `opt`) into `pas/plugin/lzzpaql.inc`, and the version 7 codecs' four (pja7, pjax7 and their z: `model7.zl` in place of `model.zl`'s component, `opt=2`) into `pas/plugin/v7zpaql.inc`, and the o codecs' six (pjals, pjall and pjalsx and their z, the same programs with `opt=2`) into `pas/plugin/ozpaql.inc`, and the 8 codecs' ten (pja7's, pjax7's and the o codecs' programs and their z, with `opt=3`) into `pas/plugin/v8zpaql.inc`; `--check` only verifies all ten are current |
+| `test_pjadec.py` | those decoders run on segments (`pas/tests/zpaql_segments`), each with the H the plugin's query gives it: each JPEG or JPEG-LS file back byte for byte (`--o`: the o codecs'; `--v8`: the 8 codecs') |
 | `lz77.py` | a test encoder for the z codecs' blocks: zpaq's level 1 LZ77 (`rb` = 0), matches reaching back into the segments before; `test_pjadec.py --lz` runs each z decoder on its output |
 
 ```sh
@@ -71,6 +71,17 @@ share places, and far more of them fit in R; then the places by use, as
 after `r=a N` goes, a `b=a` whose B is written again before anything reads
 it goes, and the start-up code steps over a table's zeros (H is zero then).
 The version 7 decoder: 71,052 bytes with `opt`, 35,104 with `opt=2`.
+
+`opt=3`, the 8 codecs' (frozen in 0.8.0): `opt=2` and three things more.
+Functions inlined: one called from one place always, others when their
+copies take fewer bytes than their calls (a call costs about 7 bytes, its
+return chain about 7 more); the program is also compiled with none
+inlined, and the smaller kept. The right side of an operation through B
+with no temporary when the left one is a constant or a variable (`b=a`
+and the left loaded, 4 bytes where a temporary took 7). A function's
+value back in B instead of a place of its own (the return chain uses A
+and F only). And a `jmp` to the instruction right after it goes. pja7's
+decoder: 35,104 bytes with `opt=2`, 32,954 with `opt=3`.
 
 How a program looks inside: variables live in R (in H once R is full), each
 function in fixed places of its own; a call stores a call-site number and
