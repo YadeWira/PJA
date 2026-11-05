@@ -78,6 +78,29 @@ they are); 9.9% smaller than JPEG XL (2.2 to 3.1 times as fast). None of
 the four takes 12-bit or lossless JPEG, and only packJPG takes
 arithmetic-coded ones.
 
+## Safe by design
+
+PJA's first rule is that the original comes back byte for byte, or nothing
+is written. Measured against the other JPEG recompressors on the same 20
+photos and the same damage ([how][wSafe]):
+
+| | PJA | packJPG | Lepton | brunsli | JPEG XL |
+|---|---|---|---|---|---|
+| 4,000 single-bit flips in the compressed file: a wrong JPEG given back without an error | **0** | 4 | 3,712 | 195 | 361 |
+| stores a hash of the original | **yes** (BLAKE3) | no | no | no | no |
+| checks its output before writing it, by default | **yes** | no | yes | no | no |
+| fuzzed inputs taken that do not come back | **0** | 199 | 0 | 0 | 17 |
+| disk full: a truncated file under the output's name | **no** (an old file is kept) | no | yes (and exit 0) | yes | yes |
+| writes through a symbolic link at the output's name | **no** | yes | yes | yes | yes |
+| killed while writing: a partial file under the output's name | **no** | yes | yes | yes | yes |
+| written promise that its files keep opening | **yes** ([STABILITY](doc/STABILITY.md)) | no | archived | no | ISO standard |
+
+It is design, not luck: a stored hash and size, a decode-and-compare before
+writing, a temporary that takes the output's name only when it is complete,
+and a clean refusal of anything it does not understand. What it does not
+do: repair a damaged `.pja` (keep backups, or use an archiver with recovery
+records) or authenticate it (the hash catches accidents, not tampering).
+
 ## Against archivers
 
 One archive per set, 8 threads, on 05/11/2026; every file extracted and
@@ -220,6 +243,7 @@ work of the Independent JPEG Group; see `NOTICE` for that and other credits.
 [relLink]: https://github.com/YadeWira/PJA/releases/latest
 [wiki]: https://github.com/YadeWira/PJA/wiki
 [wComp]: https://github.com/YadeWira/PJA/wiki/Benchmarks
+[wSafe]: https://github.com/YadeWira/PJA/wiki/Safety-and-robustness
 [wHandles]: https://github.com/YadeWira/PJA/wiki/What-PJA-handles
 [wInstall]: https://github.com/YadeWira/PJA/wiki/Installing
 [wPlat]: https://github.com/YadeWira/PJA/wiki/Platforms
