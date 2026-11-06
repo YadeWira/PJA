@@ -2478,3 +2478,46 @@ there on purpose; 4% of compressing photo3, 6% of extracting it); the
 host's bands could be encoded while the two header streams are coded;
 the verify's `DecodeHead` (`SameAfter`) is still serial, 15.7% of
 0056's instructions.
+
+## The main thread's waits: 100 ms each (05/11/2026)
+
+`pja a -th 2` on color_plasma.jpg (15 KB, one band) took about 110 ms
+against 33 ms at `-th 1`, and `--stats` put all of it in `encode`, while
+the process used about 42 ms of processor. The time was not work but a
+wait: FreePascal's `TThread.WaitFor`, on Unix and called from the main
+thread, loops on `CheckSynchronize(100)` until the thread is finished,
+and a thread that simply ends wakes nothing, so each wait returned up to
+100 ms after the thread had. The command codes on the main thread (a
+single file, and one file of every run with several) and waits there for
+the threads of `CompressLive`, `RunBands`, the header stream and the
+JPEG-LS models, and for its own workers at the end. (Windows' `WaitFor`
+waits on the thread's handle and was not hit.)
+
+`pjathread.TJoinThread` sets an event in `DoTerminate`, which the RTL
+calls after it marks the thread finished; `Join` waits for that event
+and then calls `WaitFor`, which joins at once. Every thread of the codec
+and the command's workers use it. Only the waiting changes: every output
+below was compared, the same bytes.
+
+Wall time, best of 5, before and after alternated, `taskset -c 0-7`, the
+shipped build:
+
+| file | command | before | after |
+|---|---|---|---|
+| color_plasma.jpg, 15 KB, 1 band | `a -th 2` | 113.7 ms | 30.6 ms |
+| color_plasma.jpg | `a -th 8` | 116.9 ms | 29.7 ms |
+| corpus-jpg 0065.jpg, 42 KB, 1 band | `a -th 2` | 213.7 ms | 127.8 ms |
+| corpus-jpg 0030.jpg, 397 KB, 1 band | `a -th 2` | 238.3 ms | 205.7 ms |
+| corpus-jpg 0043.jpg, 1.9 MB, 4 bands | `a -th 2` | 1346.5 ms | 1170.2 ms |
+| corpus-jpg 0043.jpg | `a -th 8` | 826.8 ms | 724.5 ms |
+| corpus-jpg 0043.pja | `x -th 2` | 743.3 ms | 563.8 ms |
+| corpus-jpg 0043.pja | `x -th 8` | 451.8 ms | 349.1 ms |
+| gray2.jls, 219 B | `a -th 2` | 116.8 ms | 16.8 ms |
+| tests/jpg, 30 files in one run | `a -th 8` | 87.0 ms | 82.6 ms |
+
+`-th 1` starts no thread and does not change (within 5%, both ways).
+Sequential verification for one-band files, the first idea, would have
+been wrong: once the wait is gone `-th 2` is as fast as `-th 1` or
+faster on every one-band file measured (color_plasma 35 -> 31 ms,
+0065.jpg 156 -> 128 ms), and it already was from about 100 KB up
+(0030.jpg: 328 ms at `-th 1`, 206 ms at `-th 2`).

@@ -126,7 +126,7 @@ function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boole
 
 implementation
 
-uses Classes, Math, pjaarith, pjamodel, pjastage;
+uses Classes, Math, pjaarith, pjamodel, pjastage, pjathread;
 
 type
   { scan numbers: version 6's quirks }
@@ -189,7 +189,7 @@ type
   end;
   PBandJob = ^TBandJob;
 
-  TBandThread = class(TThread)
+  TBandThread = class(TJoinThread)
     job: PBandJob;
     procedure Execute; override;
   end;
@@ -269,7 +269,7 @@ begin
     { the jobs no thread was had for, here; the threads running are waited
       for all the same, never left on jobs the caller is about to free }
     for k := started to High(pool) do RunBand(jobs[next + k]);
-    for k := 0 to started - 1 do begin pool[k].WaitFor; pool[k].Free; end;
+    for k := 0 to started - 1 do begin pool[k].Join; pool[k].Free; end;
     Inc(next, Length(pool));
   end;
 end;
@@ -373,7 +373,7 @@ type
   { HeadBytes on another thread, while the caller does something else. The
     tables libpja gives (GivenTables, a threadvar) go with it, or its header
     stream would not be the caller's. }
-  THeadThread = class(TThread)
+  THeadThread = class(TJoinThread)
     j: TJpeg;
     given, head: TBytes;
     procedure Execute; override;
@@ -418,7 +418,7 @@ end;
 function FinishHead(var t: THeadThread; const j: TJpeg): TBytes;
 begin
   if t = nil then Exit(HeadBytes(j));
-  t.WaitFor;
+  t.Join;
   Result := t.head;
   t.Free;
   t := nil;
@@ -504,7 +504,7 @@ type
 
   { One model's bands (RunBands) on a thread of its own, while the caller
     codes the other model. }
-  TBandsThread = class(TThread)
+  TBandsThread = class(TJoinThread)
     jobs: ^TBandJobs;
     threads: Integer;
     procedure Execute; override;
@@ -611,11 +611,11 @@ begin
       { no thread for the reader: it reads here (a live stream keeps all it
         is given) }
       if live and (dt = nil) then RunBand(rd);
-      if dt <> nil then begin dt.WaitFor; dt.Free; end;
+      if dt <> nil then begin dt.Join; dt.Free; end;
       if th = nil then RunBands(jobs0, threads);
     finally
       { waited for in any case, never left on jobs about to be freed }
-      if th <> nil then begin th.WaitFor; th.Free; end;
+      if th <> nil then begin th.Join; th.Free; end;
     end;
   end;
   try
@@ -696,14 +696,14 @@ begin
         if not headOk then begin
           { no reader can start: the encoders running end on their own (a
             live stream keeps all it is given), and are waited for }
-          if all then for i := 0 to k - 1 do pool[2 * i].WaitFor;
+          if all then for i := 0 to k - 1 do pool[2 * i].Join;
           for i := 0 to made - 1 do pool[i].Free;
           Exit;
         end;
       end;
       if all then begin
         for i := 0 to k - 1 do pool[2 * i + 1].Start;
-        for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+        for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
       end else begin
         { not every thread was had: none started, those made let go, and
           each band here, its encoder and then its reader (a live stream
@@ -1171,7 +1171,7 @@ begin
     { a helper not waited for above (no host after all, an exception): its
       header stream is the file's all the same }
     if helper <> nil then begin
-      helper.WaitFor;
+      helper.Join;
       if ownJ = nil then ownJ := helper.head;
       helper.Free;
     end;

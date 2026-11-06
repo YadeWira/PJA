@@ -23,7 +23,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel,
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel, pjathread,
   { the commands for reporting and checking (doc/CLI.md); each format's
     info provider registers itself }
   pjastage, pjainfo, pjainfojpeg, pjainfopja, pjasysinfo, pjareport, pjabench, pjaselftest;
@@ -882,7 +882,7 @@ begin
 end;
 
 type
-  TWorker = class(TThread)
+  TWorker = class(TJoinThread)
     procedure Execute; override;
   end;
 
@@ -1055,7 +1055,7 @@ begin
   end;
   SetLength(pool, n);
   Work;
-  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
   DoneCriticalSection(printLock);
   DoneCriticalSection(claimLock);
   if (stats or jsonOut) and (outputError = '') then Summary(Seconds - started);
