@@ -265,16 +265,31 @@ out = os.path.join(d, 'o')
 files = sorted(glob.glob(os.path.join(d, 'c*.pja')))[:1 if ignore else None]
 cmd = [pja, 'x', '-q', '-f', '-th', '1'] + files + ['-o', out + '/']
 if hold:
-    cmd = ['strace', '-f', '-qq', '-o', '/dev/null', '-e', 'trace=fsync', '-e', 'inject=fsync:delay_enter=2s'] + cmd
-# like nohup: an ignored signal stays ignored
-pre = (lambda: signal.signal(sig, signal.SIG_IGN)) if ignore else None
+    cmd = ['strace', '-f', '-qq', '-o', '/dev/null', '-e', 'trace=fsync', '-e', 'inject=fsync:delay_enter=3s'] + cmd
+# like nohup: an ignored signal stays ignored. Otherwise its default, set
+# here: a suite started in the background by a script (cli.sh &) has
+# SIGINT ignored, which pja would rightly keep (the cell failed so, never
+# from the load itself)
+def pre():
+    signal.signal(sig, signal.SIG_IGN if ignore else signal.SIG_DFL)
 p = subprocess.Popen(cmd, preexec_fn=pre)
+def state(pid):
+    try: return open('/proc/%d/stat' % pid).read().rsplit(')', 1)[1].split()[0]
+    except (OSError, IndexError): return ''
+# a temporary there (polled, not a fixed delay: the load only makes it later)
 seen, t0 = False, time.time()
-while time.time() - t0 < 60 and p.poll() is None:
+while time.time() - t0 < 120 and p.poll() is None:
     if glob.glob(os.path.join(out, '.pja-tmp-*')): seen = True; break
+    time.sleep(0.005)
 target = p.pid
-if hold and p.poll() is None:
+if hold and seen and p.poll() is None:
     target = int(open('/proc/%d/task/%d/children' % (p.pid, p.pid)).read().split()[0])
+    # and the write held at its fsync: stopped by the tracer (state t) on
+    # five reads in a row, 20 ms apart (its other stops last microseconds)
+    run, t1 = 0, time.time()
+    while run < 5 and time.time() - t1 < 60 and p.poll() is None:
+        run = run + 1 if state(target) == 't' else 0
+        time.sleep(0.02)
 if p.poll() is None: os.kill(target, sig)
 rc = p.wait()
 rc = 128 - rc if rc < 0 else rc
