@@ -66,8 +66,8 @@ const
   { a file of the JPEG 2000 family (pjaj2k): where its codestreams are,
     each with a mode, and the file's other bytes through the raw bytes'
     model. Since 0.9.5: a codestream is raw (mode 0: its bytes stay among
-    the others) or modelled (mode 1, pjaj2km); later stages bring other
-    modes, which a reader that does not know them refuses as
+    the others), modelled (mode 1, pjaj2km) or kept as its pixels (mode 2,
+    pjaj2kpx); later stages bring other modes, which a reader that does not know them refuses as
     FutureVersion (doc/CODEC.md) }
   STREAM_J2K = 8;
   { the header: version, model, header stream length }
@@ -107,11 +107,18 @@ type
     the codestream data[off..off + len)'s stream, decoded and compared
     already; Dec the codestream (len bytes) back. }
   TJ2kMode1Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+  { mode 2's: a stream shorter than the codestream, and the least mode 1's
+    could be (pjaj2kpx.J2kMode2Encode) }
+  TJ2kMode2Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+    out mode1Floor: Int64): Boolean;
   TJ2kMode1Dec = function(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
 
 var
   J2kMode1Enc: TJ2kMode1Enc = nil;
   J2kMode1Dec: TJ2kMode1Dec = nil;
+  { mode 2 (the codestream as its pixels), the same way, set by pjaj2kpx }
+  J2kMode2Enc: TJ2kMode2Enc = nil;
+  J2kMode2Dec: TJ2kMode1Dec = nil;
 
 { JPEG -> stream. With verify (the default), the stream is decompressed and
   compared before returning (a repaired JPEG's always). threads: how many
@@ -1715,7 +1722,10 @@ end;
   Mode 0 (J2K_RAW): the codestream's bytes stay where they are in the host,
   and it has no stream (length 0). Mode 1 (J2K_MODEL, since 0.9.5): its
   stream is pjaj2km's (the codestream taken apart, its decisions through a
-  model), and its bytes are cut out of the host. A reader that does not
+  model), and its bytes are cut out of the host. Mode 2 (J2K_PIXELS, since
+  0.9.5): its stream is pjaj2kpx's (the codestream as its pixels and what
+  makes it again from them), cut out of the host as mode 1's. A reader
+  that does not
   know a mode, or a flag, refuses the stream as FutureVersion, and never
   reads it as something else. }
 
@@ -1723,6 +1733,7 @@ const
   J2K_ENTRY = 13;
   J2K_RAW = 0;
   J2K_MODEL = 1;
+  J2K_PIXELS = 2;
 
 { known: the codestreams of mode 1 already in hand (their streams were
   decoded and compared when they were made), not decoded again; nil, or
@@ -1742,7 +1753,8 @@ begin
     whatever the rest says, that is why it does not read }
   p := 6;
   for i := 0 to k - 1 do begin
-    if (stream[p + 12] > J2K_MODEL) or ((stream[p + 12] = J2K_MODEL) and not Assigned(J2kMode1Dec)) then
+    if (stream[p + 12] > J2K_PIXELS) or ((stream[p + 12] = J2K_MODEL) and not Assigned(J2kMode1Dec)) or
+       ((stream[p + 12] = J2K_PIXELS) and not Assigned(J2kMode2Dec)) then
       Exit(CodecFail(ceFutureVersion));
     Inc(p, J2K_ENTRY);
   end;
@@ -1752,8 +1764,8 @@ begin
     off := GetU32(stream, p); len := GetU32(stream, p + 4); slen := GetU32(stream, p + 8); mode[i] := stream[p + 12];
     if (len < 1) or (off < prevEnd) then Exit(CodecFail(ceBadStream));
     if (mode[i] = J2K_RAW) and (slen <> 0) then Exit(CodecFail(ceBadStream));
-    if (mode[i] = J2K_MODEL) and ((slen < 1) or (slen > Length(stream) - sp)) then Exit(CodecFail(ceBadStream));
-    if mode[i] = J2K_MODEL then cut := cut + len;
+    if (mode[i] <> J2K_RAW) and ((slen < 1) or (slen > Length(stream) - sp)) then Exit(CodecFail(ceBadStream));
+    if mode[i] <> J2K_RAW then cut := cut + len;
     sp := sp + slen;
     prevEnd := off + len;
     Inc(p, J2K_ENTRY);
@@ -1769,14 +1781,15 @@ begin
   p := 6; sp := 6 + Int64(J2K_ENTRY) * k; hp := 0; op := 0;
   for i := 0 to k - 1 do begin
     off := GetU32(stream, p); len := GetU32(stream, p + 4); slen := GetU32(stream, p + 8);
-    if mode[i] = J2K_MODEL then begin
+    if mode[i] <> J2K_RAW then begin
       gap := off - op;
       if gap > Length(host) - hp then begin data := nil; Exit(CodecFail(ceBadStream)); end;
       if gap > 0 then Move(host[hp], data[op], gap);
       hp := hp + gap; op := op + gap;
       if (i < Length(known)) and (known[i] <> nil) then cs := known[i]
       else begin
-        e := J2kMode1Dec(Copy(stream, sp, slen), len, threads, cs);
+        if mode[i] = J2K_PIXELS then e := J2kMode2Dec(Copy(stream, sp, slen), len, threads, cs)
+        else e := J2kMode1Dec(Copy(stream, sp, slen), len, threads, cs);
         if e <> ceOk then begin data := nil; Exit(CodecFail(e)); end;
       end;
       if Length(cs) <> len then begin data := nil; Exit(CodecFail(ceBadStream)); end;
@@ -1792,13 +1805,18 @@ begin
 end;
 
 { A file of the JPEG 2000 family as version 8: each codestream in mode 1
-  when this program has it (J2kMode1Enc) and its stream is smaller than the
+  or mode 2, whichever of them this program has (J2kMode1Enc,
+  J2kMode2Enc) gives the smaller stream, when that is smaller than the
   codestream, else in mode 0; the rest of the file through the raw bytes'
-  model. ceJpeg (NotJpeg) for a file that is not one or that is too large
+  model. Mode 2 is tried first, and mode 1 unless mode 2's stream is
+  already no longer than mode 1's could be at the least: the side
+  information (the same in both) and half the coded bytes it does not keep
+  (mode 1 saves a fifth on the codestreams it does best: a bitonal page is
+  not tried twice). ceJpeg (NotJpeg) for a file that is not one or that is too large
   for the stream's 32-bit places. }
 function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
-var cs: TJ2kCodestreams; cd: TCoder; body, host, back: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, total: Int64; was: TStage;
+var cs: TJ2kCodestreams; cd: TCoder; body, host, back, m2: TBytes; i: Integer; p, hp, op, n: SizeInt;
+  ms, known: TKnown; cut, total, floor1: Int64; md: array of Byte; was: TStage;
 begin
   stream := nil;
   { --stats (pjastage): the box tree walked is the parse; each codestream
@@ -1809,15 +1827,26 @@ begin
     Result := CodecFail(ceJpeg); Result.jpeg.err := jeNotJpeg; Exit;
   end;
   StageEnter(stEncode);
-  SetLength(ms, Length(cs)); SetLength(known, Length(cs));
+  SetLength(ms, Length(cs)); SetLength(known, Length(cs)); SetLength(md, Length(cs));
   cut := 0;
   for i := 0 to High(cs) do begin
-    ms[i] := nil; known[i] := nil;
-    if Assigned(J2kMode1Enc) and J2kMode1Enc(data, cs[i].off, cs[i].len, threads, ms[i]) and
-       (Length(ms[i]) < cs[i].len) then begin
+    ms[i] := nil; known[i] := nil; md[i] := J2K_RAW;
+    floor1 := 0;
+    if Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, m2, floor1) and
+       (Length(m2) < cs[i].len) then begin
+      ms[i] := m2; md[i] := J2K_PIXELS;
+    end;
+    m2 := nil;
+    if Assigned(J2kMode1Enc) and ((md[i] = J2K_RAW) or (Length(ms[i]) > floor1)) and
+       J2kMode1Enc(data, cs[i].off, cs[i].len, threads, m2) and (Length(m2) < cs[i].len) and
+       ((md[i] = J2K_RAW) or (Length(m2) < Length(ms[i]))) then begin
+      ms[i] := m2; md[i] := J2K_MODEL;
+    end;
+    m2 := nil;
+    if md[i] <> J2K_RAW then begin
       known[i] := Copy(data, cs[i].off, cs[i].len);
       cut := cut + cs[i].len;
-    end else ms[i] := nil;
+    end;
   end;
   { the host: the file without the codestreams of mode 1 }
   if cut = 0 then host := data
@@ -1842,7 +1871,7 @@ begin
   p := 2; PutU32(stream, p, Length(cs));
   for i := 0 to High(cs) do begin
     PutU32(stream, p, Cardinal(cs[i].off)); PutU32(stream, p, Cardinal(cs[i].len)); PutU32(stream, p, Length(ms[i]));
-    if ms[i] <> nil then stream[p] := J2K_MODEL else stream[p] := J2K_RAW;
+    stream[p] := md[i];
     Inc(p);
   end;
   for i := 0 to High(cs) do
@@ -1851,8 +1880,9 @@ begin
   Result := CodecFail(ceOk);
   Result.j2k := True;
   Result.j2kModelled := cut;
-  { checked: the stream gives the file back; each mode 1 stream was decoded
-    and compared when it was made, so its codestream is taken as known }
+  { checked: the stream gives the file back; each mode 1 or 2 stream was
+    decoded and compared when it was made, so its codestream is taken as
+    known }
   if not verify then Exit;
   was := StageEnter(stVerify);
   if not ReadJ2k(stream, back, Length(data), threads, known).Ok or (Length(back) <> Length(data)) or

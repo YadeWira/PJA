@@ -23,7 +23,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjamodel, pjaj2k, pjathread,
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjaj2kpx, pjamodel, pjaj2k, pjathread,
   { the commands for reporting and checking (doc/CLI.md); each format's
     info provider registers itself }
   pjastage, pjainfo, pjainfojpeg, pjainfoj2k, pjainfopja, pjasysinfo, pjareport, pjabench, pjaselftest;

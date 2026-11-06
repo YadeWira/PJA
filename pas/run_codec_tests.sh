@@ -77,27 +77,48 @@ echo "-- stream version 8 (the JPEG 2000 family): the codestreams found, every s
 "$OUT/test_codec" "$PJA/tests/j2k" 7 | tail -2
 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
 echo "-- JPEG 2000 stage B: each codestream taken apart, put back together from the blob alone, and damaged copies"
-"$OUT/test_j2kcs" -q -min 14 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
+"$OUT/test_j2kcs" -q -min 16 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
 echo "-- JPEG 2000 stage C: stream version 8's mode 1, the same stream on 1 and 4 threads, in slices too, and damaged"
-"$OUT/test_j2kcs" -q -min 14 -mode1 "$PJA/tests/j2k" | grep -E '^mode 1'
-m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 1 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
-m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 4 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+"$OUT/test_j2kcs" -q -min 16 -mode1 "$PJA/tests/j2k" | grep -E '^mode 1'
+m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode1 -threads 1 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode1 -threads 4 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
 [ -n "$m1" ] && [ "$m1" = "$m4" ] || { echo "FAIL: mode 1 in slices differs on 1 and 4 threads ($m1, $m4)"; exit 1; }
 echo "mode 1 in slices of 1500 bytes: the same streams on 1 and 4 threads ($m1)"
 PJA_J2K_SLICE=1500 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
+echo "-- JPEG 2000 stage D: mode 2 (the pixels), the same stream on 1 and 4 threads, in slices too, and damaged streams"
+r=$("$OUT/test_j2kcs" -q -min 16 -mode1 -mode2 -m2fuzz 300 "$PJA/tests/j2k" | grep -E '^(mode 2|choice|CHOICE lossless_com)')
+echo "$r" | grep -v '^CHOICE'
+echo "$r" | grep -q 'mode 2 fuzz: 1500 damaged streams' || { echo "FAIL: mode 2 fuzz"; exit 1; }
+# the five lossless codestreams taken, the rate-truncated ones not; each
+# taken stream's SIZ set past the caps: refused at once
+echo "$r" | grep -q 'refused 12, failed 0' || { echo "FAIL: mode 2 takes other codestreams"; exit 1; }
+echo "$r" | grep -q 'mode 2 caps: 10 streams' || { echo "FAIL: mode 2's caps"; exit 1; }
+echo "$r" | grep -q 'mode 0 0, mode 1 15, mode 2 2' || { echo "FAIL: mode 2 not chosen for the two lossless samples"; exit 1; }
+# mode 2 under half the codestream, mode 1 smaller still: mode 1 is tried
+echo "$r" | grep -q '^CHOICE lossless_com.j2k #0 .* -> mode 1 ' || { echo "FAIL: the choice did not try mode 1"; exit 1; }
+m1=$("$OUT/test_j2kcs" -q -min 16 -mode2 -threads 1 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 4 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+m5=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 1 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+[ -n "$m4" ] && [ "$m4" = "$m5" ] || { echo "FAIL: mode 2 in slices differs on 1 and 4 threads ($m4, $m5)"; exit 1; }
+echo "mode 2: streams $m1; in slices of 1500 bytes, the same on 1 and 4 threads ($m4)"
 # small codestreams that ask much work: 65535 tiles of 2 tile-parts each
 # (1.9 MB, taken), 2 million code-blocks in 111 bytes (refused at the
 # entries' bound); seconds, not the minutes the work grew to before
 LIM=$OUT/limits; rm -rf "$LIM"; mkdir -p "$LIM"
 python3 "$PAS/tests/mkj2k_limits.py" tileparts "$LIM/tileparts.j2k" 65535 2
 python3 "$PAS/tests/mkj2k_limits.py" codeblocks "$LIM/codeblocks.j2k"
+# mode 2: 82 bytes that declare a plane 2^21 samples wide, or 2^24 samples
+python3 "$PAS/tests/mkj2k_limits.py" blank "$LIM/blank_wide.j2k" 2097152 1
+python3 "$PAS/tests/mkj2k_limits.py" blank "$LIM/blank_tall.j2k" 4096 4096
 t0=$SECONDS
 r=$("$OUT/test_j2kcs" -q -mode1 "$LIM/tileparts.j2k" | grep '^files')
 [ "$r" = "files 1, codestreams 1: rebuilt byte for byte 1, refused 0, FAILED 0" ] || { echo "FAIL: tile-parts: $r"; exit 1; }
 r=$("$OUT/test_j2kcs" -q -mode1 "$LIM/codeblocks.j2k" | grep -c "refused .*limits: packet entries")
 [ "$r" = 1 ] || { echo "FAIL: code-blocks not refused at the entries' bound"; exit 1; }
+r=$("$OUT/test_j2kcs" -mode2 "$LIM/blank_wide.j2k" "$LIM/blank_tall.j2k" | grep -E '^MODE2REFUSED' | sed 's/.*#0 //' | sort | tr '\n' ,)
+[ "$r" = "too many samples for its bytes,too wide," ] || { echo "FAIL: mode 2's caps on blank codestreams: $r"; exit 1; }
 [ $((SECONDS - t0)) -le 90 ] || { echo "FAIL: the limits' codestreams took $((SECONDS - t0)) s"; exit 1; }
-echo "limits: 65535 tiles x 2 tile-parts taken, 2 million code-blocks in 111 bytes refused ($((SECONDS - t0)) s)"
+echo "limits: 65535 tiles x 2 tile-parts taken, 2 million code-blocks in 111 bytes refused, mode 2 past its caps refused ($((SECONDS - t0)) s)"
 echo "-- what a later release writes: FutureVersion (codec byte 0 from 9 to 255, PATCH, version 8, .pja)"
 "$OUT/test_versions" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -2
 

@@ -6,7 +6,7 @@
     dump_streams <jpeg dir> <out dir> [threads] }
 program dump_streams;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km, pjaj2kcs;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km, pjaj2kpx, pjaj2kcs;
 var sr: TSearchRec; s: TFileStream; d, st: TBytes; o: string; threads: Integer;
 begin
   J2kTestSlicesFromEnv;

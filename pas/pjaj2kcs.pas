@@ -78,14 +78,47 @@ type
     kept as bits in the blob's last stream (kmNone), coded by stream version
     8's model as the analysis finds them (kmEncode) or decoded by it as the
     rebuild needs them (kmDecode), or written to a file for the model's
-    tuning (kmDump, pas/tests/test_j2kcs -dumpcb) }
-  TJ2kModelKind = (kmNone, kmEncode, kmDecode, kmDump);
+    tuning (kmDump, pas/tests/test_j2kcs -dumpcb); or (stream version 8's
+    mode 2, pjaj2kpx) given as coefficients to the pixels as the analysis
+    finds them (kmPixEncode), and made again from the pixels' coefficients
+    as the rebuild needs them (kmPixDecode) }
+  TJ2kModelKind = (kmNone, kmEncode, kmDecode, kmDump, kmPixEncode, kmPixDecode);
   { The tiles of a codestream go in slices, each with its own model (and
     arithmetic stream): slice k (from 0) starts, its model's tables of at
     most 2^hb counters; the model (pjaj2kmc.c's, made by KmInit) to code it
     with, nil when there is none }
   TJ2kSliceFn = function(k, hb, worker: Integer): Pointer of object;
   TJ2kSliceEndFn = procedure(k, worker: Integer) of object;
+  { mode 2 (kmPixEncode, kmPixDecode): what a tile holds, for the pixels.
+    A component: its sampling, its place in the tile (x0..x1, y0..y1 on its
+    own grid), its resolutions, its precision (SIZ), and ok when it is
+    reversible (the 5/3 wavelet, no quantization, every band's exponent
+    given); its bands, each with its Mb and its place on its own grid. mct:
+    the reversible colour transform on components 0 to 2; rgn: an RGN
+    marker segment in the main header or the tile's; ix0..ix1, iy0..iy1:
+    the image area on the reference grid (SIZ) }
+  TJ2kPixComp = record
+    dx, dy, nres, depth: Integer; signed, ok: Boolean;
+    x0, y0, x1, y1: Int64;
+  end;
+  TJ2kPixBand = record comp, res, orient, mb: Integer; x0, y0, x1, y1: Int64; end;
+  TJ2kPixTile = record
+    tile: Integer; mct, rgn: Boolean;
+    ix0, iy0, ix1, iy1: Int64;
+    comps: array of TJ2kPixComp;
+    bands: array of TJ2kPixBand;
+  end;
+  { a tile starts on the worker whose state is km (the slice's pointer):
+    '' or why it cannot be taken }
+  TJ2kPixTileFn = function(km: Pointer; const t: TJ2kPixTile): string of object;
+  { a code-block of the tile's band (x0, y0 in the band, w x h): encoding,
+    its n decisions as decoded (the coefficients to keep), n back or -1;
+    decoding, its decisions made from the coefficients into sym (cap
+    bytes), how many, -1 when they cannot be }
+  TJ2kPixCbFn = function(km: Pointer; band, x0, y0, w, h, sty, npass, zbp: Integer; sym: PByte; n, cap: Int64;
+    passend: PLongInt): Int64 of object;
+  { the tile's code-blocks are all done: '' or why it cannot be taken }
+  TJ2kPixEndFn = function(km: Pointer): string of object;
   TJ2kModelLink = record
     kind: TJ2kModelKind;
     { kmEncode, kmDecode: slice k starts on a worker (0 to threads - 1; a
@@ -94,6 +127,9 @@ type
     sliceEnd: TJ2kSliceEndFn;
     threads: Integer;        { the slices on so many threads at most }
     dump: TStream;           { kmDump }
+    pixTile: TJ2kPixTileFn;  { kmPixEncode, kmPixDecode }
+    pixCb: TJ2kPixCbFn;
+    pixEnd: TJ2kPixEndFn;
   end;
 
 const
@@ -148,6 +184,9 @@ procedure KmFinish(mem: Pointer);
 function KmUsed(mem: Pointer): Int64;
 function J2kStreamName(i: Integer): string;
 function J2kRuleName(i: Integer): string;
+{ the SIZ marker segment (marker and length included) a blob's headers
+  start with; False when the blob does not hold one }
+function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
 
 implementation
 
@@ -406,7 +445,7 @@ end;
 { ------------------------------------------------------------------ headers }
 type
   TCodC = record
-    nl, xcb, ycb, sty: Integer; prec: Boolean;
+    nl, xcb, ycb, sty, tr: Integer; prec: Boolean;
     pp: array[0..MAXNL] of Byte;       { PPx in the low nibble, PPy in the high one }
   end;
   TQntC = record
@@ -430,7 +469,7 @@ type
     plens: array of Int64;             { its packets' lengths }
     bytes: TBytes;                     { rebuild: the whole tile-part }
   end;
-  TCodG = record have: Boolean; scod, prog, layers: Integer; cod: TCodC; end;
+  TCodG = record have: Boolean; scod, prog, layers, mct: Integer; cod: TCodC; end;
   { what the headers say for one tile }
   TParams = record
     g: TCodG;
@@ -463,7 +502,7 @@ type
     { SIZ }
     xsiz, ysiz, xosiz, yosiz, xtsiz, ytsiz, xtosiz, ytosiz: Int64;
     ncomp, nxt, nyt: Integer;
-    cdx, cdy: array of Integer;
+    cdx, cdy, csiz: array of Integer;
     { the headers }
     main: array of TItem;
     tps: array of TTp;
@@ -472,6 +511,7 @@ type
     mainQcd: TQntC; hasMainQcd: Boolean; mainQcc: array of TQntC; hasMainQcc: array of Boolean;
     mainPoc: array of TPocE; nMainPoc: Integer;
     ppm: TBW; hasPpm: Boolean;
+    hasRgn, tileRgn: Boolean;          { an RGN marker segment in the main header, in the tile's }
     iterations: Int64;
     { the tile at hand }
     tileNo: Integer; tx0, ty0, tx1, ty1: Int64;
@@ -535,6 +575,7 @@ type
     procedure EndSlice(k: Integer);
     constructor Create(analysing: Boolean);
     procedure ModelTile;
+    procedure PixTile;
     procedure DumpCb(cb, x0, y0, w, h, sty, npass: Integer; nsym: Int64);
     { headers }
     procedure ParseMainItem(const it: TItem);
@@ -609,14 +650,14 @@ begin
     if s and $FE <> 0 then Refuse('COC: Part 2 style');
   end else begin
     if p + 5 > e then Refuse('COD');
-    s := d[p]; g.scod := s; g.prog := d[p + 1]; g.layers := Be16(d, p + 2); Inc(p, 5);
+    s := d[p]; g.scod := s; g.prog := d[p + 1]; g.layers := Be16(d, p + 2); g.mct := d[p + 4]; Inc(p, 5);
     if s and $F8 <> 0 then Refuse('COD: Part 2 style');
     if g.prog > 4 then Refuse('COD: progression');
     if g.layers = 0 then Refuse('COD: layers');
     g.have := True;
   end;
   if p + 5 > e then Refuse('COD');
-  c.nl := d[p]; c.xcb := d[p + 1] + 2; c.ycb := d[p + 2] + 2; c.sty := d[p + 3]; Inc(p, 5);
+  c.nl := d[p]; c.xcb := d[p + 1] + 2; c.ycb := d[p + 2] + 2; c.sty := d[p + 3]; c.tr := d[p + 4]; Inc(p, 5);
   if c.nl > MAXNL then Refuse('COD: levels');
   if (c.xcb > 10) or (c.ycb > 10) or (c.xcb + c.ycb > 12) then Refuse('COD: code-block size');
   if c.sty and $40 <> 0 then Refuse('HTJ2K');
@@ -681,6 +722,7 @@ begin
     $FF60: begin
              hasPpm := True;
            end;
+    $FF5E: hasRgn := True;
     $FF72, $FF73: Refuse('Part 2 decomposition');
   end;
   if (it.code = $FF51) then begin
@@ -694,9 +736,9 @@ begin
        (xtosiz + xtsiz <= xosiz) or (ytosiz + ytsiz <= yosiz) then Refuse('SIZ: grid');
     if CeilDiv(xsiz - xtosiz, xtsiz) * CeilDiv(ysiz - ytosiz, ytsiz) > MAXTILES then Refuse('SIZ: tiles');
     nxt := CeilDiv(xsiz - xtosiz, xtsiz); nyt := CeilDiv(ysiz - ytosiz, ytsiz);
-    SetLength(cdx, ncomp); SetLength(cdy, ncomp);
+    SetLength(cdx, ncomp); SetLength(cdy, ncomp); SetLength(csiz, ncomp);
     for i := 0 to ncomp - 1 do begin
-      cdx[i] := it.raw[41 + 3 * i]; cdy[i] := it.raw[42 + 3 * i];
+      cdx[i] := it.raw[41 + 3 * i]; cdy[i] := it.raw[42 + 3 * i]; csiz[i] := it.raw[40 + 3 * i];
       if (cdx[i] = 0) or (cdy[i] = 0) then Refuse('SIZ: subsampling');
     end;
     SetLength(mainCoc, ncomp); SetLength(hasMainCoc, ncomp); SetLength(mainQcc, ncomp); SetLength(hasMainQcc, ncomp);
@@ -810,7 +852,7 @@ var i, j, c, z: Integer; p, e: Int64; cc: TCodC; g: TCodG; q: TQntC; tg: TCodG;
 begin
   tg := Default(TCodG); htqcd := False; tcoc := nil; htcoc := nil; tqcc := nil; htqcc := nil; tpoc := nil; npoc := 0;
   tqcd := Default(TQntC);
-  hdrPacked := hasPpm; pkdLen := 0;
+  hdrPacked := hasPpm; pkdLen := 0; tileRgn := hasRgn;
   SetLength(pkd, 0);
   for j := 0 to High(tileTps) do
     with tps[tileTps[j]] do begin
@@ -839,6 +881,7 @@ begin
                    if npoc + (e - p) div 7 + 1 > Length(tpoc) then SetLength(tpoc, 2 * npoc + (e - p) div 7 + 1);
                    AddPocs(Self, items[i].raw, p, e, tpoc, npoc);
                  end;
+          $FF5E: tileRgn := True;
           $FF61: begin
                    if hasPpm then Refuse('PPM and PPT');
                    if e < 5 then Refuse('PPT');
@@ -1657,6 +1700,7 @@ var b, c, r, o: Integer; bg: TBandG; area, need, a0, a1, a2: Int64; base: array[
   end;
 
 begin
+  if lk.kind in [kmPixEncode, kmPixDecode] then begin PixTile; Exit; end;
   SetLength(kmBands, Length(bands));
   SetLength(areaOf, ncomp);
   for c := 0 to ncomp - 1 do areaOf[c] := 0;
@@ -1706,6 +1750,32 @@ begin
     else pjaj2km_tile(km, nil, 0, nil, 0);
 end;
 
+{ mode 2: the tile's components and bands, for the pixels (pjaj2kpx) }
+procedure TJ2k.PixTile;
+var t: TJ2kPixTile; c, b: Integer; why: string;
+begin
+  t := Default(TJ2kPixTile);
+  t.tile := tileNo; t.mct := par.g.mct <> 0; t.rgn := tileRgn;
+  t.ix0 := xosiz; t.iy0 := yosiz; t.ix1 := xsiz; t.iy1 := ysiz;
+  SetLength(t.comps, ncomp);
+  for c := 0 to ncomp - 1 do
+    with t.comps[c] do begin
+      dx := comps[c].dx; dy := comps[c].dy; nres := comps[c].nres;
+      x0 := comps[c].x0; y0 := comps[c].y0; x1 := comps[c].x1; y1 := comps[c].y1;
+      depth := (csiz[c] and $7F) + 1; signed := csiz[c] and $80 <> 0;
+      ok := (par.cod[c].tr = 1) and (par.qnt[c].style = 0) and (par.qnt[c].n >= 3 * (nres - 1) + 1);
+    end;
+  SetLength(t.bands, Length(bands));
+  for b := 0 to High(bands) do
+    with t.bands[b] do begin
+      comp := bands[b].comp; res := bands[b].res; orient := bands[b].orient; mb := bands[b].mb;
+      x0 := bands[b].x0; y0 := bands[b].y0; x1 := bands[b].x1; y1 := bands[b].y1;
+    end;
+  if km = nil then Refuse('internal: no pixels');
+  why := lk.pixTile(km, t);
+  if why <> '' then Refuse('pixels: ' + why);
+end;
+
 { Slice k starts at the t-th tile coded. Analysing: where the streams are,
   and its model (its tables' bits by its share of the codestream);
   rebuilding: the streams must be where the slice table says, and its
@@ -1725,7 +1795,7 @@ begin
     for i := SH_LAY to SH_HDRX do
       if sr[i].p <> slPos[k][i] then Refuse('bad slice');
   case lk.kind of
-    kmEncode, kmDecode: begin
+    kmEncode, kmDecode, kmPixEncode, kmPixDecode: begin
         km := lk.slice(k, slHb[k], worker);
         if km = nil then Refuse('no model');
       end;
@@ -1736,7 +1806,7 @@ end;
 
 procedure TJ2k.EndSlice(k: Integer);
 begin
-  if lk.kind in [kmEncode, kmDecode] then lk.sliceEnd(k, worker);
+  if lk.kind in [kmEncode, kmDecode, kmPixEncode, kmPixDecode] then lk.sliceEnd(k, worker);
   km := nil;
 end;
 
@@ -1856,7 +1926,10 @@ begin
         At(symb, 0), cap, @passend[0], @stb[0]);
       ok := nsym >= 0;
     end;
-    if not ok then begin KeepBytes; Exit; end;
+    if not ok then begin
+      if lk.kind = kmPixEncode then Refuse('pixels: a code-block that does not decode');
+      KeepBytes; Exit;
+    end;
     { the segments' endings first: when one of them is kept as it is (rule
       raw or bypass raw), the whole code-block is, rather than its bytes
       and its decisions both; else its decisions after them (below) }
@@ -1874,6 +1947,10 @@ begin
     EnsureB(symb, cap);
     if lk.kind = kmDecode then begin
       nsym := pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), cap,
+        @passend[0]);
+      if nsym < 0 then Refuse('decisions');
+    end else if lk.kind = kmPixDecode then begin
+      nsym := lk.pixCb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), 0, cap,
         @passend[0]);
       if nsym < 0 then Refuse('decisions');
     end else begin
@@ -2066,6 +2143,9 @@ begin
     segStart := segStart + segOut.n;
   end;
   if not an then Exit;
+  { mode 2: the coefficients, kept as bytes or not }
+  if (lk.kind = kmPixEncode) and (lk.pixCb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb],
+    At(symb, 0), nsym, nsym, @passend[0]) <> nsym) then Refuse('pixels: a code-block''s coefficients');
   if anyRaw then begin
     sw[SH_T1R].n := t1rN; sw[SH_T1X].n := t1xN; st := st0;
     KeepBytes;
@@ -2077,6 +2157,7 @@ begin
     if pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), nsym,
       @passend[0]) <> nsym then Refuse('model');
   end else if lk.kind = kmDump then DumpCb(cb, x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, nsym)
+  else if lk.kind = kmPixEncode then
   else begin
     { their bits }
     Grow(sw[SH_DEC].d, (dbits + nsym) div 8 + 8);
@@ -2294,7 +2375,7 @@ begin
 end;
 
 procedure TJ2k.Tile(t: Integer);
-var i, k, j, q, pi: Integer; w: TBW; v: Int64; b: TBytes;
+var i, k, j, q, pi: Integer; w: TBW; v: Int64; b: TBytes; tpw: string;
 begin
   tileNo := t;
   { its tile-parts, in the order of the codestream }
@@ -2347,6 +2428,11 @@ begin
   if not hdrPacked then Trees;
   cbData.n := 0;
   for i := 0 to ncb - 1 do begin cbDOff[i] := 0; if cbPasses[i] > 0 then DoCb(i); end;
+  if lk.kind in [kmPixEncode, kmPixDecode] then begin
+    if km = nil then Refuse('internal: no pixels');
+    tpw := lk.pixEnd(km);
+    if tpw <> '' then Refuse('pixels: ' + tpw);
+  end;
   Pass3;
   if not an then
     { the tile-parts }
@@ -2716,7 +2802,7 @@ begin
     try
       r := Default(TBR); r.d := blob; r.p := 0; r.e := Length(blob);
       { version 2: the decisions coded apart, by slices (mode 1) }
-      if r.Get <> BLOB_VERSION + Ord(lk.kind = kmDecode) then Refuse('blob version');
+      if r.Get <> BLOB_VERSION + Ord(lk.kind in [kmDecode, kmPixDecode]) then Refuse('blob version');
       for i := 0 to J2K_NSTREAMS - 1 do n[i] := r.VI(High(LongInt));
       p := r.p;
       for i := 0 to J2K_NSTREAMS - 1 do begin
@@ -2729,7 +2815,7 @@ begin
       nu := 0;
       for i := 0 to High(used) do nu := nu + used[i];
       j.nslice := 0;
-      if lk.kind = kmDecode then begin
+      if lk.kind in [kmDecode, kmPixDecode] then begin
         { the slice table, after the streams }
         r.p := p;
         s := r.VI(Min64(nu, J2K_MAX_SLICES));
@@ -2746,7 +2832,7 @@ begin
         end;
         if r.p <> r.e then Refuse('blob left over');
       end else if p <> Length(blob) then Refuse('blob left over');
-      if lk.kind = kmDecode then begin
+      if lk.kind in [kmDecode, kmPixDecode] then begin
         { each slice on its own TJ2k, on the workers }
         sd := TSliced.Create;
         try
@@ -2783,7 +2869,29 @@ begin
   end;
 end;
 
-const NOLINK: TJ2kModelLink = (kind: kmNone; slice: nil; sliceEnd: nil; threads: 1; dump: nil);
+const NOLINK: TJ2kModelLink = (kind: kmNone; slice: nil; sliceEnd: nil; threads: 1; dump: nil; pixTile: nil;
+  pixCb: nil; pixEnd: nil);
+
+function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
+var r: TBR; i: Integer; n: array[0..J2K_NSTREAMS - 1] of Int64; v: Integer;
+begin
+  siz := nil; Result := False;
+  try
+    r := Default(TBR); r.d := blob; r.p := 0; r.e := Length(blob);
+    v := r.Get;
+    if (v < BLOB_VERSION) or (v > BLOB_VERSION + 1) then Exit;
+    for i := 0 to J2K_NSTREAMS - 1 do n[i] := r.VI(High(LongInt));
+    if n[SH_HDR] > r.e - r.p then Exit;
+    r.e := r.p + n[SH_HDR];
+    if r.VI(1 shl 20) < 1 then Exit;
+    if r.Get <> 0 then Exit;
+    siz := r.Take(r.VI(65537));
+    Result := (Length(siz) >= 4) and (Be16(siz, 0) = $FF51);
+  except
+    on EJ2k do Result := False;
+  end;
+  if not Result then siz := nil;
+end;
 
 function J2kRebuild(const blob: TBytes; out cs: TBytes): Boolean;
 var why: string;
@@ -2813,7 +2921,7 @@ var j: TJ2k; i, k, t, nu: Integer; w: TBW; used, back: TBytes; why: string; sd: 
 begin
   blob := nil; reason := ''; Result := False;
   if (off < 0) or (len < 0) or (off + len > Length(data)) then begin reason := 'bad range'; Exit; end;
-  if lk.kind = kmDecode then begin reason := 'bad link'; Exit; end;
+  if lk.kind in [kmDecode, kmPixDecode] then begin reason := 'bad link'; Exit; end;
   j := TJ2k.Create(True);
   j.lk := lk;
   if lk.kind = kmDump then begin lk.dump.WriteByte(Ord('S')); lk.dump.WriteQWord(QWord(len)); end;
@@ -2828,7 +2936,7 @@ begin
       j.nslice := 0;
       if lk.kind <> kmNone then
         j.nslice := Max64(1, Min64(Min64(nu, len div SliceBytes), J2K_MAX_SLICES));
-      if lk.kind = kmEncode then begin
+      if lk.kind in [kmEncode, kmPixEncode] then begin
         { each slice on its own TJ2k, on the workers, then put together: the
           streams one after the other, where each slice's start, the
           tile-parts' packets }
@@ -2872,10 +2980,10 @@ begin
       end;
       j.WriteHeaders;
       w := Default(TBW);
-      w.Put(BLOB_VERSION + Ord(lk.kind = kmEncode));
+      w.Put(BLOB_VERSION + Ord(lk.kind in [kmEncode, kmPixEncode]));
       for i := 0 to J2K_NSTREAMS - 1 do w.V(j.sw[i].n);
       for i := 0 to J2K_NSTREAMS - 1 do w.PutN(j.sw[i].d, 0, j.sw[i].n);
-      if lk.kind = kmEncode then begin
+      if lk.kind in [kmEncode, kmPixEncode] then begin
         w.V(j.nslice);
         for k := 0 to j.nslice - 1 do begin
           if k > 0 then w.V(j.slFirst[k]);

@@ -10,7 +10,7 @@
     test_codec_corrupt <directory> [max bytes per stream] }
 program test_codec_corrupt;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km, pjaj2kcs, corrupt_par;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km, pjaj2kpx, pjaj2kcs, corrupt_par;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);

@@ -152,9 +152,23 @@ import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) // 2] ^= 8; 
   check "one bit in a version 8 stream: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bad.pja' 2>/dev/null && [ ! -e '$W/j2k/bad.jp2' ]"
   # p.pja keeps the extension jp2: its stream from byte 40, the first codestream's mode 18 bytes in
   python3 -I -c "
-import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 2; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 3; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
   check "a codestream mode of a later release: rc 1, says FutureVersion" bash -c "
     ! '$PJA' x '$W/j2k/mode.pja' 2> '$W/j2k/err.txt' && grep -q 'FutureVersion' '$W/j2k/err.txt' && [ ! -e '$W/j2k/mode.jp2' ]"
+fi
+if [ -e "$W/in/bitonal.j2k" ]; then
+  # b.pja keeps the extension j2k: its stream from byte 40, the codestream's mode 18 bytes in
+  check "a 1-bit lossless codestream as its pixels (mode 2): JPEG 2000, under 60% of the file, back byte for byte" bash -c "
+    '$PJA' a -f '$W/in/bitonal.j2k' -o '$W/j2k/b.pja' > '$W/j2k/b.txt' && grep -q '(JPEG 2000)' '$W/j2k/b.txt' &&
+    [ \$(wc -c < '$W/j2k/b.pja') -lt \$((\$(wc -c < '$W/in/bitonal.j2k') * 6 / 10)) ] &&
+    python3 -I -c 'import sys; sys.exit(open(sys.argv[1], \"rb\").read()[40 + 18] != 2)' '$W/j2k/b.pja' &&
+    '$PJA' x -q '$W/j2k/b.pja' -o '$W/j2k/bx/' && cmp -s '$W/in/bitonal.j2k' '$W/j2k/bx/b.j2k'"
+  check "a lossless RGB codestream of tiles (mode 2), back byte for byte" bash -c "
+    '$PJA' a -q -f '$W/in/rgb_tiles53.j2k' -o '$W/j2k/r.pja' &&
+    '$PJA' x -q '$W/j2k/r.pja' -o '$W/j2k/rx/' && cmp -s '$W/in/rgb_tiles53.j2k' '$W/j2k/rx/r.j2k'"
+  python3 -I -c "
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) - 20] ^= 16; open(sys.argv[2], 'wb').write(d)" "$W/j2k/b.pja" "$W/j2k/bbad.pja"
+  check "one bit in a mode 2 stream's pixels: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bbad.pja' 2>/dev/null && [ ! -e '$W/j2k/bbad.j2k' ]"
 fi
 
 echo "--- existing outputs"
