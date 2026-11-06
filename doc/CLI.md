@@ -16,6 +16,8 @@ pja list FILE...            what each .pja holds: original size, stored size, ha
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` (`pja.corrupt` beside it if that name would be too long) |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, so does the check of a repaired JPEG, and the `.pja` is the same byte for byte |
 | `--fast` | `a`: accepted for older scripts, and changes nothing: since 0.1.0 the model `a` uses (stream version 7) is as fast as the fast model was and as small as the full one (`CODEC.md`). `x` reads every version |
+| `--no-sync` | do not wait for each output to reach the disk before it takes its name. A few percent faster on a real disk (none on tmpfs), but after a power cut an output may be empty or missing ([below](#interrupted-runs)) |
+| `--clean-temps` | delete the temporaries an interrupted run left in the directories this run writes to: only PJA's (`.pja-tmp-PID-N`, and the `.pja-tmpN` of 0.9.0 and earlier), only regular files, only older than an hour, and never one whose process is still running ([below](#interrupted-runs)) |
 | `-n`, `--dry-run` | do everything but write: an output that exists, or that two inputs share, fails as it would for real |
 | `-q`, `--quiet` | only errors |
 | `--` | everything after it is a file, even if it starts with a dash |
@@ -34,14 +36,42 @@ stderr.
   `--max-output` **before** decoding; decode with that size as the cap;
   check the size **and** the hash; and only then write.
 - Writing creates the file without following links, always as a temporary
-  in the same directory (`.pja-tmpN`) that takes the output's name only once
-  it is complete: a run cut short (Ctrl-C, a kill, a full disk) can leave a
-  `.pja-tmpN` behind, never a truncated file under the output's name.
-  Without `-f` the name is only taken if it is still free; with `-f` the
-  temporary is renamed on top: what was there is only replaced by something
-  that verified. Nothing that fails deletes a file this run did not write.
-  (On a file system without hard links, such as FAT, it is written in place
-  when there is no `-f`.)
+  in the same directory (`.pja-tmp-PID-N`) that takes the output's name
+  only once it is complete **and on the disk** (`fsync`; `FlushFileBuffers`
+  on Windows), and the directory is flushed after the name is given (on
+  Windows the move is write-through): after a power cut the output is
+  either whole or not there, never empty or partial under its name. A run
+  cut short (Ctrl-C, a kill, a full disk) never leaves a truncated file
+  under the output's name. Without `-f` the name is only taken if it is
+  still free; with `-f` the temporary is renamed on top: what was there is
+  only replaced by something that verified. Nothing that fails deletes a
+  file this run did not write. (On a file system without hard links, such
+  as FAT, it is written in place when there is no `-f`.)
+
+## Interrupted runs
+
+- **Ctrl-C, `kill`, a closed terminal**: SIGINT, SIGTERM and SIGHUP (on
+  Windows Ctrl-C, Ctrl-Break and closing the console) delete the
+  temporaries the run is still writing, and it ends as the signal would
+  have ended it (exit status 130 for SIGINT, 143 for SIGTERM, 129 for
+  SIGHUP; `STATUS_CONTROL_C_EXIT` on Windows). Outputs already written stay:
+  each one verified. A signal ignored by whoever started `pja` (`nohup`, a
+  background job of a script) stays ignored.
+- **`kill -9`, a crash, a power cut**: nothing can run then, so a
+  `.pja-tmp-PID-N` may stay. The next run that writes in that directory
+  names them on stderr (`found 2 leftover temporaries of an interrupted
+  run: ...; --clean-temps deletes them`), once per directory, and deletes
+  nothing unless `--clean-temps` is given. Either way only names of PJA's
+  own pattern count, only regular files (a link or a directory with that
+  name is left alone), only older than an hour, and never one whose process
+  (the PID in its name) is still running. With `-n` they are only named.
+- **What flushing costs**: on 151 photos (76 MB) with `-th 8`, writing to
+  a SATA SSD took 3.7 to 4.8% longer for `a` and 4.4 to 7.1% longer for
+  `x` than 0.9.0, which did not flush (medians of two series of 5 runs);
+  on tmpfs, under 1%. It is on by default; `--no-sync` turns it off (within
+  1% of 0.9.0) for a run whose outputs can be made again: a power cut may
+  then leave an output empty or missing. The temporary and the handlers
+  above work the same either way.
 
 ## Choices, and why
 

@@ -185,6 +185,100 @@ check "--max-output below the original: refused" test "$(rc "$PJA" x --max-outpu
 check "  nothing written" test ! -e "$W/m.jpg"
 check "--max-output=1K is enough for a 988-byte original" "$PJA" x -q --max-output=1K "$W/g.pja" -o "$W/m.jpg"
 
+echo "--- interrupted runs, and the disk"
+# strace with fault injection holds the write at its fsync, between a
+# complete temporary and its rename, for as long as the test needs: the
+# signal lands exactly there. Without it, the signal is sent as soon as a
+# temporary shows up (a race the write usually wins: a weaker check).
+mkdir -p "$W/sig"
+for i in $(seq 24); do cp "$W/pja/color_plasma.pja" "$W/sig/c$i.pja"; done
+HOLD=0
+if command -v strace > /dev/null 2>&1 &&
+   strace -f -qq -o /dev/null -e trace=fsync -e inject=fsync:delay_enter=1ms true > /dev/null 2>&1; then HOLD=1; fi
+cat > "$W/sig.py" <<'EOF'
+import glob, os, signal, subprocess, sys, time
+pja, d, sig, hold, ignore = sys.argv[1], sys.argv[2], getattr(signal, sys.argv[3]), sys.argv[4] == '1', sys.argv[5] == '1'
+out = os.path.join(d, 'o')
+# ignored, the run goes to the end: one file, held twice (its data, its directory)
+files = sorted(glob.glob(os.path.join(d, 'c*.pja')))[:1 if ignore else None]
+cmd = [pja, 'x', '-q', '-f', '-th', '1'] + files + ['-o', out + '/']
+if hold:
+    cmd = ['strace', '-f', '-qq', '-o', '/dev/null', '-e', 'trace=fsync', '-e', 'inject=fsync:delay_enter=2s'] + cmd
+# like nohup: an ignored signal stays ignored
+pre = (lambda: signal.signal(sig, signal.SIG_IGN)) if ignore else None
+p = subprocess.Popen(cmd, preexec_fn=pre)
+seen, t0 = False, time.time()
+while time.time() - t0 < 60 and p.poll() is None:
+    if glob.glob(os.path.join(out, '.pja-tmp-*')): seen = True; break
+target = p.pid
+if hold and p.poll() is None:
+    target = int(open('/proc/%d/task/%d/children' % (p.pid, p.pid)).read().split()[0])
+if p.poll() is None: os.kill(target, sig)
+rc = p.wait()
+rc = 128 - rc if rc < 0 else rc
+left = glob.glob(os.path.join(out, '.pja-tmp-*'))
+print(rc, 'seen' if seen else 'missed', len(left))
+EOF
+sigcheck() {   # sigcheck <signal> <rc> [ignore]: no temporary left, and the conventional rc
+  rm -rf "$W/sig/o"
+  local r; r=$(python3 -I "$W/sig.py" "$PJA" "$W/sig" "$1" "$HOLD" "${3:-0}") || return 1
+  set -- $r "$2"
+  [ "$3" -eq 0 ] || return 1                         # a temporary left behind
+  if [ "$HOLD" = 1 ]; then [ "$2" = seen ] && [ "$1" -eq "$4" ]
+  else [ "$1" -eq "$4" ] || [ "$1" -eq 0 ]; fi        # the write may have won the race
+}
+if [ "$HOLD" = 1 ]; then how="held at its fsync"; else how="strace not here: racy"; fi
+check "SIGINT while a temporary is written: deleted, rc 130 ($how)" sigcheck SIGINT 130
+check "SIGTERM: the same, rc 143" sigcheck SIGTERM 143
+check "SIGHUP: the same, rc 129" sigcheck SIGHUP 129
+if [ "$HOLD" = 1 ]; then
+  check "a SIGINT ignored by whoever started it (nohup) stays ignored: rc 0" bash -c "
+    r=\$(python3 -I '$W/sig.py' '$PJA' '$W/sig' SIGINT 1 1) && [ \"\$r\" = '0 seen 0' ] && [ -e '$W/sig/o/c1.jpg' ]"
+  check "the data and then the directory reach the disk: fsync, rename, fsync" bash -c "
+    strace -f -qq -o '$W/sync.txt' -e trace=fsync,rename,renameat2,link '$PJA' a -q -f '$W/in/grayscale.jpg' -o '$W/sync.pja' &&
+    grep -oE '^[0-9]+ +(fsync|rename|renameat2|link)\(' '$W/sync.txt' | sed -E 's/^[0-9]+ +//; s/renameat2|link/rename/' | tr -d '(' |
+      tr '\n' ' ' | grep -qx 'fsync rename fsync '"
+  check "  and with -f, through the rename on top" bash -c "
+    strace -f -qq -o '$W/sync2.txt' -e trace=fsync,rename,renameat2 '$PJA' x -q -f '$W/sync.pja' -o '$W/sync.jpg' &&
+    grep -oE '^[0-9]+ +(fsync|rename|renameat2)\(' '$W/sync2.txt' | sed -E 's/^[0-9]+ +//; s/renameat2/rename/' | tr -d '(' |
+      tr '\n' ' ' | grep -qx 'fsync rename fsync ' && cmp -s '$W/sync.jpg' '$W/in/grayscale.jpg'"
+  check "--no-sync: no fsync at all, and the file comes back" bash -c "
+    strace -f -qq -o '$W/sync3.txt' -e trace=fsync,fdatasync '$PJA' a -q -f --no-sync '$W/in/grayscale.jpg' -o '$W/sync3.pja' &&
+    ! grep -qE 'fsync|fdatasync' '$W/sync3.txt' && '$PJA' x -q -f '$W/sync3.pja' -o '$W/sync3.jpg' && cmp -s '$W/sync3.jpg' '$W/in/grayscale.jpg'"
+else
+  check "--no-sync: the file comes back" bash -c "
+    '$PJA' a -q -f --no-sync '$W/in/grayscale.jpg' -o '$W/sync3.pja' && '$PJA' x -q -f --no-sync '$W/sync3.pja' -o '$W/sync3.jpg' &&
+    cmp -s '$W/sync3.jpg' '$W/in/grayscale.jpg'"
+  check "the data reaches the disk before the name (no strace: the round trip)" bash -c "
+    '$PJA' a -q -f '$W/in/grayscale.jpg' -o '$W/sync.pja' && '$PJA' x -q -f '$W/sync.pja' -o '$W/sync.jpg' &&
+    cmp -s '$W/sync.jpg' '$W/in/grayscale.jpg'"
+fi
+
+# what a SIGKILL leaves: noticed by the next run there, deleted only when asked
+L="$W/left"; rm -rf "$L"; mkdir -p "$L"; cp "$W/in/grayscale.jpg" "$L/g.jpg"
+sh -c 'exit 0' & wait $!; DEAD=$!                     # a pid that is gone
+while kill -0 "$DEAD" 2> /dev/null; do DEAD=$((DEAD + 1)); done
+mk() { echo left > "$L/$1"; touch -d "${2:-2 hours ago}" "$L/$1"; }
+mk ".pja-tmp-$DEAD-0"; mk ".pja-tmp4"                 # old, of a dead run (and of 0.9.0)
+mk ".pja-tmp-$DEAD-1" now                             # fresh: maybe still being written
+mk ".pja-tmp-$$-0"                                    # old, but its process (this shell) lives
+mk ".pja-tmp-$DEAD-x"                                 # not PJA's pattern
+echo victim > "$W/left_victim"; ln -s "$W/left_victim" "$L/.pja-tmp-$DEAD-2"; touch -h -d '2 hours ago' "$L/.pja-tmp-$DEAD-2"
+check "a run that writes there names the leftovers, rc 0, deletes nothing" bash -c "
+  '$PJA' a -q '$L/g.jpg' 2> '$W/left.txt' && grep -q 'found 2 leftover temporaries of an interrupted run' '$W/left.txt' &&
+  grep -q -- '--clean-temps' '$W/left.txt' && [ -e '$L/.pja-tmp-$DEAD-0' ] && [ -e '$L/.pja-tmp4' ]"
+check "--clean-temps deletes the old one of a dead pid and the old pattern's" bash -c "
+  '$PJA' a -q -f --clean-temps '$L/g.jpg' 2> '$W/left2.txt' && grep -q 'deleted 2 leftover temporaries' '$W/left2.txt' &&
+  [ ! -e '$L/.pja-tmp-$DEAD-0' ] && [ ! -e '$L/.pja-tmp4' ]"
+check "  not a fresh one, not a live process's, not another name" bash -c "
+  [ -e '$L/.pja-tmp-$DEAD-1' ] && [ -e '$L/.pja-tmp-$$-0' ] && [ -e '$L/.pja-tmp-$DEAD-x' ]"
+check "  not a symbolic link with the name, nor its target" bash -c "
+  [ -L '$L/.pja-tmp-$DEAD-2' ] && [ \"\$(cat '$W/left_victim')\" = victim ]"
+check "a run with nothing left there says nothing" bash -c "
+  '$PJA' a -q -f --clean-temps '$L/g.jpg' 2> '$W/left3.txt' && [ ! -s '$W/left3.txt' ]"
+check "--clean-temps with list: rc 2" test "$(rc "$PJA" list --clean-temps "$W/g.pja")" -eq 2
+check "--no-sync with list: rc 2" test "$(rc "$PJA" list --no-sync "$W/g.pja")" -eq 2
+
 echo "--- what is not for this command"
 check "a on a .pja: rc 1" test "$(rc "$PJA" a "$W/g.pja" -o "$W/gg.pja")" -eq 1
 check "x on a JPEG: rc 1" test "$(rc "$PJA" x "$W/in/grayscale.jpg" -o "$W/xx.jpg")" -eq 1

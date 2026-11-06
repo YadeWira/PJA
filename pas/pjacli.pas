@@ -32,7 +32,7 @@ var
   inputs: TStringList;
   outArg: string;          { -o: a name, or a directory }
   outDir: string;          { --output-dir }
-  force, keepCorrupt, dryRun, quiet, fastModel, noVerify: Boolean;
+  force, keepCorrupt, dryRun, quiet, fastModel, noVerify, cleanTemps: Boolean;
   threads: Integer;
   maxOutput: QWord;
   errors: Integer;
@@ -152,6 +152,10 @@ begin
   Writeln('                       about twice as fast, but a codec bug would only show when');
   Writeln('                       extracting (the hash catches it then). The JPEG''s own check');
   Writeln('                       still runs');
+  Writeln('  --no-sync            do not wait for each output to reach the disk: a few');
+  Writeln('                       percent faster, but a power cut may leave it empty');
+  Writeln('  --clean-temps        delete the temporaries an interrupted run left where');
+  Writeln('                       this one writes (only PJA''s, old, of no live process)');
   Writeln('  -n, --dry-run        do everything but write');
   Writeln('  -q, --quiet          only errors');
   Writeln('  --                   the rest are files');
@@ -198,7 +202,7 @@ var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
-  fastModel := False; noVerify := False;
+  fastModel := False; noVerify := False; cleanTemps := False;
   threads := CpuCount;
   if threads > 8 then threads := 8;
   if threads < 1 then threads := 1;
@@ -227,6 +231,8 @@ begin
     else if a = '--keep-corrupt' then keepCorrupt := True
     else if a = '--fast' then fastModel := True
     else if a = '--no-verify' then noVerify := True
+    else if a = '--clean-temps' then cleanTemps := True
+    else if a = '--no-sync' then SyncToDisk := False
     else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
       if a = '-th' then v := NextValue else v := Copy(a, 11, MaxInt);
       if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
@@ -247,6 +253,7 @@ begin
   if (command = cmList) and ((outArg <> '') or (outDir <> '')) then UsageError('list writes nothing');
   if fastModel and (command <> cmCompress) then UsageError('--fast is for a');
   if noVerify and (command <> cmCompress) then UsageError('--no-verify is for a');
+  if (cleanTemps or not SyncToDisk) and (command = cmList) then UsageError('list writes nothing');
 end;
 
 function ReadWhole(const f: string; out data: TBytes): Boolean;
@@ -375,10 +382,13 @@ end;
 
 { Writes data under path, which must verify against `expected`. }
 function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
-var r: TFsResult; o: TOutcome; om: TOnMismatch;
+var r: TFsResult; o: TOutcome; om: TOnMismatch; note: string;
 begin
   Result := False;
   if not Claim(path) then Exit;
+  { what an interrupted run left in this directory: a notice, not a failure }
+  note := CheckLeftovers(path, cleanTemps and not dryRun);
+  if note <> '' then CurJob^.errText := CurJob^.errText + 'pja: ' + note + LineEnding;
   { -n checks this too: it said yes to what the real run then refused }
   if not force and Exists(path) then begin
     Fail(path + ': already exists (-f to replace it)');
@@ -536,6 +546,7 @@ begin
   {$ifndef MSWINDOWS} AllowDirectorySeparators := ['/']; {$endif}
   errors := 0;
   ParseArgs;
+  InstallInterruptCleanup;
   if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
     UsageError('-o with several inputs has to be a directory');
   jobs := nil;
