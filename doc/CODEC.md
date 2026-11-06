@@ -2903,7 +2903,7 @@ next slice starts, and the check against the codestream it rebuilt: a
 damaged stream is `BadStream`, never another codestream.
 
 **Slices.** The tiles go in S slices of consecutive tiles, one per 4 MiB
-of codestream, at most one a tile and 64; a slice has its own model and
+of codestream (1 MiB from 0.9.6: "JPEG 2000 faster", below), at most one a tile and 64; a slice has its own model and
 arithmetic stream, so that slices are coded and decoded on several
 threads (one TJ2k per slice, `RunSlices`), and the stream is the same
 for any number of threads. A codestream of one tile is one slice. Cutting
@@ -3506,3 +3506,227 @@ the command says of mode 2:
 - **`pja selftest`** carries a mode 2 sample too, `tests/j2k/bitonal.j2k`
   (1448 B -> 783 B), whose `.pja` has to be the same bytes on every SIMD
   path and word size.
+
+## JPEG 2000 faster (06/11/2026)
+
+For 0.9.6, without a change to any format: every stream version 8 stream
+is byte for byte 0.9.5's for the same file and settings, but for the
+slicing of large tiled codestreams, which is the encoder's choice and is
+written in the stream (below). Checked: the `.pja` of gap1's 113 real
+codestreams and the 30 rebuild files, against 0.9.5's, all 143 the same
+bytes with 4 MiB slices and the same but for nine tiled codestreams of 2
+MiB or more with 1 MiB slices; `tests/j2k`'s digests (stage B's blobs,
+mode 1 4A8994DE27F6BB08, in slices D106D2C0344B1AC2, mode 2
+4EAA3FD936B1C654, in slices 3E68FE182353F288, the choice), and
+`hash.txt` native and 32-bit (FPC i386, `clang -m32`): `3387e58d…` and
+`j2k 59a5774e…`, main's. No C object references `__divdi3`,
+`__moddi3`, `__udivdi3` or `__umoddi3` (`nm -u`, both word sizes).
+
+**Where the time went** (callgrind, 0.9.5, one thread). A book page
+(`056_1970-01_202503_0005`, 324 KB, Kakadu, 9/7, one tile) took 15.7 G
+instructions to compress: 92% in mode 1's model (`pjaj2km_cb`, coding and
+then decoding the decisions for the check), 3.5% tier-1's decoding, 1.7%
+the MQ coder's endings; extracting, 7.5 G, the same model. About 8.6
+million events each way, 850 instructions an event. Builds that change
+the stream, made only to see where the time goes (the check's decoding,
+900 ms): the model's probability a constant, 262 ms; with its contexts
+still computed, 407 ms; two of the three sets of weights left out, -10%;
+the three maps left out, -3%; every table 2^10 counters (the counters'
+cache misses), -5%. So no single part: the mixing about half, the
+contexts about a sixth, the passes, the code-blocks' setup and the
+rebuild the rest. Cutting the mixers' instructions by AVX2 took 21% of the
+decoding's instructions but only 4% of its time: an event waits on the
+one before (its bit, its counters, its weights), the processor is not
+short of instructions to run.
+
+A bitonal page (`047_GreekBiologyAndMedicine_0021`, 299 KB, 14.4
+megapixels, mode 2) took 34.7 G instructions: 76% the pixel model (coding
+and decoding), 6% the 5/3 lifting (most of it the symmetric extension of
+every sample), 4% zeroing its tables a byte at a time.
+
+**What changed**, the streams the same:
+
+- **SIMD copies of the models.** `pjaj2kmc.c`'s passes (mode 1) and
+  `pjaj2kpm.c`'s two pixel models (mode 2) compiled again with
+  `target("sse4.1")` and `target("avx2")`, as `pjav7c.c`'s loop, and
+  taken by pjamodel's cpuid (`UseSse41`, `UseAvx2`; `PJA_NOASM=1` and
+  `PJA_NOAVX2=1` turn them off, `PJA_V7_PLAIN` leaves them out, `--cpu`
+  and `selftest` follow). The same C: the mixers' 16 lanes in `pmulld`,
+  `pminsd` and `pmaxsd` instead of SSE2's `pmuludq` and compare-and-blend,
+  the same 32-bit wrapping arithmetic. `run_codec_tests.sh` already
+  compares the reference build (`PJA_NOASM=1`) with the fast one, the fast
+  one without asm and on 4 threads for `tests/j2k` whole and in slices.
+- **Fewer branches.** The arithmetic coder's interval without a branch on
+  the bit (decoding, about one guess missed an event); `q2log` with one
+  bit scan and no test (64-bit targets: `__builtin_clzll`, still two
+  32-bit scans on 32-bit ones), the contexts' logarithms (`ln`, `ln2`,
+  the run's window, the refinement's `rel`), `sgn3`, the maps' bytes and
+  the run's bucket as selects.
+- **A code-block's setup.** The values around a code-block from the maps:
+  the array zeroed, then only its border of two read (it tested every
+  entry); the parent's values, each parent coefficient once for the
+  coefficients it maps to (about four), rows and columns that map where
+  the one before did copied.
+- **The bitonal model.** Where every pixel the windows take in (up to x +
+  25) is inside the row, without the bounds tests (a row above the plane
+  reads row y, masked to 0); its tables and the model zeroed 8 bytes at a
+  time; the 5/3 lifting without the symmetric extension inside the line,
+  and its 30-bit check without an early exit (it vectorizes).
+- **One check per codestream.** `CompressJ2k` coded mode 2, checked it by
+  decoding it, coded mode 1 and checked it too, then kept the smaller.
+  Now both are coded first and only the stream kept is decoded and
+  compared (`J2kChoose`); if it does not come back, the other is checked,
+  and mode 1 coded then if it had not been: the same choice as before in
+  every case. A lossless codestream that both modes take loses one
+  decoding of the two (a Sentinel-2 B01, 1.47 MB: the checks 4.5 s -> 1.8 s).
+- **The two modes side by side.** With threads to spare, mode 1 is coded
+  on a thread of its own while mode 2 codes: for a reversible (5/3)
+  codestream of more than one bit, up to 64 MB, where both are nearly
+  always coded. Mode 1 gets as many threads as it may have slices (one a
+  MiB of codestream), mode 2 the rest, one at least (its pixels are one
+  arithmetic stream; the others go to its tiles' wavelets). A bitonal
+  page's mode 2 is nearly always below the least mode 1's could be, and
+  mode 2 refuses the 9/7 at once (mode 1 then gets every thread), so
+  neither is coded beside. A mode 1 stream coded beside a mode 2 one below
+  its floor is not looked at (the same choice).
+- **A file's codestreams side by side.** A file of several codestreams of
+  at most 4 MB each and 2^22 samples (image area times components) each
+  (Motion JPEG 2000's frames, JPX layers) codes them on the threads, and
+  `ReadJ2k` decodes them side by side before putting them in place.
+  Decoding, the decoders refuse a SIZ past 2^22 samples there
+  (`pjaj2k.J2kSamplesCap`, before they allocate: eight small codestreams
+  that each declare the bounds' planes would take eight times the memory),
+  and a codestream refused side by side is decoded again on its own, which
+  gives the error where the sequential loop met it. Speedway.mj2 (200
+  frames of 15 KB, 3.0 MB), `-th 8`, best of 3: 17.55 -> 2.32 s
+  compressing, 8.49 -> 1.07 s extracting.
+- **No 100 ms naps.** `RunSlices` waited for its threads with FreePascal's
+  `TThread.WaitFor`, which from the main thread naps 100 ms at a time
+  ("The main thread's waits", above); it joins them through
+  `pjathread.TJoinThread` now.
+- **The command's threads by the files' sizes** (`pjacli`). `-th N` went
+  to files first and what was left to each file's bands: N divided by the
+  files at once, one each as soon as there are more files than threads.
+  On gap1 at `-th 8` that left its 46 MB Sentinel-2 band (a third of the
+  set's bytes) on one thread at the end, its slices one after the other:
+  the set took as long as that one file. The N threads are tokens now: a
+  worker holds one while it runs a file, and a file takes, of those free
+  when it starts, as many as its share of the bytes not yet started is of
+  N (the largest go first, and the last ones take what the others left).
+  With one worker a file takes every thread, as before. JPEG files gain
+  the same way (their bands).
+- **Slices of 1 MiB.** Below.
+
+**Instructions** (callgrind, one thread, `a` with its check and `x`;
+0.9.5 -> this):
+
+| codestream | `a` | `x` |
+|---|---|---|
+| book page, 324 KB, mode 1 | 15.74 G -> 12.11 G (-23%) | 7.51 G -> 5.72 G (-24%) |
+| bitonal page, 299 KB, mode 2 | 34.74 G -> 29.73 G (-14%) | 16.05 G -> 13.62 G (-15%) |
+| DICOM MR, 587 KB, lossless (both modes coded, mode 2 kept) | 30.26 G -> 20.84 G (-31%) | 9.15 G -> 7.00 G (-23%) |
+| Motion JPEG 2000 frame, 15 KB, mode 1 | 0.77 G -> 0.60 G (-22%) | 0.37 G -> 0.28 G (-23%) |
+
+**Slices.** The slicing of mode 1 (and of mode 2's side information and
+rebuild) is the encoder's choice, written in the stream, which every
+release from 0.9.5 reads: one slice a `J2K_SLICE_BYTES` of codestream,
+at most one a tile and 64. A slice is coded and decoded on a thread of its
+own; with 4 MiB, a tiled codestream of 13.6 MB had 3 slices for 8 threads,
+one of 2.5 MB and 25 tiles a single one. A codestream of one tile is one
+slice whatever the size: the slice table counts tiles, so a single-tile
+codestream (a book page, a DICOM) cannot be cut without a new layout; its
+parallelism is the two modes side by side. What smaller slices cost, on
+the 13 codestreams of the two sets with several tiles and 500 KB or more
+(each slice starts a model that knows nothing; savings of the whole set,
+`pja a` as the command writes it):
+
+| slice | gap1 (113, 150.1 MB) | rebuild files (30, 26.1 MB) | worst codestream |
+|---|---|---|---|
+| 4 MiB (0.9.5) | 8.463% | 11.747% | |
+| 2 MiB | 8.446% | 11.733% | +0.08 points |
+| **1 MiB** | **8.422%** | **11.706%** | +0.19 points |
+| 512 KiB | 8.395% | 11.673% | +0.35 points |
+| 256 KiB | 8.367% | 11.655% | +0.51 points |
+
+The worst is the same codestream every time: a Library of Congress map
+of 8.6 MB, 3 components and 56 tiles (2 slices at 4 MiB, 8 at 1 MiB, 32
+at 256 KiB). The Sentinel-2 bands lose 0.02 points at 1 MiB (46 MB: 10
+-> 43 slices), the 3-component maps 0.1 to 0.2 points (their tiles of
+1024 x 1024 x 3 hold about 140 KB each, and a model needs a few of them to
+learn). 1 MiB keeps the sets within 0.05 points of 0.9.5 and gives a tiled
+codestream of a few MB its threads: the 13.6 MB map of 96 tiles alone at
+`-th 8`, best of 2, 31.31 s compressing and 14.85 s extracting with 4 MiB
+slices (3), 11.55 s and 5.55 s with 1 MiB (13). 512 KiB would cost 0.07
+points for little more on these sets. At one thread the slicing costs
+nothing measurable (five rebuild files, `-th 1`: the same time with 1 and
+4 MiB, within 0.5%).
+
+**Speed** (wall time, this machine, a shared Xeon E5-2697A v4 under a load
+of 10 to 40 from other work: `-th 8` on cores 0-7, `-th 1` on core 10;
+0.9.5 (A) and this (B) alternated, the first side swapped each round,
+best of 3; `pja a` of the whole list then `pja x` of what it wrote; every
+`.pja` compared (the same, but the tiled codestreams of 2 MiB or more,
+sliced by 1 MiB), every file back byte for byte). B is this branch; the
+`-th 1` sets ran before its last three commits (the samples' cap, the
+bitonal model's SSE4.1 copy, the command's threads: the first and the
+last change nothing for one codestream on one thread, the second takes
+about 5% off a bitonal page's extraction), as did B' below:
+
+| set | `-th` | compress A -> B | extract A -> B |
+|---|---|---|---|
+| gap1, 113 codestreams, 150.1 MB | 8 | 302.95 -> 135.72 s (-55%) | 83.00 -> 51.08 s (-38%) |
+| the same, without the command's threads by size | 8 | 302.95 -> 235.10 s (-22%) | 83.00 -> 73.88 s (-11%) |
+| gap1 up to 4.2 MB, 108 codestreams, 40.3 MB | 1 | 316.99 -> 267.71 s (-16%) | 132.30 -> 116.34 s (-12%) |
+| rebuild files, 30, 26.1 MB | 8 | 41.00 -> 28.30 s (-31%) | 19.63 -> 13.92 s (-29%) |
+| rebuild files | 1 | 191.06 -> 177.15 s (-7%) | 81.35 -> 69.74 s (-14%) |
+| Speedway.mj2, 200 frames, 3.0 MB | 8 | 17.55 -> 2.32 s (-87%) | 8.49 -> 1.07 s (-87%) |
+| a DICOM, 4.3 MB lossless, one tile (both modes coded) | 8 | 21.84 -> 12.91 s (-41%) | 6.63 -> 5.99 s (-10%) |
+| the same | 1 | 22.03 -> 17.92 s (-19%) | 6.58 -> 6.01 s (-9%) |
+
+All runs, compress / extract in seconds (A, B, and B without the
+command's threads, B'):
+- gap1 `-th 8`: A 320.94/87.52, 308.57/83.00, 302.95/83.66; B
+  136.79/51.80, 135.89/51.08, 135.72/51.12; B' 239.43/74.15,
+  235.10/74.49, 235.76/73.88. An earlier series (load 10 to 25): A
+  322.02/91.14, 320.59/89.80, 326.17/90.41; B' 242.38/75.86,
+  268.63/84.47, 257.73/79.48.
+- gap1 up to 4.2 MB `-th 1`: A 398.90/162.29, 316.99/144.32,
+  327.38/132.30; B 268.21/165.17, 277.35/116.34, 267.71/116.40.
+- rebuild files `-th 8`: A 41.60/19.63, 41.00/19.98, 41.34/19.82; B
+  28.38/13.92, 28.30/13.97, 28.30/13.97. Earlier, B': A 69.37/21.78,
+  44.15/21.27, 52.47/21.39; B' 43.58/21.49, 46.50/19.87, 38.21/18.13.
+- rebuild files `-th 1`: A 254.05/84.37, 191.06/81.80, 191.81/81.35; B
+  215.99/123.41, 208.53/70.56, 177.15/69.74 (the 123.41: another job on
+  the core's sibling; extracting file by file, one at a time on another
+  core, B was faster on 25 of the 30 and within 2% on the other 5).
+- Speedway.mj2 `-th 8`: A 17.55/8.62, 17.86/8.49, 17.69/8.58; B
+  2.36/1.08, 2.32/1.07, 2.34/1.09.
+- the DICOM `-th 8`: A 22.52/7.99, 21.84/6.63, 22.23/7.52; B
+  12.91/5.99, 13.06/6.16, 13.27/6.12; `-th 1`: A 22.82/6.58,
+  22.03/6.60, 22.17/6.80; B 18.01/6.11, 17.92/6.01.
+
+One thread, by kind, through the SIMD paths (`--cpu`, extracting,
+best of 3): the book page 1,002 ms in 0.9.5, 1,006 plain, 880 SSE4.1,
+873 AVX2; the bitonal page 1,985, 1,906, 1,841, and 1,884 on the AVX2
+path (its SSE4.1 copy, 1,975 with the AVX2 one); the DICOM MR (lossless,
+mode 2) 1,226, 1,208, 1,050, 1,037.
+So in time the SIMD copies give 10 to 15%, the rest of the instructions
+taken out a few percent: the model waits more than it computes.
+
+**Dead ends and what was left.**
+- The bitonal mixer's 14 inputs padded to 16 lanes (two whole AVX2
+  vectors, the extra weights at 0 adding 0): 0.4% more instructions.
+- Cutting the model's per-event latency would need a different model (or
+  a pipeline): the decoder cannot look ahead, each event's contexts wait
+  on the bit before. The encoder knows every bit, so its counters and its
+  mixers could run on two threads, but the check's decoding would stay as
+  it is.
+- Checking a mode 1 stream while it is written (a decoder following the
+  encoder on another thread, as JPEG's live check does): the side
+  information is complete only at the end of the analysis, and the
+  decisions the rebuild needs would have to be kept (about 10 bytes a
+  byte of codestream) or decoded again; not done.
+- `pja info --estimate` still codes and checks both modes, one after the
+  other.
+- Mode 2's pixel models run on one thread (one arithmetic stream for all
+  the planes).

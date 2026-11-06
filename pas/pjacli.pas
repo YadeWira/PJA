@@ -228,7 +228,7 @@ begin
   Writeln('  --output-dir=DIR     output directory');
   Writeln('  -f, --force          replace an existing output (only with something that verified)');
   Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
-  Writeln('                       files at once, and what is left to each file''s bands');
+  Writeln('                       files at once, and spare ones to a large file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
   Writeln('  --fast               a: accepted for older scripts; it changes nothing, the');

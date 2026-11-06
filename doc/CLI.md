@@ -17,7 +17,7 @@ pja --version, pja -V       the build, the compilers, the system and the SIMD pa
 | `-o PATH` | output name with one input; a directory if it exists or ends in `/` |
 | `--output-dir=DIR` | output directory, and nothing else |
 | `-f`, `--force` | replace an existing output, only with something that verified |
-| `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (a photo is usually one band). Each file's lines still come out in the order of the inputs |
+| `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, the largest first, and a file also takes for its bands (a photo is usually one band; a JPEG 2000 codestream's slices) as many of the free ones as its share of the bytes not yet started is of N, so that the last files take what the others left. Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` (`pja.corrupt` beside it if that name would be too long) |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. About twice as fast; a codec bug would then only show when extracting, where the hash catches it. The JPEG's own round trip still runs, so does the check of a repaired JPEG, and the `.pja` is the same byte for byte |
