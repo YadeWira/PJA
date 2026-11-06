@@ -3506,3 +3506,187 @@ the command says of mode 2:
 - **`pja selftest`** carries a mode 2 sample too, `tests/j2k/bitonal.j2k`
   (1448 B -> 783 B), whose `.pja` has to be the same bytes on every SIMD
   path and word size.
+
+## JPEG 2000 for zpaq-std (stage E) (06/11/2026)
+
+The zpaq-std plugin gets a codec for files of the JPEG 2000 family, index
+30 of `zpaqstd_codecs_v1`, with a ZPAQL decoder, so that any zpaq extracts
+its blocks without the plugin. Its name, `pjk`, is **provisional** until
+the owner approves it: it is in one place, `pas/plugin/pjazsj2k.pas`'s
+`PJK_NAME` (and `tools/zpaql/gen_pjadec.py`'s `J2K_NAME`, the PCOMP's
+label), and may not end in `z`, `o` or `8`, which `zpaqstd_detect_v1` reads
+as other codecs' suffixes. It is frozen, with its stream, what it takes
+and its ZPAQL, when 0.9.6 ships.
+
+**What it writes.** Stream version 8 as the command writes it
+(`pjacodec.Compress`, the same bytes), with codestream modes 0 and 1
+only: the plugin does not link mode 2 (`pjaj2kpx`), and its ZPAQL has
+neither pixel model. A codestream goes in mode 1 when its stream is
+smaller than it and the ZPAQL's limits hold for it (below), in mode 0
+otherwise (its bytes stay in the host, which the ZPAQL decodes as any raw
+bytes). The plugin sets pjacodec's mode 1 hook to its own
+(`PjkMode1Enc`): pjaj2km's encoder with the analysis' statistics
+(`J2kMode1EncodeSt`), then the limits. A file whose codestreams all stay
+in mode 0 is refused (compress returns an error and zpaq-std compresses
+it as `-m` says): it would gain a fraction of a percent and carry the
+ZPAQL.
+
+- **detect**: a file of the family (`J2kKind`, `J2kCodestreams`) with at
+  least one codestream whose main header looks takeable: a SIZ with every
+  value below 2^30 and at most 256 components, COD and COC with at most 20
+  levels and no HT or Part 2 code-block style, no CAP with the Part 15
+  bit, no Part 2 decomposition marker. Only main headers are read, so
+  detect is cheap; Mb, the bands and the memory are the analysis', at
+  compress time.
+- **compress**: the version 8 stream, not verified here (zpaq-std decodes
+  each block with the plugin and with the ZPAQL and compares); the query's
+  answer is kept (64 entries, by the stream's BLAKE3).
+- **query**: `ZS_QUERY_SEGMENTS` 1 (several files a block);
+  `ZS_QUERY_ZPAQL_ARGS` gives `$3` (log2 of H's words) in bits 0-7 and
+  `$4` (log2 of M's bytes) in bits 8-15, kept from compress or worked out
+  again from the stream (decoded, each codestream analysed again): the
+  same either way.
+- **decompress**: a version 8 stream of modes 0 and 1 only.
+- **data**: the ZPAQL (`j2kzpaql.inc`, `comp 0 0 $3 $4 0`) only as
+  `ZS_DATA_ZPAQL_ARGS`, and the card.
+
+**The ZPAQL.** `pas/plugin/zpaql/j2k.zl` (the container: the table of
+codestreams, the host through `pjadec.zl`'s raw bytes' model, each
+codestream of mode 1 written in its place), `j2kcs.zl` (pjaj2kcs.pas's
+rebuild: the blob's ten streams and slice table, the main and tile-part
+headers, each tile's parameters, the geometry, the five progressions and
+the POCs, the packets' side information, the tag trees, each code-block's
+segments and where the layers cut them, the packet headers with their
+SOP, EPH and exceptions, PLT and TLM made again, Psot), `j2kt1.zl`
+(pjaj2kt1.c: the MQ encoder with FLUSH and ERTERM and the lengths at each
+pass end, the MQ decoder that finds the shortest valid prefix and how far
+a decoder reads, BYPASS packing) and `j2kmodel.zl` (pjaj2kmc.c's decoding
+path: the passes with their events, the eight contexts with two counters
+each, the three sets of weights, the three maps, the parent's and the other
+components' maps, PJA's arithmetic decoder), all line by line. The
+model's stretch and squash tables are pjaj2km_tab.h's, packed by
+gen_pjadec (the stretch's upper half as its first differences in unary,
+the squash's as the zigzag of its second differences: 282 words; each
+table checked to be symmetric as the packing needs), its counters' rates
+are pjadec.zl's RECIP (checked to be J2KM_RC), and table D.1 is worked
+out at start-up. **51,521 bytes of PCOMP** at opt=3, 321,198 words of H
+for its own variables and tables. It is the whole mode 1 model, the
+parent's and the other components' contexts included: no variant was
+needed, so stream version 8 needs no change.
+
+Its memory: H holds the host and the side information (a byte a word,
+with the raw model's table or map), the headers, each slice's model
+tables (two words a counter, at most 2^20 counters a table) and each
+tile's records (components, resolutions, bands, code-blocks, precincts,
+tag trees, packets, their entries and pieces), given back after each
+tile, slice and codestream; M holds the segment, the tile-parts made (the
+main header, with its TLM, needs all their lengths), and per tile the
+model's maps, the largest code-block's decisions and its MQ coder's two
+outputs, the code-blocks' bytes and the packets. The decoder measures
+both when it starts and stops with an error rather than go past either.
+The plugin's query follows those allocations: pjaj2kcs's analysis calls
+a hook the plugin sets (`J2kTileCost`) with each tile's counts and keeps
+the most words and bytes a tile takes (`TJ2kStats.zTileWords`,
+`zTileBytes`), with the header's records, the SIZ, the levels, Mb and the
+bands' sides; the command leaves the hook nil (nothing is counted, no
+stream changes).
+
+The limits, checked per codestream (`PjkFits`): every SIZ value below
+2^30, at most 256 components (a component's index is one byte), at most
+20 levels, every band's Mb at most 24 and its sides at most 65,535, so
+that the decoder's 32-bit arithmetic is exact (a coefficient stays below
+2^25 and a sum of 40 of them below 2^31; the parent's position is a
+product below 2^32); and the decoder's H at most 2^26 words (256 MB) and
+its M at most 2^28 bytes. All 113 gap1 codestreams fit: H 2^25 words at
+most (a Sentinel-2 band, its model at 2^20 counters a table), M 2^27 at
+most (book pages in colour: the maps of three planes of 30 million
+samples).
+
+**Exact.** Against the plugin's own decoding:
+
+- in CPython (the sources run with zpaqlc's 32-bit semantics, a harness
+  of the work folder): all 15 files of `tests/j2k` back byte for byte
+  before the first compile;
+- in zpaqlc's interpreter (`zpaqlvm.py`): `plasma_cs.j2k` (37 s) and
+  `gray_12bit.jp2` (33 s) alone and in one block of two segments (69 s),
+  with the H and M of their query; the suite runs this (`test_pjadec.py
+  --pjk`);
+- with libzpaq (zpaq 7.15's engine, JIT): the 15 files of `tests/j2k`
+  and the 113 gap1 codestreams (`gap1/cs`), each with the H and M of its
+  query, back byte for byte;
+- zpaq-std 2.3.0 (`-sat:pja:pjk+2`, the plugin built from this tree in a
+  copy of its `codecs/`): the 15 files of `tests/j2k` and 12 gap1
+  codestreams of 400 KB or less in one block of 27 segments, 608,366 bytes
+  to 542,620 (89.2%), decoded by the plugin (1.2 s) and by the ZPAQL
+  (about 20 s) before writing; the archive (599,870 bytes) extracted with the
+  plugin and again with the plugin removed (the ZPAQL alone): every file
+  back;
+- damaged segments: 300 (20 for each file of `tests/j2k`, a bit flipped
+  or the segment cut short) through libzpaq with their query's H and M:
+  296 errors, 2 the same file, 2 other bytes (zpaq's SHA-1 of each
+  fragment catches those), none hanging or crashing.
+
+**Ratios** (the streams against the files; a block carries the ZPAQL
+once besides): `tests/j2k`, 15 files, 52,150 bytes -> 36,092 (30.8%
+saved); gap1, 113 codestreams, 150,122,050 -> 138,460,172 (**7.77%**),
+what the command's mode 1 alone saves (the command, with mode 2, saves
+8.47%: the bitonal pages and some lossless codestreams, which the plugin
+keeps in mode 1).
+
+**Speed.** The plugin decodes gap1 at 0.31 MB/s on one thread (479.5 s
+for the 113 codestreams). The ZPAQL is slower, as the research expected:
+one core each, libzpaq's JIT, a book page of 1.3 MB 34.1 s (the plugin
+7.2 s), a DICOM codestream of 4.3 MB 72.8 s (9.8 s), a Sentinel-2 TCI of
+2.2 MB 54.4 s (6.9 s): 4.7 to 7.9 times the plugin's time; the whole of
+gap1, twelve at a time on a shared machine, 0.042 MB/s a process. A
+small segment costs about 0.7 s besides (each codestream's model and
+tables set up and cleared). The first build was 1.4 to 1.9 times slower:
+zpaqlc returns from a function through a chain of comparisons over all
+its call sites, so the clamps and truncating shifts the model calls
+about fifty times an event (from many sites) cost more than the model;
+they are now inline in its hot loops (kmix, kevent, keventrun, the maps'
+updates), 361.6 million instructions to 222.1 million on
+`lossless53.j2k` in zpaqlc's interpreter, for 821 bytes more of program.
+zpaq-std decodes every `-sat` block with the ZPAQL before it writes it,
+so writing a JPEG 2000 file costs that time too.
+
+**A z codec** (LZ77 across a block's files, as the JPEG codecs' z) does
+not pay here: through `tools/zpaql/lz77.py`, `tests/j2k`'s 15 streams in
+one block come out at 89.8% (several are made from the same images),
+gap1's 83 streams of 400 KB or less at 99.991% and its 106 of 2 MB or less
+at 99.996%, for 1.6 KB more of ZPAQL. None was made.
+
+**Mode 2 in ZPAQL** (the pixels): not done. The bitonal path alone (the
+1-bit model's seven templates, each tile's forward 5/3 wavelet, the
+decisions made from the coefficients, mode 2's stream) would have to fit
+in the 14 KB of program left, beside the same tier-1 and tier-2 code;
+the multi-bit model would not fit at all. Left for a later codec, with the
+same stream version 8.
+
+**The files the plugin is built from** (a vendored copy needs them all):
+`pas/build_c.sh`, `pja.inc`, `pjaarith.pas`, `pjablake3.pas`,
+`pjacodec.pas`, `pjacoef.inc`, `pjaheap.pas` (Windows), `pjaj2k.pas`,
+`pjaj2kcs.pas`, `pjaj2km.pas`, `pjaj2km_tab.h`, `pjaj2kmc.c`,
+`pjaj2kpm.c` (build_c.sh compiles it; the plugin does not link it),
+`pjaj2kt1.c`, `pjaj2kt1.h`, `pjajls.pas`, `pjajpeg.pas`, `pjamodel.pas`,
+`pjastage.pas`, `pjasysc.c`, `pjathread.pas`, `pjav7.pas`, `pjav7c.c`,
+`pjav7c_loop.h`, and in `pas/plugin/`: `pja_zpaqstd.pas`,
+`pjazpaqlargs.pas`, `pjazsj2k.pas`, `pjazpaql.inc`, `pjalszpaql.inc`,
+`pjaxzpaql.inc`, `pjallzpaql.inc`, `pjalsxzpaql.inc`, `lzzpaql.inc`,
+`v7zpaql.inc`, `ozpaql.inc`, `v8zpaql.inc` and `j2kzpaql.inc`. New since
+0.8.0's tarball: the `pjaj2k*` files, `pjastage.pas`, `pjathread.pas`,
+`pjazsj2k.pas` and `j2kzpaql.inc`.
+
+**Tests.** `run_tests.sh`: `gen_pjadec.py --check` covers `j2kzpaql.inc`
+(and checks `j2kmodel.zl`'s KPK against pjaj2kmc.c's PK and the packed
+tables against pjaj2km_tab.h); `zpaql_segments --pjk` writes the codec's
+segments and query, `test_pjadec.py --pjk` decodes two of them in the
+interpreter, alone and in one block; `pas/tests/probe_plugin.py` loads the
+plugin as zpaq-std does (ctypes): 31 codecs, the JPEG 2000 codec at 30
+with its ZPAQL only through `$3..$5`, detect taking every file of
+`tests/j2k` and no JPEG or JPEG-LS file (and no other codec taking a JPEG
+2000 file), each file's compress, query (within 2^26 words and 2^28
+bytes) and decompress, back byte for byte. The thirty frozen codecs'
+`.inc` files are the same bytes; the JPEG and JPEG-LS streams' hash is
+unchanged (3387e58d...), and so is the JPEG 2000 streams' (the command
+never sets the hook).
