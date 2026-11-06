@@ -6,9 +6,10 @@
     dump_streams <jpeg dir> <out dir> [threads] }
 program dump_streams;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjav7, pjaj2km, pjaj2kcs;
 var sr: TSearchRec; s: TFileStream; d, st: TBytes; o: string; threads: Integer;
 begin
+  J2kTestSlicesFromEnv;
   threads := StrToIntDef(ParamStr(3), 1);
   if FindFirst(ParamStr(1) + '/*', faAnyFile, sr) = 0 then repeat
     if (sr.Attr and faDirectory) <> 0 then Continue;

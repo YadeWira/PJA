@@ -2329,7 +2329,8 @@ How a segment ends (MQ):
 A BYPASS segment is its bits with a 0101.., 0 or 1 padding, or raw
 bytes. Where a layer cuts a segment:
 - OpenJPEG's rule, the bytes committed + 3 with a last FF dropped (for a
-  BYPASS segment, the bytes that hold its bits);
+  BYPASS segment, the bytes that hold its bits, at most the segment's: a
+  damaged codestream's raw decoder can go on past its data);
 - Kakadu's, the shortest prefix within K - 3 to K + 8 that decodes the
   passes so far;
 - what the decoder has read after those passes: its byte pointer + 1,
@@ -2346,13 +2347,24 @@ the one it is told.
 - a header that does not parse;
 - what passes the limits: 65,535 tiles, 16,384 components, 2^21
   code-blocks and 2^22 precincts a tile, 2^26 progression steps, 2^25
-  code-block entries a tile.
+  code-block entries a tile, and more entries in the codestream (a slice
+  of it, stage C) than its side information may hold (`J2kSideBound`,
+  stage C: each entry takes a byte of it at least).
 
 Not refused:
 - a packet that does not fit its tile-part (the rest of that tile-part
   is kept as it is);
 - a code-block of more than 120 passes (kept as bytes);
 - PPM and PPT: read in the order of Zppm/Zppt and kept as they are.
+
+A code-block one of whose segments ends as raw bytes (rule raw, or a
+BYPASS segment's raw bytes) is kept as bytes whole: its decisions would
+be paid for a second time (stage C).
+
+The work grows with the codestream's bytes: each tile's tile-parts come
+from a list made once (it was a pass over all the tile-parts for each
+tile: 65,535 tiles of 4 tile-parts, 3.6 MB, took 274 s in `pja a`), and
+the lists of marker segments and tile-parts grow by doubling.
 
 `J2kAnalyze` rebuilds the blob before it says yes, and anything that does
 not come back is refused as `verify` (that never happened on the corpus).
@@ -2445,7 +2457,19 @@ The side information is stage B's blob as version 2: the version byte
 table: S, and for each slice after the first its first tile (its place
 among the tiles that have tile-parts), its tables' size (hb, 10 to 20:
 2^hb counters at most a table) and where each of streams 1 to 8 (layout
-to hdrx) starts; the first slice's are 0. A decoder checks every number
+to hdrx) starts; the first slice's are 0. It is at most
+`J2kSideBound(n)` = n + n / 4 + 65,536 bytes for a codestream of n bytes:
+the encoder keeps a codestream whose would be more in mode 0, and the
+decoder refuses a stream whose side information says it is longer as
+soon as it reads that length, before decoding it. A small damaged or
+crafted stream then costs at most about what mode 0 costs for a
+codestream of that length (the raw bytes' model, about 1.2 MB/s); with
+the bound at 4n + 65,536, a 4 KB .pja took 14 minutes and 1.3 GiB to be
+refused. Measured (stage C's runs): the side information is at most
+1.00 times the codestream on the codestreams of 64 KiB or more, and at
+most 20 KB more than the codestream below that (a 2,050-byte codestream,
+22,325 bytes of side information). A 32-bit program for which the bound
+passes its addresses gives `TooLarge`. A decoder checks every number
 against what it has built, the slices' streams to the byte where the
 next slice starts, and the check against the codestream it rebuilt: a
 damaged stream is `BadStream`, never another codestream.
@@ -2457,6 +2481,17 @@ threads (one TJ2k per slice, `RunSlices`), and the stream is the same
 for any number of threads. A codestream of one tile is one slice. Cutting
 the Sentinel-2 bands (121 tiles, 46 MB) in 10 slices costs nothing: 0.05%
 smaller than one slice, the model adapting to each part.
+
+**Layout 1, kept for files of many codestreams.** Each codestream starts
+with a model that knows nothing and has its own side information. On an
+MJ2 of 200 frames (Speedway.mj2, 3.0 MB) mode 1 saves 5.97%, of which the
+side information costs 2.26% (about 343 bytes a frame, mostly headers
+repeated); the decisions coded with the model kept from the frame before
+(the coder started again, the tables kept; measured with a harness on
+the `-dumpcb` dumps) come out 174 KB smaller, 5.8% of the codestream.
+That would be layout 1, a codestream coded on from the previous one of
+the file; it is left to a later release. Until one defines it, a layout
+other than 0 is `FutureVersion`, and layout 0's streams do not change.
 
 **The decisions.** `pjaj2kmc.c` walks a code-block's coding passes as
 `pjaj2kt1.c` does (encoding, it takes the decisions the analysis decoded
@@ -2558,11 +2593,22 @@ when no codestream was modelled.
 **Tests.** `test_j2kcs -mode1` codes each codestream in mode 1, decodes it
 and compares, and prints a digest of the streams; `run_codec_tests.sh`
 runs it on `tests/j2k`, again with slices forced to 1,500 bytes
-(`PJA_J2K_SLICE`, the tests' only) on 1 and 4 threads (the same digest),
+(`PJA_J2K_SLICE`, read only by the tests' programs through
+`J2kTestSlicesFromEnv`: the command and libpja never read it, and
+`cli.sh` checks that it does not change what `pja a` writes) on 1 and 4
+threads (the same digest),
 and damages the version 8 streams of `tests/j2k` both ways
 (`test_codec_corrupt`: every bit of the first 128 bytes and every
-truncation, no exception); `tests/j2k` is in the builds' comparison
-(reference, fast, fast without asm, 4 threads, and in slices).
+truncation, no exception). `test_j2kcs -mode1` also decodes its first
+stream for lengths it is not, up to 5 GB (an error, never the codestream
+nor an exception: on 32-bit, 4 x len + 65,536 used to fail a range check
+past 512 MiB). `pas/tests/mkj2k_limits.py` makes two codestreams that ask
+much work for their bytes: 65,535 tiles of 2 tile-parts (taken) and 111
+bytes declaring 2 million code-blocks in 15 layers (refused at the
+entries' bound, in under 2 s where it took 30 s and 1.5 GiB);
+`run_codec_tests.sh` runs both and fails past 90 s. `tests/j2k` is in
+the builds' comparison (reference, fast, fast without asm, 4 threads,
+and in slices).
 `test_versions` sweeps the mode byte (2 to 255: `FutureVersion`), mode 1's
 layout byte (1 to 255) and reads mode 1 without the hooks
 (`FutureVersion`). `cli.sh`: a JP2 modelled, and a mode of a later
@@ -2575,8 +2621,9 @@ and i386 (gcc -m32) here, `hash.txt` is the same, its second line
 and stage B's blobs' (A8FBC05E4A8B3D47). Both suites
 (`run_codec_tests.sh`, `run_tests.sh`) pass.
 
-**Results** (05/11/2026; "saves" is net: the mode 1 stream, side
-information and check included, against the codestream):
+**Results** (06/11/2026; "saves" is net, side information and check
+included, and counts each codestream as `CompressJ2k` keeps it: its mode
+1 stream, or the codestream in mode 0 when that is not smaller):
 
 | set | codestreams | in mode 1, back byte for byte | bytes | saves | of which side information |
 |---|---|---|---|---|---|
@@ -2585,9 +2632,22 @@ information and check included, against the codestream):
 | gap1, held out (every third) | 37 | 37 | 32,031,278 | 10.18% | 0.59% |
 | 30 rebuild files (7 encoder families) | 30 | 30 | 26,058,518 | 10.33% | 0.50% |
 | 30 rebuild files, held out | 10 | 10 | 13,432,971 | 9.41% | 0.24% |
-| sample corpus, local and from DICOM/PDF | 1,669 | 1,663 (6 refused) | 48,603,647 | 7.49% | 15.3% |
-| downloads (705 codestreams, 2,051 files) | 705 | 552 (153 refused, as stage B) | 246,703,261 | 8.38% | 2.29% |
+| sample corpus, local and from DICOM/PDF | 1,671 | 1,665 (6 refused) | 49,950,421 | 8.83% | 14.9% |
+| downloads (705 codestreams, 2,051 files) | 705 | 552 (153 refused, as stage B) | 246,703,261 | 8.76% | 2.29% |
 | tests/j2k | 14 | 14 | 29,728 | 15.28% | 13.6% |
+
+The sample corpus has two more codestreams than first counted (two
+files whose names have spaces, which the first runs' harness split).
+Keeping a code-block whose segment ends as raw bytes as bytes whole
+(stage B) changed nothing on gap1, the rebuild files and `tests/j2k`
+(no such segment: the same streams); on the sample corpus and the
+downloads it made 32 codestreams' mode 1 streams smaller and one 16
+bytes larger (p1_05.j2k), and 19 of those codestreams now go in mode 1
+where they stayed in mode 0: kodak_2layers_lrcp.j2c 3,508,838 bytes to
+3,240,277 (the codestream: 3,363,991), US1_J2KR from DICOM 255,004 to
+148,076 (152,291), and 7 more DICOM files; issue432.jp2 went from 163,329
+to 26,092 (22,955: still mode 0). The two sets went from 8.79% and 8.65%
+to 8.83% and 8.76% (from 7.59% and 8.38% counting mode 1 alone).
 
 The research's ideal for gap1 was 7.48%; the held-out parts were never
 seen by the tuning (the split is by the files' names, so the large

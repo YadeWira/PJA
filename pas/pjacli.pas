@@ -133,8 +133,7 @@ end;
 
 procedure Usage(code: Integer);
 begin
-  Writeln('pja ', PJA_VERSION, ' - lossless recompression of JPEG and JPEG-LS files');
-  Writeln('        (JPEG 2000 files are taken too, for now through the bytes'' model)');
+  Writeln('pja ', PJA_VERSION, ' - lossless recompression of JPEG, JPEG-LS and JPEG 2000 files');
   Writeln;
   Writeln('usage: pja a [options] FILE...     compress to .pja');
   Writeln('       pja x [options] FILE...     extract from .pja');

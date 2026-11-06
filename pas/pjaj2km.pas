@@ -3,14 +3,18 @@
   rest of it through the raw bytes' model (doc/CODEC.md, "JPEG 2000, stage
   C"). A codestream's mode 1 stream:
 
-    byte 0          its layout: 0 (another: a later release's, FutureVersion)
+    byte 0          its layout: 0 (another: a later release's, FutureVersion;
+                    1 is meant for a codestream coded with the model and
+                    the side information's context as the previous
+                    codestream of the file left them: MJ2 frames, JPX)
     4 bytes (LE)    a check: the first 4 bytes of the codestream's BLAKE3
     4 bytes (LE)    S, the slices: 1 to J2K_MAX_SLICES
     S x 4 bytes     each slice's decisions' length
     4 bytes (LE)    the side information's length, L
     L bytes         the side information (pjaj2kcs's blob, version 2,
                     without the decisions, with its slice table) through
-                    the raw bytes' model (pjamodel.CodeRaw)
+                    the raw bytes' model (pjamodel.CodeRaw): at most
+                    J2kSideBound(codestream's length) bytes, on both sides
     the S slices'   decisions, each through the model (pjaj2kmc.c) with its
     decisions       own arithmetic stream
 
@@ -146,9 +150,16 @@ begin
 end;
 
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
-var s, k: Integer; p, side, total: Int64; cd: TCoder; blob: TBytes; sl: TSlices; lk: TJ2kModelLink; why: string;
+var s, k: Integer; p, side, total, bound: Int64; cd: TCoder; blob: TBytes; sl: TSlices; lk: TJ2kModelLink;
+  why: string;
 begin
   cs := nil;
+  if len < 0 then Exit(m1Bad);
+  bound := J2kSideBound(len);
+  {$ifndef CPU64}
+  { more than a 32-bit program can hold: an error, not a range check }
+  if bound > High(SizeInt) then Exit(m1TooLarge);
+  {$endif}
   if Length(stream) < 9 then Exit(m1Bad);
   if stream[0] <> LAYOUT then Exit(m1Future);
   if (GetU32(stream, 5) < 1) or (GetU32(stream, 5) > J2K_MAX_SLICES) then Exit(m1Bad);
@@ -167,9 +178,10 @@ begin
     end;
     if total <> Length(stream) then Exit(m1Bad);
     sl.src := stream;
-    { the side information: at most what a codestream of len bytes can hold }
+    { the side information: at most what the encoder writes for a codestream
+      of len bytes (a longer one is refused as soon as its length is read) }
     cd.InitDecoder(Copy(stream, p, side), 0);
-    if not CodeRaw(cd, blob, 4 * len + 65536) then Exit(m1TooLarge);
+    if not CodeRaw(cd, blob, bound) then Exit(m1Bad);
     lk := Default(TJ2kModelLink);
     lk.kind := kmDecode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads;
     if not J2kRebuildWith(blob, lk, cs, why) then begin cs := nil; Exit(m1Bad); end;
@@ -194,6 +206,7 @@ begin
     lk.kind := kmEncode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads;
     st := Default(TJ2kStats);
     if not J2kAnalyzeWith(data, off, len, lk, blob, why, st) then Exit(m1Refused);
+    if Length(blob) > J2kSideBound(len) then begin why := 'side information too large'; Exit(m1Refused); end;
     s := sl.nAsked;
     if (s < 1) or (s > J2K_MAX_SLICES) then begin why := 'internal: slices'; Exit(m1Refused); end;
     for k := 0 to s - 1 do

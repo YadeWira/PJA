@@ -180,6 +180,28 @@ end;
 
 { -mode1: the codestream as stream version 8's mode 1 (pjaj2km), decoded
   again and compared; its size, its side information's, the time each way }
+var m1WrongDone: Boolean;
+
+{ the stream decoded for a length it is not: an error, never m1Ok nor an
+  exception, on 32-bit too (lengths past what SizeInt holds) }
+function Mode1WrongLengths(const m: TBytes; len: Int64): Boolean;
+const L: array[0..5] of Int64 = (536854528, 540000000, 1000000000, 1800000000, 3000000000, 5000000000);
+var i: Integer; r: TMode1Result; back: TBytes;
+begin
+  Result := True;
+  for i := 0 to High(L) do
+    try
+      r := J2kMode1Decode(m, L[i], m1Threads, back);
+      if r = m1Ok then begin Writeln('MODE1 FAIL: taken for ', L[i], ' bytes'); Result := False; end;
+    except
+      on E: Exception do begin
+        Writeln('MODE1 FAIL: for ', L[i], ' bytes: ', E.ClassName, ': ', E.Message); Result := False;
+      end;
+    end;
+  r := J2kMode1Decode(m, len + 1, m1Threads, back);
+  if r = m1Ok then begin Writeln('MODE1 FAIL: taken for len + 1'); Result := False; end;
+end;
+
 procedure Mode1One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
 var m, back: TBytes; why: string; t0: TDateTime; r: TMode1Result; side: Int64; te, td: Double;
 begin
@@ -192,6 +214,10 @@ begin
   td := MilliSecondsBetween(Now, t0) / 1000;
   if (r <> m1Ok) or (Length(back) <> len) or not CompareMem(@back[0], @d[off], len) then begin
     Inc(m1Fail); Writeln('MODE1 FAIL ', f, ' #', ci, ': decode'); Exit;
+  end;
+  if not m1WrongDone then begin
+    m1WrongDone := True;
+    if not Mode1WrongLengths(m, len) then begin Inc(m1Fail); Exit; end;
   end;
   side := Int64(m[9 + 4 * Int64(m[5])]) or (Int64(m[10 + 4 * Int64(m[5])]) shl 8) or
     (Int64(m[11 + 4 * Int64(m[5])]) shl 16) or (Int64(m[12 + 4 * Int64(m[5])]) shl 24);
@@ -276,6 +302,7 @@ end;
 
 var i, k: Integer; lst: TStringList;
 begin
+  J2kTestSlicesFromEnv;
   reasons := TStringList.Create;
   st := Default(TJ2kStats);
   i := 1;

@@ -85,6 +85,19 @@ m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 4 "$PJA/tes
 [ -n "$m1" ] && [ "$m1" = "$m4" ] || { echo "FAIL: mode 1 in slices differs on 1 and 4 threads ($m1, $m4)"; exit 1; }
 echo "mode 1 in slices of 1500 bytes: the same streams on 1 and 4 threads ($m1)"
 PJA_J2K_SLICE=1500 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
+# small codestreams that ask much work: 65535 tiles of 2 tile-parts each
+# (1.9 MB, taken), 2 million code-blocks in 111 bytes (refused at the
+# entries' bound); seconds, not the minutes the work grew to before
+LIM=$OUT/limits; rm -rf "$LIM"; mkdir -p "$LIM"
+python3 "$PAS/tests/mkj2k_limits.py" tileparts "$LIM/tileparts.j2k" 65535 2
+python3 "$PAS/tests/mkj2k_limits.py" codeblocks "$LIM/codeblocks.j2k"
+t0=$SECONDS
+r=$("$OUT/test_j2kcs" -q -mode1 "$LIM/tileparts.j2k" | grep '^files')
+[ "$r" = "files 1, codestreams 1: rebuilt byte for byte 1, refused 0, FAILED 0" ] || { echo "FAIL: tile-parts: $r"; exit 1; }
+r=$("$OUT/test_j2kcs" -q -mode1 "$LIM/codeblocks.j2k" | grep -c "refused .*limits: packet entries")
+[ "$r" = 1 ] || { echo "FAIL: code-blocks not refused at the entries' bound"; exit 1; }
+[ $((SECONDS - t0)) -le 90 ] || { echo "FAIL: the limits' codestreams took $((SECONDS - t0)) s"; exit 1; }
+echo "limits: 65535 tiles x 2 tile-parts taken, 2 million code-blocks in 111 bytes refused ($((SECONDS - t0)) s)"
 echo "-- what a later release writes: FutureVersion (codec byte 0 from 9 to 255, PATCH, version 8, .pja)"
 "$OUT/test_versions" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -2
 

@@ -130,6 +130,9 @@ if [ -e "$W/in/plasma.jp2" ]; then
   check "its codestream modelled (mode 1), not as bytes, and the .pja smaller than the file" bash -c "
     '$PJA' a -f '$W/in/plasma.jp2' -o '$W/j2k/m.pja' > '$W/j2k/m.txt' && grep -q '(JPEG 2000)' '$W/j2k/m.txt' &&
     ! grep -q 'as bytes' '$W/j2k/m.txt' && [ \$(wc -c < '$W/j2k/m.pja') -lt \$(wc -c < '$W/in/plasma.jp2') ]"
+  check "the tests' PJA_J2K_SLICE does not change what the command writes (a codestream of tiles)" bash -c "
+    '$PJA' a -q -f '$W/in/pcrl_tiles_plt_tlm.j2k' -o '$W/j2k/s0.pja' &&
+    PJA_J2K_SLICE=1 '$PJA' a -q -f '$W/in/pcrl_tiles_plt_tlm.j2k' -o '$W/j2k/s1.pja' && cmp -s '$W/j2k/s0.pja' '$W/j2k/s1.pja'"
   check "an extension the format does not keep: .jp2, .j2k, .jpx, .mj2 by the content" bash -c "
     for f in plasma.jp2 plasma_cs.j2k two_codestreams.jpx two_frames.mj2; do
       cp '$W/in/'\$f '$W/j2k/odd.x y' && '$PJA' a -q -f '$W/j2k/odd.x y' -o '$W/j2k/odd.pja' &&

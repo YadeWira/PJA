@@ -106,6 +106,19 @@ const
     and J2K_MAX_SLICES }
   J2K_SLICE_BYTES = 4 shl 20; J2K_MAX_SLICES = 64;
 
+{ The side information (the blob without the decisions) of a codestream of
+  len bytes is at most this many bytes: the analysis refuses a codestream
+  whose would be more (each packet entry takes one byte of it at least, so
+  the entries are bounded by it too) and stream version 8's mode 1 decodes
+  no more (pjaj2km). About what the raw bytes' model takes for the
+  codestream as it is (mode 0). }
+function J2kSideBound(len: Int64): Int64;
+{ The tests' only: slices of PJA_J2K_SLICE bytes instead of J2K_SLICE_BYTES
+  (the slices are in the stream: any reader reads it). The command and
+  libpja never call it, so that what they write does not depend on the
+  environment. }
+procedure J2kTestSlicesFromEnv;
+
 { The codestream data[off..off + len) as side information and decisions,
   one blob that J2kRebuild turns back into it; checked here. False and
   why when it is refused. }
@@ -457,7 +470,7 @@ type
     tail: TBytes;
     mainG: TCodG; mainCoc: array of TCodC; hasMainCoc: array of Boolean;
     mainQcd: TQntC; hasMainQcd: Boolean; mainQcc: array of TQntC; hasMainQcc: array of Boolean;
-    mainPoc: array of TPocE;
+    mainPoc: array of TPocE; nMainPoc: Integer;
     ppm: TBW; hasPpm: Boolean;
     iterations: Int64;
     { the tile at hand }
@@ -467,6 +480,8 @@ type
     ncb, nprec: Integer;
     hdrPacked: Boolean; pkd: TBytes; pkdLen: Int64; pkdPos: Int64;
     tileTps: array of Integer;
+    tpHead, tpNext: array of LongInt;  { each tile's tile-parts, in order: a list through tps }
+    ieTotal, ieCap: Int64;             { analysis: the packet entries of the codestream, at most }
     { code-blocks }
     cbBand, cbFirst, cbZbp, cbPasses, cbNseg, cbSegHave, cbSegMax, cbLb, cbHead, cbTail, cbPb, cbLeaf,
       cbELb: array of LongInt;
@@ -553,6 +568,7 @@ type
     procedure BitsOut(v: QWord; n: Integer);
     procedure TTEncode(base, leaf, thr: Integer);
     procedure Pass3;
+    procedure IndexTps;
     procedure Tile(t: Integer);
     procedure WriteHeaders;
     procedure ReadHeaders;
@@ -654,10 +670,11 @@ begin
              ParseQnt(it.raw, p, e, q); mainQcc[c] := q; hasMainQcc[c] := True;
            end;
     $FF5F: begin
-             n := Length(mainPoc);
-             SetLength(mainPoc, n + (e - p) div 7 + 1);
+             { grown by doubling, cut to its length when the header is read }
+             n := nMainPoc;
+             if n + (e - p) div 7 + 1 > Length(mainPoc) then SetLength(mainPoc, 2 * n + (e - p) div 7 + 1);
              AddPocs(Self, it.raw, p, e, mainPoc, n);
-             SetLength(mainPoc, n);
+             nMainPoc := n;
            end;
     $FF50: { CAP: Part 15 (HTJ2K) }
            if (e >= 8) and (Be32(it.raw, 4) and (1 shl 17) <> 0) then Refuse('HTJ2K');
@@ -707,6 +724,7 @@ procedure TJ2k.Structure;
 var p, e, q, L: Int64; m, n, i: Integer; it: TItem; tp: TTp; ok: Boolean;
 begin
   e := csOff + csLen;
+  ieCap := J2kSideBound(csLen); ieTotal := 0;
   if (csLen < 4) or (cs[csOff] <> $FF) or (cs[csOff + 1] <> $4F) then Refuse('no SOC');
   p := csOff + 2; n := 0;
   while True do begin
@@ -717,7 +735,8 @@ begin
     if (n = 0) and (m <> $FF51) then Refuse('no SIZ');
     if IsBareMarker(m) then begin
       it := Default(TItem); it.code := m; it.raw := Copy(cs, p, 2);
-      SetLength(main, n + 1); main[n] := it; Inc(n);
+      if n >= Length(main) then SetLength(main, 2 * n + 16);
+      main[n] := it; Inc(n);
       p := p + 2;
       Continue;
     end;
@@ -725,10 +744,12 @@ begin
     L := Be16(cs, p + 2);
     if (L < 2) or (p + 2 + L > e) then Refuse('main header');
     it := Default(TItem); it.code := m; it.raw := Copy(cs, p, 2 + L);
-    SetLength(main, n + 1); main[n] := it; Inc(n);
+    if n >= Length(main) then SetLength(main, 2 * n + 16);
+    main[n] := it; Inc(n);
     ParseMainItem(it);
     p := p + 2 + L;
   end;
+  SetLength(main, n);
   if not mainG.have then Refuse('no COD');
   if not hasMainQcd then Refuse('no QCD');
   { the tile-parts }
@@ -745,7 +766,8 @@ begin
       if m = $FF93 then begin ok := True; Break; end;
       if IsBareMarker(m) then begin
         it := Default(TItem); it.code := m; it.raw := Copy(cs, q, 2);
-        SetLength(tp.items, i + 1); tp.items[i] := it; Inc(i);
+        if i >= Length(tp.items) then SetLength(tp.items, 2 * i + 4);
+        tp.items[i] := it; Inc(i);
         q := q + 2;
         Continue;
       end;
@@ -753,9 +775,11 @@ begin
       L := Be16(cs, q + 2);
       if (L < 2) or (q + 2 + L > e) then Break;
       it := Default(TItem); it.code := m; it.raw := Copy(cs, q, 2 + L);
-      SetLength(tp.items, i + 1); tp.items[i] := it; Inc(i);
+      if i >= Length(tp.items) then SetLength(tp.items, 2 * i + 4);
+      tp.items[i] := it; Inc(i);
       q := q + 2 + L;
     end;
+    SetLength(tp.items, i);
     if not ok then Break;
     tp.dstart := q + 2;
     if tp.psot = 0 then begin
@@ -767,10 +791,12 @@ begin
       tp.psotMode := 0; tp.dend := p + tp.psot;
       if tp.dend < tp.dstart then Refuse('SOT: Psot');
     end;
-    SetLength(tps, n + 1); tps[n] := tp; Inc(n);
+    if n >= Length(tps) then SetLength(tps, 2 * n + 16);
+    tps[n] := tp; Inc(n);
     p := tp.dend;
     if tp.psotMode = 1 then Break;
   end;
+  SetLength(tps, n);
   if n = 0 then Refuse('no tile-part');
   tail := Copy(cs, p, e - p);
   SplitPpm;
@@ -810,9 +836,8 @@ begin
                    ParseQnt(items[i].raw, p, e, q); tqcc[c] := q; htqcc[c] := True;
                  end;
           $FF5F: begin
-                   SetLength(tpoc, npoc + (e - p) div 7 + 1);
+                   if npoc + (e - p) div 7 + 1 > Length(tpoc) then SetLength(tpoc, 2 * npoc + (e - p) div 7 + 1);
                    AddPocs(Self, items[i].raw, p, e, tpoc, npoc);
-                   SetLength(tpoc, npoc);
                  end;
           $FF61: begin
                    if hasPpm then Refuse('PPM and PPT');
@@ -846,7 +871,7 @@ begin
     if htqcd then par.qnt[c] := tqcd;
     if (htqcc <> nil) and htqcc[c] then par.qnt[c] := tqcc[c];
   end;
-  if npoc > 0 then par.pocs := tpoc else par.pocs := Copy(mainPoc);
+  if npoc > 0 then par.pocs := Copy(tpoc, 0, npoc) else par.pocs := Copy(mainPoc, 0, nMainPoc);
 end;
 
 { the tile's components, resolutions, bands, code-blocks and precincts }
@@ -1322,6 +1347,11 @@ procedure TJ2k.AddIe(cb, flags, np, lbInc: Integer);
 var n: Integer;
 begin
   if nie >= MAXENTRIES then Refuse('limits: packet entries');
+  if an then begin
+    { each takes a byte of the side information at least }
+    Inc(ieTotal);
+    if ieTotal > ieCap then Refuse('limits: packet entries for the codestream''s bytes');
+  end;
   if nie >= Length(ieCb) then begin
     n := 2 * nie + 64;
     SetLength(ieCb, n); SetLength(ieFlags, n); SetLength(ieNp, n); SetLength(ieInc, n); SetLength(iePc0, n);
@@ -1734,7 +1764,19 @@ var bg: TBandG; w, h, sty, npass, nseg, k, pc, i, pad, rule, br, p0, p1, npe, sp
   bitsN, nb, gx, gy: Int64;
   ctx, ctx0: array[0..37] of Byte;
   outv: array[0..2] of Int64;
-  O: TBytes; okF, okE, isRaw: Boolean; segOut: TBW; w8, b: Integer; ok: Boolean;
+  O: TBytes; okF, okE, isRaw: Boolean; segOut: TBW; w8, b: Integer; ok, anyRaw: Boolean;
+  t1rN, t1xN: SizeInt; st0: TJ2kStats;
+
+  { analysis: the code-block kept as its bytes }
+  procedure KeepBytes;
+  var pc_: Integer;
+  begin
+    sw[SH_T1R].Put(1);
+    Inc(st.cbRaw);
+    pc_ := cbHead[cb];
+    while pc_ >= 0 do begin sw[SH_T1X].V(pcLen[pc_]); pc_ := pcNext[pc_]; end;
+    sw[SH_T1X].PutN(segdata, 0, tot);
+  end;
 
   function RefBit(const R_: TBytes; nr: Int64; i_: Int64): Integer;
   var by: Int64;
@@ -1814,30 +1856,12 @@ begin
         At(symb, 0), cap, @passend[0], @stb[0]);
       ok := nsym >= 0;
     end;
-    sw[SH_T1R].Put(Ord(not ok));
-    if not ok then begin
-      Inc(st.cbRaw);
-      pc := cbHead[cb];
-      while pc >= 0 do begin sw[SH_T1X].V(pcLen[pc]); pc := pcNext[pc]; end;
-      sw[SH_T1X].PutN(segdata, 0, tot);
-      Exit;
-    end;
-    st.decisions := st.decisions + nsym;
-    if lk.kind = kmEncode then begin
-      if pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), nsym,
-        @passend[0]) <> nsym then Refuse('model');
-    end else if lk.kind = kmDump then DumpCb(cb, x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, nsym)
-    else begin
-    { the decisions' bits }
-    Grow(sw[SH_DEC].d, (dbits + nsym) div 8 + 8);
-    a := 0;
-    while a < nsym do begin
-      if symb[a] and 1 <> 0 then
-        sw[SH_DEC].d[dbits shr 3] := sw[SH_DEC].d[dbits shr 3] or (128 shr (dbits and 7));
-      Inc(dbits); Inc(a);
-    end;
-    sw[SH_DEC].n := (dbits + 7) div 8;
-    end;
+    if not ok then begin KeepBytes; Exit; end;
+    { the segments' endings first: when one of them is kept as it is (rule
+      raw or bypass raw), the whole code-block is, rather than its bytes
+      and its decisions both; else its decisions after them (below) }
+    t1rN := sw[SH_T1R].n; t1xN := sw[SH_T1X].n; st0 := st;
+    sw[SH_T1R].Put(0);
   end else begin
     cbDOff[cb] := cbData.n;
     if sr[SH_T1R].Get <> 0 then begin
@@ -1861,6 +1885,7 @@ begin
   end;
   Inc(st.cbs);
   { each segment's bytes }
+  anyRaw := False;
   ResetCtx(ctx);
   segStart := 0;
   pc := cbHead[cb];
@@ -1884,7 +1909,7 @@ begin
           if (nb = on) and ((on = 0) or CompareMem(@fb[0], @O[0], on)) then begin rule := R_PAD0 + pad; Break; end;
         end;
         sw[SH_T1R].Put(rule);
-        if rule = R_RAWB then begin sw[SH_T1X].V(on); sw[SH_T1X].PutN(O, 0, on); end;
+        if rule = R_RAWB then begin sw[SH_T1X].V(on); sw[SH_T1X].PutN(O, 0, on); anyRaw := True; end;
         segOut.PutN(O, 0, on);
       end else begin
         rule := sr[SH_T1R].Get;
@@ -1941,7 +1966,7 @@ begin
           if bitsN > d then st.tailBits := st.tailBits + bitsN - d - 1;
         end else begin
           sw[SH_T1R].Put(rule);
-          if rule = R_RAW then begin sw[SH_T1X].V(on); sw[SH_T1X].PutN(O, 0, on); end;
+          if rule = R_RAW then begin sw[SH_T1X].V(on); sw[SH_T1X].PutN(O, 0, on); anyRaw := True; end;
         end;
         segOut.PutN(O, 0, on);
       end else begin
@@ -1995,6 +2020,8 @@ begin
             OpenJPEG's rate allocator has it }
           Lo := pjaj2k_raw_pack(At(symb, a), passend[p0 + sp - 1] - a, 1, At(fb, 0), Length(fb));
           if Lo < 0 then Refuse('internal: raw pack');
+          { past the segment's end when the bits ran out before the passes did }
+          Lo := Min64(Lo, segOut.n);
         end else begin
           { MQ: OpenJPEG's rate allocator, the bytes committed + 3 (a last FF dropped) }
           kk := kpv[3 * (sp - 1)];
@@ -2010,7 +2037,11 @@ begin
           else if not isRaw and (BndReach(sp) = Lt) then br := 3
           else br := 2;
           sw[SH_T1R].Put(br);
-          if br = 2 then sw[SH_T1X].S(Lt - Lo);
+          if br = 2 then begin
+            { what the rebuild takes }
+            if (Lt - Lo < -segOut.n - 1) or (Lt - Lo > segOut.n + 1) then Refuse('boundary out of range');
+            sw[SH_T1X].S(Lt - Lo);
+          end;
           L := Lt;
         end else begin
           br := sr[SH_T1R].Get;
@@ -2033,6 +2064,29 @@ begin
       Refuse('internal: segment');
     if not an then cbData.PutN(segOut.d, 0, segOut.n);
     segStart := segStart + segOut.n;
+  end;
+  if not an then Exit;
+  if anyRaw then begin
+    sw[SH_T1R].n := t1rN; sw[SH_T1X].n := t1xN; st := st0;
+    KeepBytes;
+    Exit;
+  end;
+  { the decisions }
+  st.decisions := st.decisions + nsym;
+  if lk.kind = kmEncode then begin
+    if pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), nsym,
+      @passend[0]) <> nsym then Refuse('model');
+  end else if lk.kind = kmDump then DumpCb(cb, x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, nsym)
+  else begin
+    { their bits }
+    Grow(sw[SH_DEC].d, (dbits + nsym) div 8 + 8);
+    a := 0;
+    while a < nsym do begin
+      if symb[a] and 1 <> 0 then
+        sw[SH_DEC].d[dbits shr 3] := sw[SH_DEC].d[dbits shr 3] or (128 shr (dbits and 7));
+      Inc(dbits); Inc(a);
+    end;
+    sw[SH_DEC].n := (dbits + 7) div 8;
   end;
 end;
 
@@ -2227,14 +2281,29 @@ begin
 end;
 
 { ------------------------------------------------------------------ one tile }
+{ each tile's tile-parts as a list, once (not a pass over all of them a tile) }
+procedure TJ2k.IndexTps;
+var i: Integer;
+begin
+  SetLength(tpHead, nxt * nyt); SetLength(tpNext, Length(tps));
+  for i := 0 to High(tpHead) do tpHead[i] := -1;
+  for i := High(tps) downto 0 do begin
+    if (tps[i].isot < 0) or (tps[i].isot >= nxt * nyt) then Refuse('internal: tile-part');
+    tpNext[i] := tpHead[tps[i].isot]; tpHead[tps[i].isot] := i;
+  end;
+end;
+
 procedure TJ2k.Tile(t: Integer);
 var i, k, j, q, pi: Integer; w: TBW; v: Int64; b: TBytes;
 begin
   tileNo := t;
   { its tile-parts, in the order of the codestream }
-  SetLength(tileTps, 0);
-  for i := 0 to High(tps) do
-    if tps[i].isot = t then begin SetLength(tileTps, Length(tileTps) + 1); tileTps[High(tileTps)] := i; end;
+  if Length(tpNext) <> Length(tps) then IndexTps;
+  k := 0; i := tpHead[t];
+  while i >= 0 do begin Inc(k); i := tpNext[i]; end;
+  SetLength(tileTps, k);
+  k := 0; i := tpHead[t];
+  while i >= 0 do begin tileTps[k] := i; Inc(k); i := tpNext[i]; end;
   TileParams;
   Geometry;
   if lk.kind <> kmNone then ModelTile;
@@ -2467,12 +2536,25 @@ end;
 
 const BLOB_VERSION = 1;
 
-{ J2K_SLICE_BYTES; the tests make slices of fewer bytes with
-  PJA_J2K_SLICE=<bytes> (the slices are in the stream: any reader reads it) }
+var sliceBytesSet: Int64 = J2K_SLICE_BYTES;
+
+procedure J2kTestSlicesFromEnv;
+begin
+  sliceBytesSet := StrToInt64Def(GetEnvironmentVariable('PJA_J2K_SLICE'), J2K_SLICE_BYTES);
+  if sliceBytesSet < 1 then sliceBytesSet := J2K_SLICE_BYTES;
+end;
+
+{ J2K_SLICE_BYTES, or the tests' (J2kTestSlicesFromEnv) }
 function SliceBytes: Int64;
 begin
-  Result := StrToInt64Def(GetEnvironmentVariable('PJA_J2K_SLICE'), J2K_SLICE_BYTES);
-  if Result < 1 then Result := J2K_SLICE_BYTES;
+  Result := sliceBytesSet;
+end;
+
+function J2kSideBound(len: Int64): Int64;
+begin
+  if len < 0 then len := 0;
+  if len > High(Int64) div 2 then len := High(Int64) div 2;
+  Result := len + len div 4 + 65536;
 end;
 
 { ------------------------------------------------------------------ slices on threads }

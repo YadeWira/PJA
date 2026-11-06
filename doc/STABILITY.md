@@ -50,15 +50,18 @@ a part of a version 6 stream nor the repaired file inside a PATCH stream
 codestream taken apart and its code-blocks' decisions through a
 context-mixing model, `doc/CODEC.md`, "JPEG 2000, stage C") joins what is
 fixed when 0.9.5 ships: its stream's layout (layout byte 0, the check, the
-slices, the side information through the raw bytes' model, each slice's
+slices, the side information through the raw bytes' model and at most
+n + n / 4 + 65,536 bytes for a codestream of n, each slice's
 decisions), the side information's blob (version 2, its ten streams and
 its slice table), the rules that rebuild a codestream from it, and the
 model's contexts, counters, mixer, maps and constants, bit for bit. Later
 stages (a bitonal pixel mode, HTJ2K, DICOM fragments) come only as new
-codestream mode values, a new layout byte of mode 1, or new flags, in this
+codestream mode values, a new layout byte of mode 1 (1 is meant for a
+codestream coded on from the file's previous one: MJ2 frames), or new flags, in this
 same layout; nothing a release has written changes meaning. A program
 without mode 1's model (the zpaq-std plugin) reads mode 1 as
-`FutureVersion`; the encoder may change which codestreams it models, its
+`FutureVersion`; the encoder may change which codestreams it models,
+which code-blocks it keeps as bytes, its
 slices and its tables' sizes (all written in the stream). A release that does not know a mode
 or a flag refuses the stream as `FutureVersion` (`PJA_E_VERSION`) before
 decoding it, never reads it as something else: a `.pja` of a JPEG 2000
