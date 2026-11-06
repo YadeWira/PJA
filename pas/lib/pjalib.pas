@@ -18,7 +18,7 @@ library pja;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
-  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjaj2km, pjamodel;
+  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjaj2km, pjaj2kpx, pjamodel;
 
 {$L pjafilter.o}
 {$L pja7z.o}

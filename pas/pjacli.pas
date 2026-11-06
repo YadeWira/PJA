@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjamodel, pjaj2k;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjaj2kpx, pjamodel, pjaj2k;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
