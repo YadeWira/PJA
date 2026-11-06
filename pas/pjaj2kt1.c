@@ -440,7 +440,9 @@ int64_t pjaj2k_mq_minprefix(const uint8_t *X, int64_t n, const uint8_t *ctx0, co
 int64_t pjaj2k_raw_pack(const uint8_t *sym, int64_t n, int32_t pad, uint8_t *out, int64_t cap)
 {
   int64_t p = 0, i; int ct = 8; uint32_t c = 0; uint32_t prev = 0;
-  if (cap < n / 7 + 4) return -1;
+  /* cap < n / 7 + 4, without a 64-bit division (a libgcc call on 32-bit
+     x86, which the C here does not link): floor(n / 7) >= cap - 3 */
+  if (n < 0 || cap < 4 || n >= 7 * (cap - 3)) return -1;
   for (i = 0; i < n; i++) {
     if (ct == 0) { out[p++] = (uint8_t)c; prev = c; ct = prev == 0xFF ? 7 : 8; c = 0; }
     ct--; c |= (uint32_t)(sym[i] & 1) << ct;
