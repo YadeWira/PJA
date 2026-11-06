@@ -2697,3 +2697,249 @@ code-block above, the rules against the last ones) is a later mode 1
 layout. Speed: SSE4.1 or AVX2 copies of the mixer (10% measured) and
 codestreams of a file in parallel. A single-tile codestream is one slice,
 one thread.
+
+## JPEG 2000, stage D: mode 2, the pixels (06/11/2026)
+
+Stage D gives stream version 8 its third codestream mode. A reversible
+codestream (the 5/3 wavelet, every code-block's passes there, as lossless
+encoders write them) is kept as its pixels and what it takes to make the
+codestream again from them: the pixels go through a pixel model, the side
+information is mode 1's, and the decisions are not stored at all, since
+the coefficients give them back. A bitonal page (the Internet Archive's
+books: 1 bit, Kakadu) comes out at a third of its codestream, where mode
+1 saves 17%.
+
+**Mode 2's stream** (`pas/pjaj2kpx.pas`), in the version 8 stream's place
+for the codestream, whose bytes are cut out of the host as mode 1's:
+
+```
+byte 0          layout: 0 (another value: a later release's, FutureVersion)
+4 bytes (LE)    a check: the first 4 bytes of the codestream's BLAKE3
+4 bytes (LE)    L, the side information's length
+L bytes         the side information through the raw bytes' model (CodeRaw):
+                stage C's blob (version 2, with its slice table), at most
+                J2kSideBound(n) bytes for a codestream of n, as mode 1's
+byte            hb: the bitonal model's two large tables have 2^hb counters,
+                12 to 22 (the encoder: the 1-bit samples, rounded up)
+byte            the colour: 0, or 1 when planes 0 to 2 go to the model as the
+                reversible colour transform makes them (below)
+the rest        the planes, one after the other, through the pixel models
+                (pas/pjaj2kpm.c) with one arithmetic stream
+```
+
+**The planes.** One a component: the image area of the SIZ on that
+component's grid, ceil(Xsiz / XRsiz) - ceil(XOsiz / XRsiz) samples wide
+and the same down, so the decoder knows them from the side information's
+SIZ (`J2kBlobSiz`) before it decodes a pixel. A sample is v + 2^(depth -
+1) for the value v a decoder's inverse transforms give before it adds the
+level shift (for an unsigned component that is the sample itself, for a
+signed one the same offset), 0 to 2^depth - 1, kept in 16 bits.
+
+**From the codestream to the pixels** (the analysis, `kmPixEncode`):
+stage B takes the codestream apart as for mode 1 (`pjaj2kcs.pas`, the same
+side information); each code-block's decisions as decoded become its
+coefficients (`pjaj2kp_cb_coef`, walking the passes as `pjaj2kt1.c` does:
+a decision of pass k is at plane Mb - zero bit-planes - 1 - (k + 2) / 3; a
+coefficient is its sign and the bits its passes coded, nothing added for
+the planes left out), and the coefficients give the same decisions back
+(`pjaj2kp_cb_sym`, checked code-block by code-block). When a tile's
+code-blocks are done: the inverse 5/3 wavelet of each tile-component
+(F.3: rows then columns at each level, the signals' first sample at the
+parity of the resolution's place on the grid, symmetric extension, a lone
+odd sample halved), the inverse reversible colour transform when the
+tile's COD has it (G.2), the level shift, and the samples into the
+planes. Then the planes go through the model.
+
+**Back** (the rebuild, `kmPixDecode`): the planes from the model; for each
+tile, its samples, the forward colour transform when its COD has it, the
+forward 5/3 (F.4: columns then rows), and each code-block's decisions from
+its coefficients, with the passes and zero bit-planes the side information
+gives; from there on the rebuild is mode 1's (the MQ coder and the rules
+of how segments end, the packet headers, the tile-parts). The integer 5/3
+and the colour transform are exact both ways (each lifting step is undone
+by the other, and the decoder never clips): the coefficients that come
+back are the ones the codestream had, bit for bit. The one inverse the
+forward cannot undo, a lone sample at an odd place whose coefficient is
+odd, is refused when it is met.
+
+**Taken** (`TPx.Tile` and the C side; anything else: the codestream goes
+to mode 1, or 0):
+- every tile-component reversible: the 5/3 wavelet, no quantization (QCD
+  or QCC style 0), an exponent for each band; no RGN;
+- 1 to 16 bits a component (signed too), the planes 2^27 samples at most
+  in all, a tile's coefficients 2^26 (32-bit, all its components);
+- the colour transform only on components 0 to 2 of the same size;
+- every code-block decodes (no code-block kept as bytes for not decoding;
+  one kept as bytes for its ending rule is fine), its passes within its
+  bit-planes, its coefficients within 30 bits, and each one gives its
+  decisions back;
+- every sample within its range: what a lossy, rate-truncated codestream
+  breaks (`tests/j2k`'s lossy samples, refused as "a sample out of
+  range"). A codestream whose code-blocks stop early (Kakadu leaves out
+  trailing passes that change nothing) is taken: the passes are in the
+  side information, and the planes they leave out are zeros;
+- and the stream decoded and compared with the codestream, as always.
+
+**Choice** (`pjacodec.CompressJ2k`): mode 2 first, then mode 1 unless
+mode 2 took the codestream to half its bytes or less (mode 1 saves a fifth
+on the codestreams it does best, so a bitonal page is not coded twice);
+the smaller of the two, when it is smaller than the codestream, and mode 0
+otherwise. The hooks are set by `pjaj2kpx`, which the command, libpja and
+the tests use; without it (the zpaq-std plugin) mode 2 is
+`FutureVersion`.
+
+**The 1-bit model.** Each row of a 1-bit plane with four templates of the
+rows y - 2 to y, kept in sliding windows: 10 pixels (JBIG's three-line
+template), 16, 22 and 30 (the 16-pixel one in a table indexed directly,
+the 22- and 30-pixel ones in tables of 2^hb counters, directly when they
+fit, by a hash otherwise). Each context has the two counters of mode 1's
+model (one slowing to 1/256.5, one at 1/16); the 8 stretched
+probabilities go to a set of weights chosen by 8 nearby pixels, and an
+adaptive probability map of 33 bins chosen by the 10-pixel template;
+(mixer + map) / 2 goes to PJA's binary arithmetic coder.
+
+**The 2 to 16-bit model.** Each sample is predicted by eight predictors
+(MED; a + b - c; b + (d - c) / 2; a + (d - b) / 2; MED plus the previous
+component's error under MED when that component has the same size, else
+(a + d) / 2; b; a; and a sign-sign LMS over seven neighbours), weighted
+by their errors at the neighbours above and to the left (each half
+octave of error halves a weight). The residual, aligned by the sign of
+LOCO's gradient context and reduced modulo the range, is coded as zero or
+not, its bit length (whether it is more than k, k = 1, 2..), its two top
+mantissa bits and its sign; each of those decisions mixes five contexts
+(LOCO's mean residual of the gradient context, the context itself, the
+neighbours' residuals, the previous component's error, the predictors'
+least error and their spread), with sets of weights and a map as above;
+the other mantissa bits have a counter each. With the colour byte, planes
+0 to 2 go through the reversible colour transform first (Y, then Db and
+Dr + 2^depth, of depth + 1 bits; 15 bits at most): the encoder sets it
+when every tile of the codestream has the transform, what the
+codestream's own encoder found best. Tuned on the planes of 12 lossless
+codestreams (OpenJPEG, Kakadu and JasPer: photos, DICOM, Sentinel-2;
+dumped by a build with -dPJA_PX_DUMP): the predictors, their weighting
+and the contexts on their errors took 2.4% off MED with LOCO's bias
+alone, and the colour transform 13% off an RGB photo (87,012 bytes where
+its RGB planes gave 98,365; its codestream 90,563).
+
+**Memory, the worst case.** The planes, 2 bytes a sample: 256 MiB at
+2^27 samples. Per worker (a thread rebuilding a slice): a tile's
+coefficients, 4 bytes a sample, at most 256 MiB (2^26), and the workers
+fewer when the tiles are large (their coefficients 256 MiB at most in
+all, one worker at least). The models: the 1-bit one 2 x 2^22 counters of 6 bytes (48 MiB) at
+hb 22, the multi-bit one 4.6 MiB. A stream that says more is refused
+before the planes are decoded. The most a few bytes can ask is planes at
+the bounds: blank codestreams of 646 bytes (11,585 x 11,585 at 8 bits, two
+tiles: 2^27 samples) and 252 bytes (8,192 x 8,192 at 1 bit, one tile:
+2^26) decode in 24 s and 7 s on one thread here, in 539 MiB at most (the whole test program).
+
+**Tests.** `tests/j2k` gets `bitonal.j2k` (a 1-bit plasma, 320 x 240,
+lossless) and `rgb_tiles53.j2k` (a lossless RGB with the colour transform,
+four tiles on an image offset by (5, 3), so that signals start at odd
+places), both made with `opj_compress` from the repository's images
+(tests/README.md); mode 2 takes and keeps both. `test_j2kcs -mode2` codes
+each codestream in mode 2 when it is taken, decodes it and compares, prints
+a digest of the streams and why the others are not taken, and with
+`-mode1` what the choice gives each; `-m2fuzz N` decodes N damaged copies
+of each mode 2 stream and takes N / 4 damaged copies of its codestream as
+mode 2 (refused, or a stream that gives them back: never an exception nor
+a stream that does not come back). `run_codec_tests.sh` runs them on
+`tests/j2k` (1,800 damaged streams, 450 damaged codestreams), with the
+choice fixed (14 codestreams in mode 1, 2 in mode 2), and the same digest
+on 1 and 4 threads in slices of 1,500 bytes. `test_versions` sweeps the
+mode byte (3 to 255: `FutureVersion`), mode 2's layout byte (1 to 255) and
+reads mode 2 without the hooks (`FutureVersion`). `cli.sh`: `bitonal.j2k`
+in mode 2 (the mode byte in the `.pja`, under 60% of the file, back byte
+for byte), `rgb_tiles53.j2k` back byte for byte, one bit of a mode 2
+stream's pixels damaged (rc 1, nothing written).
+
+**Results** (06/11/2026; "saves" is net and counts each codestream as
+`CompressJ2k` keeps it: mode 2, mode 1 or the codestream; "mode 2 took"
+means the codestream was taken and its stream decoded and compared, byte
+for byte; no codestream failed anywhere):
+
+| set | codestreams | mode 2 took | chose mode 2 | bytes | saves | stage C (mode 1 alone) |
+|---|---|---|---|---|---|---|
+| gap1 real-world (7 sources) | 113 | 32 | 20 | 150,122,046 | **8.45%** | 7.77% |
+| 30 rebuild files (7 encoder families) | 30 | 9 | 5 | 26,058,518 | 11.56% | 10.33% |
+| sample corpus, local and from DICOM/PDF | 1,665 | 689 | 68 | 49,950,421 | 10.29% | 8.83% |
+| downloads (by unique name) | 550 | 299 | 60 | 246,684,904 | 9.42% | 8.76% |
+| tests/j2k | 16 | 6 | 2 | 39,315 | 19.01% | 17.38% |
+
+gap1 by source: the Internet Archive's book pages 17.02% (13.29% in mode
+1 alone; 10 of their 44 codestreams are 1-bit and go in mode 2), DICOM
+6.24% (5.16%), Sentinel-2 7.07% (6.69%: B8A, TCI and one B01 in mode 2;
+the two B04 of 46 and 31 MB, B09 and the other B01 in mode 1, mode 2
+within 1% of them), the others unchanged. By
+encoder family (the COM marker segment), what mode 2 took and chose:
+
+| set | Kakadu | OpenJPEG | JasPer | no COM | other |
+|---|---|---|---|---|---|
+| gap1 | 24 of 92, 15 | 6 of 6, 3 | 1 of 1, 1 | 1 of 2, 1 | 0 of 12 |
+| rebuild files | 4 of 12, 1 | 2 of 8, 2 | 3 of 4, 2 | | 0 of 6 (Aware, ECW, LuraTech, unknown) |
+| sample corpus | 27 of 821, 26 | 640 of 646, 21 | 5 of 6, 4 | 16 of 33, 16 | 1 of 159, 1 |
+
+What mode 2 did not take: not reversible (the 9/7 wavelet or quantized:
+79 of gap1's 81, 17 of the rebuild files' 21, 966 of the sample corpus's
+976), a sample out of range (a lossy 5/3 codestream cut by rate: 8 in the
+sample corpus, among them DICOM codestreams whose fragments were not
+joined), planes past 2^27 samples (2 maps of the Library of Congress, one
+PDF image), and one DICOM codestream whose code-blocks have 116 passes
+for 14 bit-planes.
+
+**The bitonal pages** (the Internet Archive's, Kakadu 5.1 to 7.9, 1 bit,
+5.5 to 14.4 megapixels; the research's JBIG1 for comparison):
+
+| page | codestream | mode 1 | kept | saves | JBIG1 |
+|---|---|---|---|---|---|
+| 0932890343_0005 | 73,272 | 61,490 | 26,071 | 64.4% | 61.7% |
+| 0932890343_0021 | 120,366 | 100,682 | 39,389 | 67.3% | 63.9% |
+| waq43664_0005 | 65,135 | 52,007 | 18,550 | 71.5% | 70.1% |
+| waq43664_0021 | 116,595 | 93,977 | 31,686 | 72.8% | 69.4% |
+| y2010_waq10932 (nearly blank) | 539 | 425 | 425 (mode 1) | 21.2% | 70.5% |
+| y2011_waq104752 | 73,753 | 59,474 | 21,714 | 70.6% | 68.6% |
+| y2011_waq64169 | 62,770 | 50,065 | 16,681 | 73.4% | 70.4% |
+| y2013_WAQ123451 | 16,641 | 13,168 | 5,927 | 64.4% | 67.6% |
+| y2014_WAQ144815 | 62,111 | 51,391 | 17,169 | 72.4% | 68.2% |
+| GreekBiologyAndMedicine_0005 | 249,321 | 205,315 | 74,210 | 70.2% | 67.4% |
+| GreekBiologyAndMedicine_0021 | 299,303 | 256,307 | 114,949 | 61.6% | 57.9% |
+| all 11 | 1,139,806 | 944,301 | 366,771 | **67.82%** | 64.6% |
+
+The side information is 0.72% of the codestreams (8,183 bytes, as mode
+1's), 2.2% of what mode 2 keeps. The nearly blank page (JBIG1: 159
+bytes) shows the price of a model that starts knowing nothing on a small
+codestream: its mode 2 stream is 1,028 bytes, and mode 1 keeps it.
+
+**Damage and fuzzing** (`test_j2kcs -mode2 -m2fuzz`): on 79 codestreams
+mode 2 takes (a quarter of the sample corpus's under 150 KB, seven of
+gap2's: book pages, DICOM, a 16-bit control) and `tests/j2k`, in about 15
+minutes: 10,200 damaged mode 2 streams (6 still gave the codestream: the
+check holds them), 2,550 damaged codestreams through mode 2 (731 taken
+and given back, the rest refused); no exception, no verify failure,
+nothing hung. `run_codec_tests.sh` adds 1,800 and 450 more on `tests/j2k`
+and `test_codec_corrupt` damages the version 8 streams with mode 2 in
+them (every bit of the first 128 bytes, every truncation: 46,907 variants,
+no exception).
+
+**Speed** (one thread, this machine; encoding with the decoding that
+checks it): a book page of 14.4 megapixels (299 KB of codestream) takes
+2.9 s in mode 2 and decodes in 1.4 s (about 10 megapixels a second);
+mode 1 took 3.6 s and 1.7 s. The 2 to 16-bit model codes about 2.8
+million samples a second (the tuning set: 12.8 million samples in 4.6
+s). Mode 2's analysis and rebuild run on the slices' threads as mode 1's;
+the pixel models on one. Whole sets, with the choice: gap1 0.35 MB/s
+encoding and 0.73 MB/s decoding in mode 2 (8 threads).
+
+**The streams are the same everywhere.** x86-64 (clang) and i386 (gcc
+-m32): `hash.txt` the same, its JPEG line unchanged (3387e58d…), its j2k
+line now `f4c959e3…` (the two new samples; the 14 other codestreams'
+streams are the same bytes as before), mode 2's digest on `tests/j2k`
+56916A56D7E85C04 on both; the C compiles with no undefined symbol with
+gcc, clang, gcc -m32, both MinGW-w64 and aarch64 gcc. Mode 1's streams
+of the 14 earlier codestreams (FC23950B095EA60B) and stage B's blobs
+(A8FBC05E4A8B3D47) are unchanged.
+
+**Open.** Mode 2's side information is mode 1's, with the zero
+bit-planes and how each segment ends that the coefficients could predict
+(2.2% of a bitonal page's mode 2 stream); a page of two values kept at 8
+bits (`opj_compress` from a PBM) goes through the multi-bit model, three
+times what the 1-bit one makes of it; the pixel models run on one thread.

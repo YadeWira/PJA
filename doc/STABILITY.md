@@ -32,7 +32,7 @@ plugins carry for each file:
 | 5 | the zpaq-std codecs pja, pjals, pjall, pjalsx and their z and o and 8 | a JPEG or JPEG-LS file; model byte 0 (full) and 1 (fast, read only) |
 | 6 | pjax, pjax7 and their z and 8 | a JPEG with JPEGs inside it (MPO, Ultra HDR), 12-bit JPEG, DNL |
 | 7 | the command and the library since 0.1.0; pja7, pjax7 and their z and 8 | the coefficients through version 7's model |
-| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled), and the other bytes through the raw bytes' model |
+| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled, 2 as its pixels), and the other bytes through the raw bytes' model |
 
 With them, the parts stream, the PATCH stream (a repaired JPEG) and the
 bytes stream (a file stored as it is), as `doc/CODEC.md` describes them.
@@ -54,15 +54,24 @@ slices, the side information through the raw bytes' model and at most
 n + n / 4 + 65,536 bytes for a codestream of n, each slice's
 decisions), the side information's blob (version 2, its ten streams and
 its slice table), the rules that rebuild a codestream from it, and the
-model's contexts, counters, mixer, maps and constants, bit for bit. Later
-stages (a bitonal pixel mode, HTJ2K, DICOM fragments) come only as new
-codestream mode values, a new layout byte of mode 1 (1 is meant for a
-codestream coded on from the file's previous one: MJ2 frames), or new flags, in this
+model's contexts, counters, mixer, maps and constants, bit for bit.
+Codestream mode 2 (a reversible codestream kept as its pixels and what
+rebuilds it from them, `doc/CODEC.md`, "JPEG 2000, stage D") joins them
+when 0.9.5 ships too: its stream's layout (layout byte 0, the check, the
+side information as mode 1's, the bitonal tables' size byte, the colour
+byte, the planes' arithmetic stream), the planes as the SIZ gives them,
+the integer 5/3 wavelet, the reversible colour transform and the level
+shift that turn them into coefficients, the rules that turn those into
+decisions, and the two pixel models (1 bit; 2 to 16 bits), bit for bit.
+Later stages (HTJ2K, DICOM fragments) come only as new codestream mode
+values, a new layout byte of mode 1 or 2 (1 is meant for a codestream
+coded on from the file's previous one: MJ2 frames), or new flags, in this
 same layout; nothing a release has written changes meaning. A program
-without mode 1's model (the zpaq-std plugin) reads mode 1 as
-`FutureVersion`; the encoder may change which codestreams it models,
-which code-blocks it keeps as bytes, its
-slices and its tables' sizes (all written in the stream). A release that does not know a mode
+without mode 1's model or mode 2's (the zpaq-std plugin) reads that mode
+as `FutureVersion`; the encoder may change which codestreams it models
+and in which mode, which code-blocks it keeps as bytes, its slices and
+its tables' sizes, and when it uses the colour byte (all written in the
+stream). A release that does not know a mode
 or a flag refuses the stream as `FutureVersion` (`PJA_E_VERSION`) before
 decoding it, never reads it as something else: a `.pja` of a JPEG 2000
 file written by a later release with such a mode needs that release, or a

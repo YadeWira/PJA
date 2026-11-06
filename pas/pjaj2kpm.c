@@ -575,14 +575,16 @@ static inline int flog(uint32_t v)
   return 2 * l + (l > 0 ? (int)((v >> (l - 1)) & 1) : 0) + 1;
 }
 
-/* a plane of depth bits, row by row: MED with LOCO's bias per gradient
-   context, the residual (modulo the range) as zero or not, bit length,
-   mantissa and sign, each decision from five contexts mixed and mapped:
-   the context's mean residual, the gradients, the neighbours' residuals,
-   and the previous component's at the same place (po, when it has the same
-   size: its sample against MED's prediction from its neighbours). The
-   prediction: NP predictors weighted by their errors around the sample
-   (each half octave of error halves a weight), then LOCO's bias. res:
+/* a plane of depth bits, row by row: NP predictors weighted by their
+   errors around the sample (each half octave of error halves a weight;
+   one of them MED plus the previous component's error under MED, po, when
+   that component has the same size; one a sign-sign LMS); the residual
+   (aligned by the sign of LOCO's gradient context, modulo the range) as
+   zero or not, bit length, mantissa and sign, each decision from five
+   contexts mixed and mapped: LOCO's mean residual of the context (its
+   bias is kept for that alone), the gradients, the neighbours' residuals,
+   the previous component's error, the predictors' least error and their
+   spread. res:
    PX_RESW w int32, the residuals and the predictors' errors of this row
    and the row above */
 #define NP 8
