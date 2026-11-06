@@ -1,7 +1,7 @@
 # The `pja` command
 
 ```
-pja a [options] FILE...     compress:  photo.jpg -> photo.pja, scan.jls -> scan.pja
+pja a [options] FILE...     compress:  photo.jpg -> photo.pja, scan.jls -> scan.pja, map.jp2 -> map.pja
 pja x [options] FILE...     extract:   photo.pja -> photo.jpg (the original's extension)
 pja list FILE...            what each .pja holds: original size, stored size, hash
 pja t FILE...               test each .pja: extract and verify in memory, write nothing
@@ -323,7 +323,15 @@ measured against the old spelling.
   MPO (a stereo pair, a panorama: its MPF index lists a Multi-Frame image)
   as `.mpo`, any other JPEG as `.jpg`. A JPEG with a gain map or a depth
   map hung off it (Ultra HDR) has an MPF index too, without that class: it
-  is a `.jpg`.
+  is a `.jpg`. A file of the JPEG 2000 family: a raw codestream as `.j2k`,
+  a file of boxes as `.jp2`, or `.jpx`, `.jpm`, `.mj2`, `.jph` by the brand
+  of its ftyp box.
+- **JPEG 2000 is recompressed** (0.9.5): `a` takes each codestream apart
+  and codes it with a model (stream version 8's mode 1), each one checked;
+  a codestream it cannot take (HTJ2K, Part 2) and the other bytes go
+  through the raw bytes' model. It says `(JPEG 2000)`, or `(JPEG 2000: as
+  bytes)` when no codestream was modelled; `list` says `JPEG 2000`. A
+  large codestream of several tiles is coded on several threads (`-th`).
 - **Never larger than the original by more than 52 bytes** (37 and the
   extension): a file the codec does not make smaller is stored as it is,
   and `a` and `list` say so.
@@ -336,7 +344,7 @@ measured against the old spelling.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (142 cells: round trips, existing outputs, links,
+Tested by `pas/tests/cli.sh` (149 cells: round trips, JPEG 2000, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, outputs shared by two
 inputs, a write cut short, every usage error; `t`, `info`, `report` and its
 privacy, `bench`, `selftest`, `--cpu` on every path here, `--stats`,

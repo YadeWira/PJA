@@ -26,6 +26,9 @@
   instead (STREAM_PARTS, below DecompressOne): each of those as a stream
   of its own, and the file around them as a version 5 stream.
 
+  A file of the JPEG 2000 family goes as version 8 (STREAM_J2K, below
+  ReadPatch): where its codestreams are, and its bytes.
+
   Compress verifies before handing anything out: it decompresses its own
   output and compares it with the input. A JPEG that does not come back
   byte for byte is rejected with its reason. With two threads or more, a
@@ -60,6 +63,13 @@ const
     with pjav7 writes or reads it (the command, not the zpaq-std plugin).
     Since 0.1.0 }
   STREAM_V7 = 7;
+  { a file of the JPEG 2000 family (pjaj2k): where its codestreams are,
+    each with a mode, and the file's other bytes through the raw bytes'
+    model. Since 0.9.5: a codestream is raw (mode 0: its bytes stay among
+    the others) or modelled (mode 1, pjaj2km); later stages bring other
+    modes, which a reader that does not know them refuses as
+    FutureVersion (doc/CODEC.md) }
+  STREAM_J2K = 8;
   { the header: version, model, header stream length }
   STREAM_HEADER = 6;
 
@@ -82,9 +92,26 @@ type
     { Compress: PJA took the file once it repaired an encoder's slip (jpeg
       says which), and keeps the repairs (stream version 6, PATCH) }
     repaired: Boolean;
+    { Compress: a file of the JPEG 2000 family (stream version 8) }
+    j2k: Boolean;
+    { and how many of its bytes are in codestreams of mode 1 (modelled) }
+    j2kModelled: Int64;
     function Ok: Boolean;
     function Text: string;
   end;
+
+type
+  { Stream version 8's mode 1 (a codestream's decisions through a model),
+    set by pjaj2km's initialization: a program without it (the zpaq-std
+    plugin) writes mode 0 only and reads mode 1 as FutureVersion. Enc gives
+    the codestream data[off..off + len)'s stream, decoded and compared
+    already; Dec the codestream (len bytes) back. }
+  TJ2kMode1Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+  TJ2kMode1Dec = function(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
+
+var
+  J2kMode1Enc: TJ2kMode1Enc = nil;
+  J2kMode1Dec: TJ2kMode1Dec = nil;
 
 { JPEG -> stream. With verify (the default), the stream is decompressed and
   compared before returning (a repaired JPEG's always). threads: how many
@@ -94,7 +121,9 @@ type
   their own (STREAM_PARTS); without it the stream is always version 5, the
   one the zpaq-std plugin's ZPAQL reads. v7: a JPEG's coefficients with
   version 7's model (fast is then ignored), which needs pjav7 in the
-  program; JPEG-LS and lossless JPEG stay version 5. }
+  program; JPEG-LS and lossless JPEG stay version 5. With parts, a file of
+  the JPEG 2000 family goes as version 8; without, it is refused as
+  today. }
 function Compress(const jpeg: TBytes; out stream: TBytes; verify: Boolean = True;
                   threads: Integer = 1; fast: Boolean = False; parts: Boolean = True;
                   v7: Boolean = False): TCodecResult;
@@ -126,7 +155,7 @@ function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boole
 
 implementation
 
-uses Classes, Math, pjaarith, pjamodel, pjastage, pjathread;
+uses Classes, Math, pjaarith, pjamodel, pjastage, pjathread, pjaj2k;
 
 type
   { scan numbers: version 6's quirks }
@@ -1481,6 +1510,9 @@ begin
 end;
 
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult; forward;
+type TKnown = array of TBytes;
+function ReadJ2k(const stream: TBytes; out data: TBytes; maxRaw: SizeInt; threads: Integer;
+  const known: TKnown): TCodecResult; forward;
 
 function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
                       expected: SizeInt; depth: Integer): TCodecResult;
@@ -1489,10 +1521,16 @@ var n, i, flags: Integer; p, hp, op: SizeInt; total, cut, at: Int64; parts: arra
 begin
   jpeg := nil;
   if Length(stream) < 1 then Exit(CodecFail(ceBadStream));
-  if stream[0] > STREAM_V7 then Exit(CodecFail(ceFutureVersion));
+  { a version this release does not know: a later one wrote it }
+  if stream[0] > STREAM_J2K then Exit(CodecFail(ceFutureVersion));
   none := Default(TQuirks);
   if (stream[0] = STREAM_VERSION) or (stream[0] = STREAM_V7) then
     Exit(DecompressOne(stream, jpeg, maxRaw, threads, expected, none));
+  if stream[0] = STREAM_J2K then begin
+    { a whole file: never a part }
+    if depth > 0 then Exit(CodecFail(ceBadStream));
+    Exit(ReadJ2k(stream, jpeg, maxRaw, threads, nil));
+  end;
   if (stream[0] <> STREAM_PARTS) or (depth > MAX_PART_DEPTH) or (Length(stream) < 2) then Exit(CodecFail(ceBadStream));
   flags := stream[1];
   if flags = FLAG_BYTES then begin
@@ -1580,6 +1618,9 @@ begin
     if parts[i].copyOf >= 0 then part := Copy(jpeg, parts[parts[i].copyOf].off, parts[i].len)
     else begin
       Result := DecompressAt(parts[i].stream, part, parts[i].len, threads, parts[i].len, depth + 1);
+      { a part a later release wrote (or version 7 without pjav7): why the
+        stream does not read, as at the top }
+      if Result.err = ceFutureVersion then begin jpeg := nil; Exit; end;
       if not Result.Ok or (Length(part) <> parts[i].len) then begin jpeg := nil; Exit(CodecFail(ceBadStream)); end;
     end;
     if parts[i].mode and PART_ZEROS <> 0 then begin
@@ -1625,8 +1666,11 @@ begin
     p := p + 12 + Length(edits[i].ins);
   end;
   inner := Copy(stream, p, Length(stream) - p);
-  { the repaired file: neither repaired again nor as bytes }
-  if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) then
+  { the repaired file: a JPEG's stream, neither repaired again nor as
+    bytes, nor a file of the JPEG 2000 family (version 8, a whole file as
+    BYTES is) }
+  if (Length(inner) < 2) or ((inner[0] = STREAM_PARTS) and (inner[1] and (FLAG_PATCH or FLAG_BYTES) <> 0)) or
+     (inner[0] = STREAM_J2K) then
     Exit(CodecFail(ceBadStream));
   { the repaired file is the original with what the edits take out and
     without what they put back: larger by what RepairJpeg holds to
@@ -1655,6 +1699,162 @@ begin
   if Length(inner) > 0 then Move(inner[0], Result[p], Length(inner));
 end;
 
+{ ---------- version 8: the JPEG 2000 family ----------
+
+    byte 0          STREAM_J2K
+    byte 1          flags: none yet, 0
+    4 bytes (LE)    K, the codestreams: 0 to MAX_J2K_CODESTREAMS
+    K x 13 bytes    each codestream, in the order of the file and apart:
+                    where it is in the file (u32), its length there (u32,
+                    1 or more), its stream's length (u32), and its mode
+    the K streams   of the codestreams that have one, in order
+    the rest        the host through the raw bytes' model (CodeRaw): the
+                    file, without the codestreams that have a stream of
+                    their own
+
+  Mode 0 (J2K_RAW): the codestream's bytes stay where they are in the host,
+  and it has no stream (length 0). Mode 1 (J2K_MODEL, since 0.9.5): its
+  stream is pjaj2km's (the codestream taken apart, its decisions through a
+  model), and its bytes are cut out of the host. A reader that does not
+  know a mode, or a flag, refuses the stream as FutureVersion, and never
+  reads it as something else. }
+
+const
+  J2K_ENTRY = 13;
+  J2K_RAW = 0;
+  J2K_MODEL = 1;
+
+{ known: the codestreams of mode 1 already in hand (their streams were
+  decoded and compared when they were made), not decoded again; nil, or
+  nil entries, otherwise }
+function ReadJ2k(const stream: TBytes; out data: TBytes; maxRaw: SizeInt; threads: Integer;
+  const known: TKnown): TCodecResult;
+var k, i: Integer; p, off, len, slen, prevEnd, sp, cut, hp, op, gap: Int64; cd: TCoder; host, cs: TBytes;
+  e: TCodecError; mode: array of Byte;
+begin
+  data := nil;
+  if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
+  if stream[1] <> 0 then Exit(CodecFail(ceFutureVersion));
+  if GetU32(stream, 2) > MAX_J2K_CODESTREAMS then Exit(CodecFail(ceBadStream));
+  k := Integer(GetU32(stream, 2));
+  if 6 + Int64(J2K_ENTRY) * k > Length(stream) then Exit(CodecFail(ceBadStream));
+  { a mode of a later release first, or one this program cannot read:
+    whatever the rest says, that is why it does not read }
+  p := 6;
+  for i := 0 to k - 1 do begin
+    if (stream[p + 12] > J2K_MODEL) or ((stream[p + 12] = J2K_MODEL) and not Assigned(J2kMode1Dec)) then
+      Exit(CodecFail(ceFutureVersion));
+    Inc(p, J2K_ENTRY);
+  end;
+  p := 6; prevEnd := 0; sp := 6 + Int64(J2K_ENTRY) * k; cut := 0;
+  SetLength(mode, k);
+  for i := 0 to k - 1 do begin
+    off := GetU32(stream, p); len := GetU32(stream, p + 4); slen := GetU32(stream, p + 8); mode[i] := stream[p + 12];
+    if (len < 1) or (off < prevEnd) then Exit(CodecFail(ceBadStream));
+    if (mode[i] = J2K_RAW) and (slen <> 0) then Exit(CodecFail(ceBadStream));
+    if (mode[i] = J2K_MODEL) and ((slen < 1) or (slen > Length(stream) - sp)) then Exit(CodecFail(ceBadStream));
+    if mode[i] = J2K_MODEL then cut := cut + len;
+    sp := sp + slen;
+    prevEnd := off + len;
+    Inc(p, J2K_ENTRY);
+  end;
+  if cut > maxRaw then Exit(CodecFail(ceTooLarge));
+  cd.InitDecoder(Copy(stream, sp, Length(stream) - sp), 0);
+  if not CodeRaw(cd, host, maxRaw - cut) then begin host := nil; Exit(CodecFail(ceTooLarge)); end;
+  { every codestream within the file }
+  if prevEnd > Length(host) + cut then Exit(CodecFail(ceBadStream));
+  if cut = 0 then begin data := host; Exit(CodecFail(ceOk)); end;
+  { the host's bytes, and each codestream of mode 1 back in its place }
+  SetLength(data, Length(host) + cut);
+  p := 6; sp := 6 + Int64(J2K_ENTRY) * k; hp := 0; op := 0;
+  for i := 0 to k - 1 do begin
+    off := GetU32(stream, p); len := GetU32(stream, p + 4); slen := GetU32(stream, p + 8);
+    if mode[i] = J2K_MODEL then begin
+      gap := off - op;
+      if gap > Length(host) - hp then begin data := nil; Exit(CodecFail(ceBadStream)); end;
+      if gap > 0 then Move(host[hp], data[op], gap);
+      hp := hp + gap; op := op + gap;
+      if (i < Length(known)) and (known[i] <> nil) then cs := known[i]
+      else begin
+        e := J2kMode1Dec(Copy(stream, sp, slen), len, threads, cs);
+        if e <> ceOk then begin data := nil; Exit(CodecFail(e)); end;
+      end;
+      if Length(cs) <> len then begin data := nil; Exit(CodecFail(ceBadStream)); end;
+      Move(cs[0], data[op], len);
+      op := op + len;
+    end;
+    sp := sp + slen;
+    Inc(p, J2K_ENTRY);
+  end;
+  if Length(host) - hp <> Length(data) - op then begin data := nil; Exit(CodecFail(ceBadStream)); end;
+  if hp < Length(host) then Move(host[hp], data[op], Length(host) - hp);
+  Result := CodecFail(ceOk);
+end;
+
+{ A file of the JPEG 2000 family as version 8: each codestream in mode 1
+  when this program has it (J2kMode1Enc) and its stream is smaller than the
+  codestream, else in mode 0; the rest of the file through the raw bytes'
+  model. ceJpeg (NotJpeg) for a file that is not one or that is too large
+  for the stream's 32-bit places. }
+function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
+var cs: TJ2kCodestreams; cd: TCoder; body, host, back: TBytes; i: Integer; p, hp, op, n: SizeInt;
+  ms, known: TKnown; cut, total: Int64;
+begin
+  stream := nil;
+  if (Length(data) >= High(Cardinal)) or not J2kCodestreams(data, cs) then begin
+    Result := CodecFail(ceJpeg); Result.jpeg.err := jeNotJpeg; Exit;
+  end;
+  SetLength(ms, Length(cs)); SetLength(known, Length(cs));
+  cut := 0;
+  for i := 0 to High(cs) do begin
+    ms[i] := nil; known[i] := nil;
+    if Assigned(J2kMode1Enc) and J2kMode1Enc(data, cs[i].off, cs[i].len, threads, ms[i]) and
+       (Length(ms[i]) < cs[i].len) then begin
+      known[i] := Copy(data, cs[i].off, cs[i].len);
+      cut := cut + cs[i].len;
+    end else ms[i] := nil;
+  end;
+  { the host: the file without the codestreams of mode 1 }
+  if cut = 0 then host := data
+  else begin
+    SetLength(host, Length(data) - cut);
+    hp := 0; op := 0;
+    for i := 0 to High(cs) do
+      if ms[i] <> nil then begin
+        n := cs[i].off - op;
+        if n > 0 then Move(data[op], host[hp], n);
+        hp := hp + n; op := cs[i].off + cs[i].len;
+      end;
+    if op < Length(data) then Move(data[op], host[hp], Length(data) - op);
+  end;
+  cd.InitEncoder;
+  CodeRaw(cd, host, MaxInt);
+  body := cd.enc.Finish;
+  total := 6 + Int64(J2K_ENTRY) * Length(cs) + Length(body);
+  for i := 0 to High(cs) do total := total + Length(ms[i]);
+  SetLength(stream, total);
+  stream[0] := STREAM_J2K; stream[1] := 0;
+  p := 2; PutU32(stream, p, Length(cs));
+  for i := 0 to High(cs) do begin
+    PutU32(stream, p, Cardinal(cs[i].off)); PutU32(stream, p, Cardinal(cs[i].len)); PutU32(stream, p, Length(ms[i]));
+    if ms[i] <> nil then stream[p] := J2K_MODEL else stream[p] := J2K_RAW;
+    Inc(p);
+  end;
+  for i := 0 to High(cs) do
+    if Length(ms[i]) > 0 then begin Move(ms[i][0], stream[p], Length(ms[i])); p := p + Length(ms[i]); end;
+  Move(body[0], stream[p], Length(body));
+  Result := CodecFail(ceOk);
+  Result.j2k := True;
+  Result.j2kModelled := cut;
+  { checked: the stream gives the file back; each mode 1 stream was decoded
+    and compared when it was made, so its codestream is taken as known }
+  if verify and (not ReadJ2k(stream, back, Length(data), threads, known).Ok or (Length(back) <> Length(data)) or
+     ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data)))) then begin
+    stream := nil;
+    Result := CodecFail(ceNoRoundTrip);
+  end;
+end;
+
 function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                       v7: Boolean): TCodecResult;
 begin
@@ -1669,6 +1869,9 @@ var why: TCodecResult; model: TModelKind; fixed, inner, asBytes: TBytes; edits: 
 begin
   if v7 then model := mkV7 else if fast then model := mkFast else model := mkFull;
   if not parts then Exit(CompressOne(jpeg, stream, verify, threads, model));
+  { the JPEG 2000 family: version 8, nothing else (it does not start like a
+    JPEG); a file too large for it is refused as before }
+  if J2kKind(jpeg) <> jkNone then Exit(CompressJ2k(jpeg, stream, verify, threads));
   Result := CompressAt(jpeg, stream, verify, threads, model, 0);
   { an encoder's slip PJA can undo: the file repaired, compressed, and the
     repairs kept (PATCH, whose places are 32 bits), with the reason kept }

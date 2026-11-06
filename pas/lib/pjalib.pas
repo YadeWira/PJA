@@ -18,7 +18,7 @@ library pja;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
-  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjamodel;
+  Classes, SysUtils, pjacodec, pjapack, pjaformat, pjablake3, pjacpu, pjav7, pjaj2km, pjamodel;
 
 {$L pjafilter.o}
 {$L pja7z.o}
@@ -29,6 +29,7 @@ const
   PJA_E_DATA = 2;
   PJA_E_MEMORY = 3;
   PJA_E_ARG = 6;
+  PJA_E_VERSION = 7;
   { pja_decompress's own cap on an original's size }
   MAX_ORIGINAL = QWord(1) shl 31;
   VERSION_TEXT: PChar = 'pja ' + PJA_VERSION;
@@ -46,6 +47,8 @@ type
     done: LongInt;
     given: PByte;            { a JPEG without tables of its own: the ones put after its SOI }
     givenSize: SizeUInt;
+    { decoding, not ok: 1 when the stream is of a later version (PJA_E_VERSION) }
+    newer: LongInt;
   end;
   PJob = ^TJob;
   { pjafilter.c's host_t }
@@ -149,15 +152,21 @@ end;
 procedure RunJob(var j: TJob; encode: Boolean; threads: Integer);
 var b: TBytes; r: TCodecResult;
 begin
-  j.output := nil; j.outSize := 0; j.ok := 0;
+  j.output := nil; j.outSize := 0; j.ok := 0; j.newer := 0;
   SetGivenTables(InBytes(j.given, j.givenSize));
   try
     if encode then begin
       r := Compress(InBytes(j.input, j.size), b, True, threads, False, True, True);
-      if not r.Ok or r.asBytes then Exit;
-    end else
-      if not Decompress(InBytes(j.input, j.size), b, SizeInt(j.expected), threads, SizeInt(j.expected)).Ok then
+      { the filter's files are JPEGs (pjafilter.c finds them by FF D8 FF):
+        never a JPEG 2000 stream, which the filter does not take yet }
+      if not r.Ok or r.asBytes or r.j2k then Exit;
+    end else begin
+      r := Decompress(InBytes(j.input, j.size), b, SizeInt(j.expected), threads, SizeInt(j.expected));
+      if not r.Ok then begin
+        if r.err = ceFutureVersion then j.newer := 1;
         Exit;
+      end;
+    end;
     if Hand(b, j.output, j.outSize) then j.ok := 1;
   except
     if j.output <> nil then FreeMem(j.output);
@@ -347,6 +356,9 @@ begin
     try
       r := Unpack(InBytes(input, size), cap, original, expected, threads);
       if r.err = ukTooLarge then Exit(PJA_E_MEMORY);
+      { a newer PJA's .pja, or codec stream inside it }
+      if ((r.err = ukFormat) and (r.fmt.err = peFutureVersion)) or
+         ((r.err = ukCodec) and (r.codec.err = ceFutureVersion)) then Exit(PJA_E_VERSION);
       if not r.Ok then Exit(PJA_E_DATA);
       if Hand(original, output^, outSize^) then Result := PJA_OK else Result := PJA_E_MEMORY;
     finally

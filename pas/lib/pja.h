@@ -1,7 +1,9 @@
 /* libpja: PJA as a library, for archivers and other programs.
 
    PJA recompresses JPEG and JPEG-LS files losslessly: the original comes
-   back byte for byte. The library is one shared object (pja.so, pja.dll,
+   back byte for byte. pja_compress also takes the JPEG 2000 family (JP2,
+   JPX, JPM, Motion JPEG 2000, raw codestreams), for now through the raw
+   bytes' model; the filter leaves those as they are. The library is one shared object (pja.so, pja.dll,
    pja.dylib) with a C interface; every function may be called from several
    threads at once.
 
@@ -44,8 +46,15 @@ enum {
   PJA_E_MEMORY = 3,     /* out of memory, or over a size limit */
   PJA_E_READ = 4,       /* the filter's read callback failed */
   PJA_E_WRITE = 5,      /* the filter's write callback failed */
-  PJA_E_ARG = 6         /* a null pointer or a bad argument */
+  PJA_E_ARG = 6,        /* a null pointer or a bad argument */
+  PJA_E_VERSION = 7     /* written by a newer PJA: a .pja version, a codec stream
+                           version or mode, a filter version or record this
+                           release does not know (until 0.9.0: PJA_E_DATA);
+                           also damage that lands on one of those bytes */
 };
+
+/* Error codes may be added; a caller treats one it does not know as an
+   error, as it treats PJA_E_DATA. */
 
 /* "pja 0.9.0" */
 const char *PJA_CALL pja_version(void);
@@ -55,7 +64,8 @@ const char *PJA_CALL pja_version(void);
 int PJA_CALL pja_compress(const void *in, size_t in_size, void **out, size_t *out_size, int threads);
 
 /* A .pja -> the original, checked against its size and hash. max_size caps
-   the original's size (0: no cap but the library's own, 2^31). */
+   the original's size (0: no cap but the library's own, 2^31).
+   PJA_E_VERSION: a newer PJA wrote it. */
 int PJA_CALL pja_decompress(const void *in, size_t in_size, void **out, size_t *out_size,
                             size_t max_size, int threads);
 
@@ -70,7 +80,10 @@ typedef int (PJA_CALL *pja_write_fn)(void *ctx, const void *buf, size_t size);
 /* Every byte read -> the filter's stream, written. */
 int PJA_CALL pja_filter_encode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *write_ctx,
                                int threads);
-/* The filter's stream, read -> the original bytes, written. */
+/* The filter's stream, read -> the original bytes, written. PJA_E_VERSION:
+   a newer PJA wrote it (a filter version or a record it does not know, or a
+   file's codec stream of a later version); what came before it may have
+   been written already. */
 int PJA_CALL pja_filter_decode(pja_read_fn read, void *read_ctx, pja_write_fn write, void *write_ctx,
                                int threads);
 

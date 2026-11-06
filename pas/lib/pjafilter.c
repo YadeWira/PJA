@@ -18,6 +18,9 @@
                                    the tables put after its SOI, coded as
                                    known (pjamodel.SetGivenTables)
        FF                          the end
+     04 to FE are left for records of later releases: a decoder that
+     meets one stops (PJA_E_VERSION since 0.9.5, PJA_E_DATA before), as
+     it does at a version past its own.
 
    FlashPix (and Picture It's and PhotoDraw's .mix, built on it) and
    TIFF's JPEG (its JPEGTables) keep the tables once, as a JPEG of tables
@@ -49,6 +52,7 @@
 #define PJA_E_READ 4
 #define PJA_E_WRITE 5
 #define PJA_E_ARG 6
+#define PJA_E_VERSION 7
 
 #if defined(_WIN32) && !defined(_WIN64)
 #define PJA_CALL __cdecl
@@ -76,6 +80,9 @@ typedef struct {
      its codec stream leaves out (pjamodel.SetGivenTables); 0 bytes if none */
   const uint8_t *given;
   size_t given_size;
+  /* decoding, not ok: 1 when the file's codec stream is of a later
+     version (PJA_E_VERSION rather than PJA_E_DATA) */
+  int newer;
 } job_t;
 typedef struct {
   void *(*alloc)(size_t size);
@@ -774,7 +781,8 @@ static void drop(queue_t *q, item_t *it) {
   q->first = (q->first + 1) % q->max; q->n--;
 }
 
-/* the oldest item written; PJA_E_DATA when its file did not come back. A
+/* the oldest item written; PJA_E_DATA when its file did not come back
+   (PJA_E_VERSION when a later PJA wrote its codec stream). A
    file given tables: they come out of it, after its SOI, and must be the
    ones it was given */
 static int retire_item(queue_t *q, out_t *o, const uint8_t *tab) {
@@ -785,7 +793,8 @@ static int retire_item(queue_t *q, out_t *o, const uint8_t *tab) {
   else {
     H.pool_wait(q->pool, &it->job);
     const uint8_t *b = it->job.out;
-    if (!it->job.ok || it->job.out_size != it->job.expected) res = PJA_E_DATA;
+    if (!it->job.ok) res = it->job.newer ? PJA_E_VERSION : PJA_E_DATA;
+    else if (it->job.out_size != it->job.expected) res = PJA_E_DATA;
     else if (!g) put(o, b, it->job.out_size);
     else {
       for (size_t k = 0; k < g && res == PJA_OK; k++) if (b[2 + k] != tab[k]) res = PJA_E_DATA;
@@ -840,8 +849,23 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
   tab = H.alloc(MAX_TABLES);
   int res = PJA_E_DATA;
   if (!r.buf || !q.items || !q.pool || !tab || (read_b && !rb.buf)) { res = PJA_E_MEMORY; goto done; }
-  for (size_t k = 0; k < sizeof MAGIC; k++) if (rd_byte(&r) != (read_b ? MAGIC2 : MAGIC)[k]) goto done;
-  if (read_b) for (size_t k = 0; k < sizeof MAGIC_B; k++) if (rd_byte(&rb) != MAGIC_B[k]) goto done;
+  /* the magic, then the version: one past the version 2 the filter's
+     streams have is a later PJA's (PJA_E_VERSION); the other version than
+     the one asked for (1 to filter2_decode, 2 to filter_decode) is the
+     caller's mix-up, a data error as before */
+  {
+    const uint8_t *m = read_b ? MAGIC2 : MAGIC;
+    for (size_t k = 0; k + 1 < sizeof MAGIC; k++) if (rd_byte(&r) != m[k]) goto done;
+    int v = rd_byte(&r);
+    if (v > MAGIC2[4]) { res = PJA_E_VERSION; goto done; }
+    if (v != m[4]) goto done;
+    if (read_b) {
+      for (size_t k = 0; k + 1 < sizeof MAGIC_B; k++) if (rd_byte(&rb) != MAGIC_B[k]) goto done;
+      v = rd_byte(&rb);
+      if (v > MAGIC_B[4]) { res = PJA_E_VERSION; goto done; }
+      if (v != MAGIC_B[4]) goto done;
+    }
+  }
   for (;;) {
     int t = rd_byte(&r);
     uint64_t n, size;
@@ -852,8 +876,10 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
     }
     /* room for one more item */
     int bad = 0;
-    while (q.n && (q.n >= q.max - 1 || q.files >= q.maxf || q.bytes >= AHEAD_BYTES || t == TAG_TABLES))
-      if (retire_item(&q, &o, tab) != PJA_OK) { bad = 1; break; }
+    while (q.n && (q.n >= q.max - 1 || q.files >= q.maxf || q.bytes >= AHEAD_BYTES || t == TAG_TABLES)) {
+      int rr = retire_item(&q, &o, tab);
+      if (rr != PJA_OK) { res = rr; bad = 1; break; }
+    }
     if (bad || o.err) break;
     item_t *it = &q.items[(q.first + q.n) % q.max];
     it->given = 0;
@@ -876,7 +902,7 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
       if (!st) { res = PJA_E_MEMORY; break; }
       it->file = 0; it->job.in = st; it->job.size = (size_t)n; it->job.expected = (size_t)size + g;
       it->given = g; it->job.given = tab; it->job.given_size = g;
-      it->job.out = 0; it->job.out_size = 0; it->job.ok = 0; it->job.done = 0;
+      it->job.out = 0; it->job.out_size = 0; it->job.ok = 0; it->job.done = 0; it->job.newer = 0;
       q.n++; q.bytes += (size_t)n;
       if (read_b ? !dedup_get(&dd, &rb, st, (size_t)n) : rd(&r, st, (size_t)n) != n) {
         if (dd.err) res = dd.err;
@@ -886,7 +912,12 @@ static int decode(pja_read_fn read, void *read_ctx, pja_read_fn read_b, void *re
       it->file = 1; q.files++;
       it->job.threads = threads / q.files; if (it->job.threads < 1) it->job.threads = 1;
       H.pool_submit(q.pool, &it->job);
-    } else break;
+    } else {
+      /* 04 to FE: a record of a later PJA; anything else (the end of the
+         input) a data error */
+      if (t >= 0x04 && t < TAG_END) res = PJA_E_VERSION;
+      break;
+    }
   }
 done:
   if (q.items) while (q.n) drop(&q, &q.items[q.first]);

@@ -9,7 +9,7 @@
   with PJA_TEST_V7=1, with stream version 7's. }
 program test_codec;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, pjajpeg, pjacodec, pjav7;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, pjajpeg, pjacodec, pjav7, pjaj2km;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);

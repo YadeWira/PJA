@@ -34,10 +34,10 @@ echo "== tests"
 python3 "$PJA/tools/gen_selftest.py" --check "$OUT/pja"
 "$OUT/test_blake3" "$PAS/tests/kat.txt" | tail -1
 "$OUT/test_format" "$PJA/tests/jpg" "$PJA/tests/jls" | tail -1
-"$OUT/test_corruption" "$PJA/tests/jpg" "$PJA/tests/jls" | grep -E '^  (format|end to end)|cells, '
+"$OUT/test_corruption" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | grep -E '^  (format|end to end)|cells, '
 # pjafs touches the disk: a directory of its own
 rm -rf "$OUT/tmp_pjafs"; mkdir -p "$OUT/tmp_pjafs"; "$OUT/test_pjafs" "$(realpath "$OUT/tmp_pjafs")" | tail -1
-"$PAS/tests/cli.sh" "$OUT/pja" "$OUT/tmp_cli" "$PJA/tests/jpg" "$PJA/tests/jls" | tail -1
+"$PAS/tests/cli.sh" "$OUT/pja" "$OUT/tmp_cli" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -1
 
 echo "== the zpaq-std plugin's ZPAQL decoders (each also as its z codec's, --lz)"
 python3 "$PJA/tools/zpaql/gen_pjadec.py" --check

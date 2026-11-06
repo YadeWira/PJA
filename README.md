@@ -195,6 +195,19 @@ lossless JPEG, and JPEG-LS, along with the oddities real encoders leave.
 Anything else goes through as bytes, and `pja a` says why
 ([details][wHandles]).
 
+**JPEG 2000** (JP2, JPX, JPM, Motion JPEG 2000, JPH and raw codestreams:
+`.jp2`, `.j2k`, `.j2c`, `.jpx`, `.mj2`...) is recompressed too since 0.9.5:
+each Part 1 codestream is taken apart, its code-blocks' decisions coded
+again with a context-mixing model, and put back together byte for byte,
+checked before anything is written. On 113 real-world codestreams (book
+pages, maps, solar and satellite images, DICOM; 150 MB) the codestreams come out
+**7.8% smaller**, 13% on the book pages; on 30 files from seven encoders,
+10.3%. It is slower than for JPEG (about 0.1 to 0.25 MB/s to compress and
+0.2 to 0.5 MB/s to extract on one thread; a large tiled codestream uses
+several). HTJ2K and Part 2 codestreams are kept as bytes. The 7-Zip
+plugin and the zpaq-std codecs leave JPEG 2000 files as they are, for now
+([details](doc/CODEC.md)).
+
 ## Install
 
 Download the command for your platform from the [latest release][relLink]:

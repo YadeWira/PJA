@@ -63,3 +63,37 @@ with line interleave given a restart interval of 4 lines (CharLS 2.4
 writes none: PJA's own JPEG-LS encoder, pjajls.RecomposeJls, rebuilt it
 with a DRI segment, and checked it decodes back). Small enough for the
 ZPAQL decoder's test in the Python interpreter.
+
+## `j2k/`
+
+The JPEG 2000 family (stream version 8). Each image is one of `jpg/`'s,
+decoded with libjpeg's `djpeg -pnm` and encoded with OpenJPEG 2.5's
+`opj_compress` (the system's, Debian 13); none comes from elsewhere.
+
+| file | made with |
+|---|---|
+| `plasma_cs.j2k` | `baseline_color.jpg` (64x64) → `opj_compress -r 20`: a raw codestream |
+| `plasma.jp2` | `color_plasma.jpg` (320x240) → `opj_compress -r 60`: a JP2 |
+| `layers.jp2` | `prog_huffman.jpg` (120x80) → `opj_compress -r 80,40,20`: three quality layers |
+| `lossless53.j2k` | `grayscale.jpg` (64x64) → `opj_compress` (its default: lossless, the 5/3 wavelet) |
+| `gray_12bit.jp2` | `grayscale.jpg` scaled to 12 bits (ImageMagick, `convert -depth 12`, a PGM of maxval 4095) → `opj_compress -r 10`: 12 bits a sample |
+| `two_codestreams.jpx` | `pas/tests/mkj2k_boxes.py jpx`, around `plasma_cs.j2k` and `lossless53.j2k`: a JPX with two codestreams, the first in a box with a 64-bit length (XLBox), the second in a last box of length 0 (to the end of the file), with an asoc superbox and a codestream header box |
+| `two_frames.mj2` | `pas/tests/mkj2k_boxes.py mj2`, around `plasma_cs.j2k` and `baseline_444.jpg` → `opj_compress -r 20`: the boxes of a Motion JPEG 2000 file (signature, ftyp `mjp2`, an mdat with two jp2c frames), without the moov box a player needs |
+
+No tool at hand writes JPX or Motion JPEG 2000, hence the last two, put
+together box by box. Their names are apart from `jpg/`'s and `jls/`'s
+(`gray_12bit.jp2`, not `gray12.jp2`): the suites put every sample in one
+folder, and two inputs with the same name give the same `.pja`.
+
+For stage B (`pas/tests/test_j2kcs.pas`: each codestream taken apart and
+put back together), five raw codestreams with what the others lack, each
+`color_plasma.jpg` decoded with `djpeg -pnm` and cut to its top-left 96x80
+(a PPM; `opj_compress` has no option to crop):
+
+| file | made with `opj_compress` and |
+|---|---|
+| `cblk_styles.j2k` | `-M 63 -r 40,20,10 -n 4 -b 16,16`: every code-block style (BYPASS, RESET, RESTART, CAUSAL, ERTERM, SEGMARK), three layers |
+| `bypass_layers.j2k` | `-M 1 -r 24,12,6,3 -n 3 -b 16,16`: BYPASS alone, its raw segments cut by four layers |
+| `rpcl_sop_eph.j2k` | `-p RPCL -c [32,32],[16,16] -n 4 -SOP -EPH -r 30,10 -b 8,8`: RPCL, precincts, SOP and EPH markers |
+| `pcrl_tiles_plt_tlm.j2k` | `-p PCRL -t 48,40 -TP R -PLT -TLM -n 3 -r 20,8 -b 16,16`: PCRL, four tiles, a tile-part per resolution, PLT and TLM |
+| `cprl_poc.j2k` | `-p CPRL -POC T1=0,0,1,3,2,CPRL/T1=0,0,2,4,3,LRCP -n 4 -M 8 -r 12,4,1 -b 16,16`: CPRL, a POC in the tile's header, CAUSAL, a lossless last layer |

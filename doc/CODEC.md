@@ -1,6 +1,7 @@
 # The PJA codec
 
-Its streams (versions 5, 6 and 7) are stable since 0.9.0: `doc/STABILITY.md`.
+Its streams (versions 5, 6 and 7) are stable since 0.9.0, version 8 (the
+JPEG 2000 family) since 0.9.5: `doc/STABILITY.md`.
 
 Its own format, written from scratch in FreePascal. It is **not** compatible
 with packJPG's `.pjg`: packJPG is kept only as a yardstick for compression
@@ -2521,3 +2522,606 @@ been wrong: once the wait is gone `-th 2` is as fast as `-th 1` or
 faster on every one-band file measured (color_plasma 35 -> 31 ms,
 0065.jpg 156 -> 128 ms), and it already was from about 100 KB up
 (0030.jpg: 328 ms at `-th 1`, 206 ms at `-th 2`).
+
+## JPEG 2000, stage A: stream version 8 (05/11/2026)
+
+The first stage of JPEG 2000 for 0.9.5: the container, not yet the model.
+A file of the JPEG 2000 family is taken as a stream of its own version,
+8, whose layout leaves room for the stages after it; in this stage its
+bytes go through the raw bytes' model (CodeRaw), as stream version 6's
+BYTES does for a JPEG PJA cannot take, and PJA saves what that model
+saves on them: a fraction of a percent on real files (below). The
+research behind it (a model of the code-blocks' decisions, about 8% on
+real codestreams) is for the later stages.
+
+**What is taken** (`pjaj2k.pas`): a raw codestream (`.j2k`, `.j2c`,
+`.jpc`: SOC and SIZ, `FF 4F FF 51`, first) and a file of boxes that
+starts with the JPEG 2000 signature box (`00 00 00 0C 6A 50 20 20 0D 0A
+87 0A`): JP2, JPX (`.jpx`, `.jpf`), JPM, Motion JPEG 2000, JPH (HTJ2K in
+a JP2-like file). Recognised by its first bytes, not by its extension.
+The box tree is walked: each box's length (LBox, XLBox when it is 1, to
+the end of the box that holds it when it is 0), into the superboxes of
+JP2, JPX and JPM (jp2h, res, uinf, asoc, jpch, jplh, cgrp, comp, drep,
+page, pcol, lobj, objc) and those of the ISO base media file format that
+Motion JPEG 2000 is built on (moov, trak, mdia, minf, stbl, dinf, edts,
+udta, mvex, moof, traf, and mdat, which holds an MJ2's frames as jp2c
+boxes). A codestream is the contents of a jp2c box that start with SOC
+and SIZ; a raw codestream runs from 0 to its EOC, found by walking its
+main header's segments and its tile-parts (Psot), or to the end of the
+file when they do not add up. Bounded: 16 levels of superboxes, 2^20
+boxes, 16,384 codestreams kept (any more stay among the other bytes); a
+box that does not fit where it is ends the walk at its level, and what
+follows it is plain bytes. A file cut short is taken as it is, with the
+codestreams that are whole.
+
+**The stream:**
+
+```
+byte 0          8
+byte 1          flags: none yet, 0
+4 bytes (LE)    K, the codestreams: 0 to 16,384
+K x 13 bytes    each codestream, in the order of the file and apart:
+                where it is in the file (u32), its length (u32, 1 or more),
+                its stream's length (u32), its mode (byte)
+the K streams   of the codestreams that have one, in order
+the rest        the host through the raw bytes' model (CodeRaw): the file
+                without the codestreams that have a stream of their own
+```
+
+Mode 0, raw, is the only one in this stage: the codestream's bytes stay in
+the host where they are, and its stream's length is 0; the table only
+says where it is. So a version 8 stream today is the file through the raw
+model and 6 + 13 x K bytes. The modes of the later stages cut their
+codestream out of the host and give it a stream after the table: stage B
+the packets' headers regenerated (tag trees, progressions, side
+information), stage C the code-blocks' coding passes decoded and coded
+again with PJA's model, each code-block that does not come back the same
+kept as bytes. A reader that does not know a mode, or a flag, refuses the
+stream as `FutureVersion` before it decodes anything, and never reads the
+stream as something else; a reader of a mode it knows checks each
+codestream's place (in order, apart, within the file). Files up to 4 GiB
+- 2 (the places are 32 bits); a larger one is refused as before. Version
+8 is a whole file, as BYTES is: never a part of a version 6 stream, nor
+the repaired file's stream inside a PATCH stream (`BadStream` in both).
+
+**Dispatch** (`pjacodec.Compress`): a file that starts like either kind
+goes to version 8, and nothing else is tried on it (it does not start like
+a JPEG). Verified like every stream: decompressed and compared before it
+is handed out. `Pack` stores the file as it is when the stream is not
+smaller, as for any file. The JPEG and JPEG-LS paths are untouched: the
+same streams byte for byte (the suite's streams and their hash). Only with
+`parts` (the command, `pja_compress`): the zpaq-std plugin's codecs, which
+ask for version 5, refuse a JPEG 2000 file as before, and the 7-Zip
+filter does not look for one (pjafilter.c finds files by `FF D8 FF`; a
+filter record of version 8 is never written, though a reader would decode
+one).
+
+**The command and the library.** `pja a` takes the files (any extension:
+`.jp2`, `.j2k`, `.j2c`, `.jpc`, `.jpx`, `.jpf`, `.jpm`, `.mj2`, `.jph`,
+`.jhc` are what they are usually called) and keeps the extension in the
+`.pja` as for any file, and says `(JPEG 2000: as bytes for now)`; `pja
+list` says `JPEG 2000`; `pja x` of a `.pja` with no extension kept names
+the file by its content (`.j2k`, or `.jp2`, `.jpx`, `.jpm`, `.mj2`, `.jph`
+by the brand of its ftyp box). `pja_compress` and `pja_decompress` take
+them as well.
+
+**Tests.** `tests/j2k`: five files made with opj_compress from the
+repository's own JPEGs (a raw codestream, a JP2, three quality layers,
+lossless 5/3, 12 bits), and two put together from such codestreams by
+`pas/tests/mkj2k_boxes.py` (a JPX with two codestreams, one in an XLBox
+and one in a last box of length 0, an asoc superbox; an MJ2 whose mdat
+holds two frames). `test_j2k` checks the codestreams the walk finds in
+each of them (K, each one's place and length) and in the version 8
+stream's table, and in files of boxes it builds (a jp2c at the top, in an
+XLBox, of length 0, in an mdat, in a box that is not a superbox, of other
+bytes, after a box that does not fit, superboxes 16 deep and 17): a round
+trip alone would not show a lost codestream, since mode 0 keeps every byte
+in the host. The codec's round trip (`test_codec`, the same stream
+with 1 and 4 threads and from every build), its damage test (every bit
+of the first 128 bytes of each stream and every truncation: 19,959
+variants, no exception), `cli.sh` (a and x of each, the extension by the
+content, a file cut in half, one bit flipped, a mode of a later release),
+`test_corruption` (the `.pja` end to end), libpja's test and 7-Zip with
+the plugin (the files in a solid block, left as they are).
+
+**The research corpus** (`/mnt/IA_LAB/agentes/pja/j2k2/corpus`: JPEG 2000
+files of the sample corpus, codestreams extracted from DICOM and PDF
+files, and downloads from OpenJPEG's, jpylyzer's, GDAL's and other test
+sets, the Library of Congress, Helioviewer, Sentinel-2), through `pja a`
+and `pja x`, every file compared:
+
+| set | files | of the family | taken | back byte for byte | size | `.pja` | saved |
+|---|---|---|---|---|---|---|---|
+| sample corpus (`samples/local`) | 18 | 15 | 15 (4 stored) | 15 | 18,138,400 | 18,040,859 | 0.54% |
+| codestreams from DICOM and PDF (`samples/extracted`) | 1,455 | 1,455 | 1,455 (93 stored) | 1,455 | 32,501,920 | 32,469,737 | 0.10% |
+| 400 downloads of 8 MB or less, drawn at random | 400 | 400 | 400 (54 stored) | 400 | 163,104,267 | 157,411,019 | 3.49% |
+| all | 1,873 | 1,870 | 1,870 | **1,870** | 213,744,587 | 207,921,615 | 2.72% |
+
+Every file of the family was taken and came back byte for byte; the three
+others (an `.icns`, a QuickTime image and a `.mov` with JPEG 2000 inside)
+are refused as before. The downloads' 3.49% is the test sets': fuzzing and
+conformance files whose codestreams are mostly padding or repeated
+packets (one of 579 KB comes out at 33 KB, an OpenJPH test stream of
+3.3 MB with 4x4 code-blocks at 2.7 MB). Real files save what a general
+compressor saves on them: the Internet Archive's book pages 0.27%,
+Helioviewer's solar images 1.08%, OSGeo's 0.92%, the sample corpus 0.54%,
+the extracted codestreams 0.10% (many are a few KB, where the `.pja`'s
+37 bytes and its extension weigh more than the model saves; 93 are stored,
+their stream no smaller than they are). The raw bytes'
+model is slow for this: about 0.45 MB/s a thread on this machine (a
+1.3 MB JP2: 3.2 s to compress without verifying, 6.1 s with, 2.9 s to
+extract); the files of a run go to several threads at once, a file's
+bytes to one.
+
+## Pre-1.0: what a later release writes (05/11/2026)
+
+The rule that lets a new kind of file come as a new stream (JPEG 2000
+above) is now tested and has an error code of its own:
+
+- **A codec stream of a later version.** A first byte past the last
+  version this release knows (9 to 255 now) is `FutureVersion`, at the top,
+  inside a PATCH stream (its repaired file's stream), inside a part of a
+  version 6 stream and inside a `.pja` (`Unpack` gives
+  `Codec(FutureVersion)`); so are a version 8 flag or codestream mode this
+  release does not know (1 to 255 now). 0 to 4 are `BadStream`, and so is
+  version 8 where it never goes (a part, a PATCH's repaired file).
+  `pas/tests/test_versions.pas` sweeps the first byte of every stream of
+  the samples (versions 5, 6, 7 and 8, PATCH among them), of the first
+  part of each version 6 stream with parts, and of each PATCH's repaired
+  file over 0 to 255, version 8's flags and modes too, and hand-made ones
+  (that byte alone, with a zero, with 999 bytes after it): no exception.
+- **`PJA_E_VERSION`** (7) in `pja.h`: `pja_decompress` returns it for a
+  `.pja` of a later version or whose codec stream is; the filter's
+  decoders for a filter version past theirs (`PJAF` 03, `PJAB` 02), a
+  record tag from 04 to FE (left for later records) and a file record
+  whose codec stream is of a later version. Until 0.9.0 all of these were
+  `PJA_E_DATA`; other damage still is. Damage cannot be told apart from a
+  newer release in those very bytes: a damaged byte that lands on a codec
+  stream's first byte (and makes it 9 to 255), on version 8's flags or on
+  one of its K mode bytes (making it other than 0), on a filter version or
+  on a record tag (making it 04 to FE) is reported as `PJA_E_VERSION` too
+  (in a `.pja` the stream is decoded before the hash, which covers the
+  original, is checked). Version 8 adds one such byte per codestream. So
+  `PJA_E_VERSION` says "not this release's to read": a newer PJA wrote it,
+  or one of those bytes is damaged. The 7-Zip plugin maps it to
+  `E_NOTIMPL`, which 7-Zip 25.01 reports as "Unsupported Method" for the
+  files of the block, and damaged data to "Data Error", as before
+  (checked on archives with the filter's version, a record tag and a
+  codec stream's version changed, and with a byte of a stream flipped).
+
+## JPEG 2000, stage B: each codestream taken apart and put back together (05/11/2026)
+
+Stage B rebuilds a JPEG 2000 Part 1 codestream byte for byte from its
+headers, some side information and the decisions of its code-blocks. PJA
+parses and decodes the codestream itself; the research prototype
+(`rb.c`) read logs from an instrumented OpenJPEG instead. Stage C (below)
+codes the result with a model as stream version 8's mode 1; there the blob
+is version 2, without the `dec` stream and with a slice table after the
+streams, and it is fixed with mode 1. The blob of version 1 described here
+is only the test's (`test_j2kcs`).
+
+**Where.** `pas/pjaj2kcs.pas` (Pascal, `$R+ $Q+`) parses the main header
+and the tile-part headers. It builds tiles, resolutions, bands, precincts
+and code-blocks, walks the five progressions and the POCs, decodes and
+writes packet headers (tag trees, inclusion, zero bit-planes, passes,
+Lblock, lengths) and holds the rules. `pas/pjaj2kt1.c` (C in the
+`pjav7c.c` style: no memory taken, no library called, every buffer's size
+passed and checked) holds tier-1:
+- the coding passes decoded from a code-block's segments, with the MQ and
+  raw (BYPASS) decoders and every code-block style (BYPASS, RESET,
+  RESTART, CAUSAL, ERTERM, SEGMARK);
+- the same passes replayed from the decisions' bits alone, which gives
+  each decision its context back (compiled twice, once for each mode);
+- the MQ encoder with both terminations, FLUSH and ERTERM;
+- the lengths those terminations would give at each pass end;
+- the prefix checks;
+- BYPASS packing.
+
+Each decision is one byte, `ctx << 1 | bit`: contexts 0-8 zero coding,
+9-13 sign, 14-16 refinement, 17 run length, 18 uniform, 19 a raw bit. The
+bit is the one the coder codes; for a sign, that is before the prediction's
+xor. The decoder follows OpenJPEG 2's conventions: past a segment's end
+its bytes are FF, and an FF followed by a byte above 8F ends the data. It
+was checked decision by decision against an instrumented OpenJPEG. HL
+(x0b = 1) takes the vertical neighbours first in table D.1. OpenJPEG's
+table swaps at band 2, but in its transposed flag layout, so it agrees.
+
+**The blob.** A version byte (1), the lengths of ten streams as
+varints, then the streams:
+
+| stream | what |
+|---|---|
+| `hdr` | the main header's and the tile-parts' marker segments as they are, except a TLM or a PLT that follows from the rest (kept as its Z, its style and its count); per tile-part Isot, TPsot, TNsot and Psot (its real length, 0, or the number when the codestream is cut short); what follows the last tile-part |
+| `layout` | per tile its packets; per tile-part how many are in it and the bytes after them that are not a packet (padding, a cut, DICOM fragment headers) |
+| `t2` | per packet, empty or not, SOP, EPH, Nsop against the count; per code-block of a packet, whether it is in, and its new passes against those left (3 Mb - 2 by the QCD) |
+| `zbp` | zero bit-planes on first inclusion, against the band's last |
+| `tree` | the tag-tree nodes whose value the decoder learnt differently from the canonical one (a node is the least of its leaves, a leaf the layer of first inclusion or the zero bit-planes, never included: no value) |
+| `lblock` | per inclusion, Lblock over the least the lengths need |
+| `t1rule` | per code-block whether it is kept as bytes; per segment how it ends; per layer boundary inside a segment its rule |
+| `t1x` | explicit data: kept bytes, literal tails, explicit lengths |
+| `hdrx` | per packet, whether its header is the canonical one, and if not, its bytes |
+| `dec` | the decisions, a bit each, in the order tile, component, resolution, band, code-block (raster in the band) |
+
+How a segment ends (MQ):
+- empty;
+- FLUSH;
+- ERTERM;
+- the shortest valid prefix of FLUSH's bytes, or of ERTERM's: the length
+  goes down a byte at a time, at most 32, while the shorter prefix still
+  decodes every decision with FF after it;
+- a literal tail: the bytes committed when the last decision is coded,
+  then how far the bits go along with FLUSH's or ERTERM's, the next bit
+  the other way, then the rest as they are;
+- raw bytes.
+
+A BYPASS segment is its bits with a 0101.., 0 or 1 padding, or raw
+bytes. Where a layer cuts a segment:
+- OpenJPEG's rule, the bytes committed + 3 with a last FF dropped (for a
+  BYPASS segment, the bytes that hold its bits, at most the segment's: a
+  damaged codestream's raw decoder can go on past its data);
+- Kakadu's, the shortest prefix within K - 3 to K + 8 that decodes the
+  passes so far;
+- what the decoder has read after those passes: its byte pointer + 1,
+  and one more when its bit counter has at most one bit left. Found here,
+  in Adobe's Photoshop plugin and in other LuraTech-like files;
+- the length against OpenJPEG's.
+
+The analysis tries the cheap rules first, and the rebuild works out only
+the one it is told.
+
+**Refused**: the codestream stays in mode 0, and the reason is counted.
+- HTJ2K: the CAP's Part 15 bit, or code-block style 0x40;
+- Part 2's decomposition styles (DFS, ADS) and coding styles;
+- a header that does not parse;
+- what passes the limits: 65,535 tiles, 16,384 components, 2^21
+  code-blocks and 2^22 precincts a tile, 2^26 progression steps, 2^25
+  code-block entries a tile, and more entries in the codestream (a slice
+  of it, stage C) than its side information may hold (`J2kSideBound`,
+  stage C: each entry takes a byte of it at least).
+
+Not refused:
+- a packet that does not fit its tile-part (the rest of that tile-part
+  is kept as it is);
+- a code-block of more than 120 passes (kept as bytes);
+- PPM and PPT: read in the order of Zppm/Zppt and kept as they are.
+
+A code-block one of whose segments ends as raw bytes (rule raw, or a
+BYPASS segment's raw bytes) is kept as bytes whole: its decisions would
+be paid for a second time (stage C).
+
+The work grows with the codestream's bytes: each tile's tile-parts come
+from a list made once (it was a pass over all the tile-parts for each
+tile: 65,535 tiles of 4 tile-parts, 3.6 MB, took 274 s in `pja a`), and
+the lists of marker segments and tile-parts grow by doubling.
+
+`J2kAnalyze` rebuilds the blob before it says yes, and anything that does
+not come back is refused as `verify` (that never happened on the corpus).
+`J2kRebuild` checks every number it reads against what it has built. A
+damaged blob gives a refusal or other bytes, never an exception. In
+fuzzing, damaged blobs came back as a codestream 9% to 23% of the time:
+there is no hash in the blob, and stage C's stream has one.
+
+**Two things the parser had to learn.**
+- Conformance file g3_colr has its PPM marker segments in decreasing
+  Zppm. The data goes in the order of the index, not of the file.
+- p0_02 has an FF30 in its main header. FF30 to FF3F are markers with no
+  segment, which a decoder skips.
+
+**Tests.** `pas/tests/test_j2kcs.pas`:
+- analyses each codestream of the files given;
+- rebuilds it from a copy of the blob, after the analysis is gone, and
+  compares;
+- with `-fuzz N`, damages copies of each codestream (bits flipped
+  anywhere or in the first 512 bytes, bytes set to FF/00, cut short) and
+  of each blob;
+- prints a digest of all the blobs, the same on every platform (x86-64
+  and i386 gave the same digest on tests/j2k and on the 30 rebuild
+  files).
+
+`tests/j2k` gets five codestreams that cover what the others lack
+(tests/README.md): every code-block style, BYPASS cut by layers,
+RPCL with precincts and SOP/EPH, PCRL with tiles and tile-parts and
+PLT/TLM, and CPRL with a tile POC. `run_codec_tests.sh` and
+`.github/test.sh` run it. The streams' hash is unchanged (3387e58d…).
+
+**Results** (05/11/2026). "Side" means the side information, without
+the decisions:
+
+| set | codestreams | rebuilt byte for byte | refused | side, xz -9e | decisions per byte |
+|---|---|---|---|---|---|
+| tests/j2k | 14 | 14 | 0 | 2,884 B of 29,728 | 7.0 |
+| 30 rebuild files (7 encoder families, 26.1 MB) | 30 | 30 | 0 | 128,268 B, 0.49% | 12.8 |
+| gap1 real-world (113, 150.1 MB) | 113 | 113 | 0 | 415,620 B, 0.28% | 10.8 |
+| sample corpus, local and extracted from DICOM/PDF (1,669) | 1,669 | 1,663 | 6: 2 HTJ2K, 2 tiles, 1 Part 2, 1 cut header | | |
+| downloads (705 codestreams in 515 files) | 705 | 552 | 153: 87 HTJ2K, the rest broken or fuzz files | | |
+
+No codestream failed, nothing crashed and nothing timed out, here or
+under fuzzing:
+- 5,640 damaged codestreams and 4,400 damaged blobs from the downloads;
+- 2,094 and 1,602 more from the conformance, jpylyzer, rebuild and
+  tests sets;
+- 2,700 and 2,700 from tests/j2k.
+
+On gap1:
+- 0 header exceptions, 65 tree overrides;
+- tails 4.5 bits each on 61,147 segments;
+- segments: 180k FLUSH, 307k ERTERM, 12k shortest prefix, 61k tails;
+- layer boundaries: 8,308 OpenJPEG, 22,933 shortest prefix, 744 decoder
+  reach, 2 explicit.
+
+The extracted DICOM codestreams whose fragments were not joined keep the
+fragment headers and everything after them as layout bytes.
+
+**Speed** (one thread, this machine, decode plus rebuild): the analysis
+with its check runs at 0.65 to 1.0 MB/s of codestream, the rebuild alone
+at 1.6 to 2.8 MB/s. Tier-1 takes about 75% of the time; the replay is
+dearer than the decode, because it reads its decisions bit by bit.
+
+## JPEG 2000, stage C: the decisions through a model, mode 1 (05/11/2026)
+
+Stage C gives stream version 8 its second codestream mode. A codestream
+is taken apart as stage B does (`pjaj2kcs.pas`), its side information
+goes through the raw bytes' model, and its code-blocks' decisions through
+a context-mixing model in C (`pas/pjaj2kmc.c`). The stream is decoded
+and compared before it is kept; it is kept when it is smaller than the
+codestream, and the codestream goes in mode 0 otherwise. Mode 1 is fixed
+from 0.9.5 on (doc/STABILITY.md).
+
+**Mode 1's stream** (`pas/pjaj2km.pas`), in the version 8 stream's place
+for the codestream, whose bytes are cut out of the host:
+
+```
+byte 0          layout: 0 (another value: a later release's, FutureVersion)
+4 bytes (LE)    a check: the first 4 bytes of the codestream's BLAKE3
+4 bytes (LE)    S, the slices: 1 to 64
+S x 4 bytes     each slice's decisions' length
+4 bytes (LE)    L, the side information's length
+L bytes         the side information through the raw bytes' model (CodeRaw)
+the S slices    their decisions, each its own arithmetic stream
+```
+
+The side information is stage B's blob as version 2: the version byte
+(2), the ten lengths (`dec`'s is 0), the nine streams, then the slice
+table: S, and for each slice after the first its first tile (its place
+among the tiles that have tile-parts), its tables' size (hb, 10 to 20:
+2^hb counters at most a table) and where each of streams 1 to 8 (layout
+to hdrx) starts; the first slice's are 0. It is at most
+`J2kSideBound(n)` = n + n / 4 + 65,536 bytes for a codestream of n bytes:
+the encoder keeps a codestream whose would be more in mode 0, and the
+decoder refuses a stream whose side information says it is longer as
+soon as it reads that length, before decoding it. A small damaged or
+crafted stream then costs at most about what mode 0 costs for a
+codestream of that length (the raw bytes' model, about 1.2 MB/s); with
+the bound at 4n + 65,536, a 4 KB .pja took 14 minutes and 1.3 GiB to be
+refused. Measured (stage C's runs): the side information is at most
+1.00 times the codestream on the codestreams of 64 KiB or more, and at
+most 20 KB more than the codestream below that (a 2,050-byte codestream,
+22,325 bytes of side information). A 32-bit program for which the bound
+passes its addresses gives `TooLarge`. A decoder checks every number
+against what it has built, the slices' streams to the byte where the
+next slice starts, and the check against the codestream it rebuilt: a
+damaged stream is `BadStream`, never another codestream.
+
+**Slices.** The tiles go in S slices of consecutive tiles, one per 4 MiB
+of codestream, at most one a tile and 64; a slice has its own model and
+arithmetic stream, so that slices are coded and decoded on several
+threads (one TJ2k per slice, `RunSlices`), and the stream is the same
+for any number of threads. A codestream of one tile is one slice. Cutting
+the Sentinel-2 bands (121 tiles, 46 MB) in 10 slices costs nothing: 0.05%
+smaller than one slice, the model adapting to each part.
+
+**Layout 1, kept for files of many codestreams.** Each codestream starts
+with a model that knows nothing and has its own side information. On an
+MJ2 of 200 frames (Speedway.mj2, 3.0 MB) mode 1 saves 5.97%, of which the
+side information costs 2.26% (about 343 bytes a frame, mostly headers
+repeated); the decisions coded with the model kept from the frame before
+(the coder started again, the tables kept; measured with a harness on
+the `-dumpcb` dumps) come out 174 KB smaller, 5.8% of the codestream.
+That would be layout 1, a codestream coded on from the previous one of
+the file; it is left to a later release. Until one defines it, a layout
+other than 0 is `FutureVersion`, and layout 0's streams do not change.
+
+**The decisions.** `pjaj2kmc.c` walks a code-block's coding passes as
+`pjaj2kt1.c` does (encoding, it takes the decisions the analysis decoded
+and checks each one's context; decoding, it writes them for the rebuild,
+which codes them again with the MQ coder) and codes each decision as what
+it means for the coefficient, an event of one of five kinds:
+- significance in a significance propagation pass, and in a cleanup pass;
+- a sign (the coefficient's, not the MQ coder's bit: the sign
+  prediction's xor is put back);
+- a magnitude refinement bit;
+- a run: in a cleanup pass's run mode, whether any of the column's four
+  coefficients becomes significant (one event in place of the run
+  decision); when one does, the significance of the rows up to it (rows
+  0 to 2, the last implied), in place of the two uniform decisions.
+  Coding the four rows one by one instead cost 2 to 4 events a run and
+  was slower and 0.05% larger;
+- SEGMARK's four decisions, by their place.
+BYPASS's raw decisions are events of the same kinds. The model knows the
+coefficients' values so far: in the code-block, each one's value as the
+decoder reconstructs it (1.5 x 2^B when it becomes significant at plane B,
+the midpoint after each refinement); around it, the code-blocks already
+coded of the band; the band one resolution coarser of the same
+orientation (the parent; the LL band for the first resolution) and the
+first two components' band of the same resolution and orientation, at
+the position scaled by the bands' sizes. Those come from the maps: one
+byte a coefficient, floor(2 log2 |v|) + 1 and the sign, kept for the
+tile's components 0 and 1 and for the component being coded. Plane B
+counts from the band's Mb: the code-block's first pass is at Mb minus its
+zero bit-planes.
+
+The features (each clamped):
+- the neighbours' magnitude, 2 (left, right, up, down) + the diagonals,
+  as 2 log2 against the plane (20 values), the ones two away (14), how
+  many of the eight are significant;
+- the parent's, 2 x itself + its four neighbours, against the plane and
+  the bands' Mb (18), and its sign; the other components' (18) and sign;
+- the depth (Mb - B), the orientation and the decomposition level, the
+  component (0 to 3), the standard context (the MQ one);
+- for a sign, the signs of the six neighbours left, up, right, down, up
+  left and up right; for a refinement, the planes since significance, the
+  coefficient's next three bits and its magnitude against its neighbours';
+- for a run, the magnitude in the 5 x 8 window around the column, the
+  parent's and the other components' largest over the four rows, how many
+  runs before it in the stripe came to nothing (8 buckets), and whether
+  the column is at the code-block's edge.
+
+Eight contexts mix these by kind (`event`, `event_run`); a context whose
+values fit 2^hb counters is a table indexed directly, a larger one is
+hashed (one multiplication, the top hb bits) into 2^hb. Each context has
+two counters: one whose rate slows to 1/256.5 (pjaarith's), and one at
+1/8. The 16 stretched probabilities go to three sets of weights, chosen
+by kind, neighbours and depth (A), kind, standard context and parent (B),
+and kind, orientation and level, component (C); the three dot products
+are averaged; then three adaptive probability maps of 33 bins (by kind
+and neighbours, by kind, parent and other component, by kind, standard
+context and depth), and the final probability is (mixer + the three
+maps) / 4, coded by pjaarith's binary arithmetic coder (the same
+arithmetic as version 7's, carried out in C). Integer arithmetic only;
+the stretch and squash tables are constants (`pas/pjaj2km_tab.h`, made by
+`pas/pjaj2km_tab.py`); the C takes no memory, calls no library, and
+divides 64-bit numbers by hand on 32-bit targets (no undefined symbol
+with gcc, clang, gcc -m32, both MinGW-w64 and aarch64 gcc).
+
+What the tuning on gap1 and the 30 rebuild files (the dumps of
+`test_j2kcs -dumpcb`, run through `pjaj2kmc.c` by a harness) kept and
+dropped, in % of the decisions' bytes:
+- the run as one event: -0.05% and a third fewer events;
+- the fast counters: -0.4%; at 1/8 rather than 1/16: -0.04%;
+- the second set of weights -0.18%, the third -0.1%; the maps -0.09%,
+  the third map -0.05%;
+- tables 4 times larger (hb from the slice's bytes / 2 rather than / 8):
+  -0.02%; the mixer's rate halved: -0.01%;
+- dropped: two of the research model's ten contexts (each 0.00% to
+  +0.01% without it), the mixer's constant input (+0.02%, but 16 inputs
+  in place of 17), a third counter at 1/64 (-0.04% for 18% more time), a
+  learned second layer over the three sets (-0.01%).
+
+**Memory, the worst case.** Per worker (a thread coding a slice): the
+model, 8 tables of at most 2^20 counters of 6 bytes (48 MiB) and 0.7 MiB
+of weights and maps; the tile's maps, at most `KM_MAPCAP` = 128 MiB (a
+tile whose components 0 and 1 and largest other component need more is
+coded without maps: no parent, no other component, no code-block around);
+a code-block's arrays (at most 4,096 coefficients, 25 KiB). Plus the
+codestream, its blob and its streams, as stage B. So at most about
+180 MiB a thread; a 120 MP single-component tile (Sentinel-2's 10,980 x
+10,980) still fits its maps.
+
+**Integration** (`pjacodec`). `CompressJ2k` tries mode 1 on each
+codestream (`J2kMode1Enc`, which decodes and compares) and keeps it when
+its stream is smaller than the codestream; the host is the file without
+those codestreams. The whole stream is checked again, the mode 1
+codestreams taken as known. `ReadJ2k` decodes the host and puts each
+codestream back. The hooks are set by `pjaj2km`, which the command, libpja
+and the tests use; a program without it (the zpaq-std plugin) writes mode
+0 only, and reads mode 1 as `FutureVersion`, as a release before 0.9.5
+reads any mode. `pja a` says `(JPEG 2000)`, or `(JPEG 2000: as bytes)`
+when no codestream was modelled.
+
+**Tests.** `test_j2kcs -mode1` codes each codestream in mode 1, decodes it
+and compares, and prints a digest of the streams; `run_codec_tests.sh`
+runs it on `tests/j2k`, again with slices forced to 1,500 bytes
+(`PJA_J2K_SLICE`, read only by the tests' programs through
+`J2kTestSlicesFromEnv`: the command and libpja never read it, and
+`cli.sh` checks that it does not change what `pja a` writes) on 1 and 4
+threads (the same digest),
+and damages the version 8 streams of `tests/j2k` both ways
+(`test_codec_corrupt`: every bit of the first 128 bytes and every
+truncation, no exception). `test_j2kcs -mode1` also decodes its first
+stream for lengths it is not, up to 5 GB (an error, never the codestream
+nor an exception: on 32-bit, 4 x len + 65,536 used to fail a range check
+past 512 MiB). `pas/tests/mkj2k_limits.py` makes two codestreams that ask
+much work for their bytes: 65,535 tiles of 2 tile-parts (taken) and 111
+bytes declaring 2 million code-blocks in 15 layers (refused at the
+entries' bound, in under 2 s where it took 30 s and 1.5 GiB);
+`run_codec_tests.sh` runs both and fails past 90 s. `tests/j2k` is in
+the builds' comparison (reference, fast, fast without asm, 4 threads,
+and in slices).
+`test_versions` sweeps the mode byte (2 to 255: `FutureVersion`), mode 1's
+layout byte (1 to 255) and reads mode 1 without the hooks
+(`FutureVersion`). `cli.sh`: a JP2 modelled, and a mode of a later
+release. `.github/test.sh` adds a second line to `hash.txt`, the SHA-256
+of the version 8 streams of `tests/j2k` (whole, and in slices on 4
+threads), so the first line, the JPEG and JPEG-LS streams', is unchanged
+(3387e58d…); the CI's last job compares the files. On x86-64 (clang)
+and i386 (gcc -m32) here, `hash.txt` is the same, its second line
+`j2k da21961d…`, and so are the mode 1 streams' digest (FC23950B095EA60B)
+and stage B's blobs' (A8FBC05E4A8B3D47). Both suites
+(`run_codec_tests.sh`, `run_tests.sh`) pass.
+
+**Results** (06/11/2026; "saves" is net, side information and check
+included, and counts each codestream as `CompressJ2k` keeps it: its mode
+1 stream, or the codestream in mode 0 when that is not smaller):
+
+| set | codestreams | in mode 1, back byte for byte | bytes | saves | of which side information |
+|---|---|---|---|---|---|
+| gap1 real-world (7 sources) | 113 | 113 | 150,122,046 | **7.77%** | 0.30% |
+| gap1, tuned on (2 of 3 by name) | 76 | 76 | 118,090,768 | 7.12% | 0.22% |
+| gap1, held out (every third) | 37 | 37 | 32,031,278 | 10.18% | 0.59% |
+| 30 rebuild files (7 encoder families) | 30 | 30 | 26,058,518 | 10.33% | 0.50% |
+| 30 rebuild files, held out | 10 | 10 | 13,432,971 | 9.41% | 0.24% |
+| sample corpus, local and from DICOM/PDF | 1,671 | 1,665 (6 refused) | 49,950,421 | 8.83% | 14.9% |
+| downloads (705 codestreams, 2,051 files) | 705 | 552 (153 refused, as stage B) | 246,703,261 | 8.76% | 2.29% |
+| tests/j2k | 14 | 14 | 29,728 | 15.28% | 13.6% |
+
+The sample corpus has two more codestreams than first counted (two
+files whose names have spaces, which the first runs' harness split).
+Keeping a code-block whose segment ends as raw bytes as bytes whole
+(stage B) changed nothing on gap1, the rebuild files and `tests/j2k`
+(no such segment: the same streams); on the sample corpus and the
+downloads it made 32 codestreams' mode 1 streams smaller and one 16
+bytes larger (p1_05.j2k), and 19 of those codestreams now go in mode 1
+where they stayed in mode 0: kodak_2layers_lrcp.j2c 3,508,838 bytes to
+3,240,277 (the codestream: 3,363,991), US1_J2KR from DICOM 255,004 to
+148,076 (152,291), and 7 more DICOM files; issue432.jp2 went from 163,329
+to 26,092 (22,955: still mode 0). The two sets went from 8.79% and 8.65%
+to 8.83% and 8.76% (from 7.59% and 8.38% counting mode 1 alone).
+
+The research's ideal for gap1 was 7.48%; the held-out parts were never
+seen by the tuning (the split is by the files' names, so the large
+Sentinel-2 bands, 62% of gap1's bytes, fell in the tuned part: the parts
+weigh differently, not better). gap1 by source:
+
+| source | codestreams | bytes | saves |
+|---|---|---|---|
+| Internet Archive book pages (Kakadu 5.1 to 7.9, LuraTech) | 44 | 15,503,437 | 13.29% |
+| Library of Congress (Aware, Kakadu, one unknown) | 3 | 24,834,867 | 9.39% |
+| OSGeo (Kakadu) | 6 | 321,779 | 9.77% |
+| Internet Archive PDFs' images | 26 | 951,809 | 7.95% |
+| Helioviewer (Kakadu 6.4, 8 layers) | 10 | 7,416,666 | 6.92% |
+| Sentinel-2 (Kakadu) | 7 | 93,728,590 | 6.69% |
+| DICOM (Kakadu, OpenJPEG, JasPer) | 17 | 7,364,898 | 5.16% |
+
+The sample corpus's codestreams from DICOM files keep their fragments'
+headers as layout bytes (stage B), which is most of their side
+information. Nothing failed, crashed or ran out of time in any set; the
+codestreams stage B refuses (HTJ2K, Part 2 styles, broken headers) stay in
+mode 0. Damaged streams (`test_codec_corrupt`, every bit of the first
+256 bytes and every truncation of four real files' streams: 19,136
+variants) gave `BadStream` or the original, never an exception.
+
+**Speed** (this machine, a Xeon E5-2697A v4, one thread, per MB of
+codestream; encoding includes the analysis, the model and the decoding
+that checks it):
+
+| codestream | encoding | decoding |
+|---|---|---|
+| a book page, 1.3 MB, one tile | 0.11 MB/s | 0.22 MB/s |
+| solar image, 1.1 MB, 8 layers | 0.13 MB/s | 0.26 MB/s |
+| DICOM lossless, 4.3 MB | 0.24 MB/s | 0.51 MB/s |
+| Sentinel-2 B04, 46 MB, 121 tiles (10 slices) | 0.21 MB/s | 0.47 MB/s |
+| the same on 8 threads | 0.95 MB/s | 1.98 MB/s |
+
+The model alone codes 0.33 to 0.6 MB/s (as the research's C path,
+0.5 to 0.6); it costs about 2,000 instructions an event, spread over its
+8 table lookups, the three dot products of 16 and their updates, the maps
+and the counters. Slices give threads only to codestreams of 8 MB or
+more with several tiles; a file's codestreams go one after the other.
+
+**Open.** The side information goes through the generic raw bytes' model
+(0.30% of gap1, 0.50% of the rebuild files, where xz -9e on each stream
+gave 0.28% and 0.49%): a model of its streams (zero bit-planes against the
+code-block above, the rules against the last ones) is a later mode 1
+layout. Speed: SSE4.1 or AVX2 copies of the mixer (10% measured) and
+codestreams of a file in parallel. A single-tile codestream is one slice,
+one thread.
