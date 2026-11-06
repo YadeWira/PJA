@@ -470,6 +470,8 @@ end;
 
 var
   nextJob, nextPrint: LongInt;
+  { the jobs in the order the workers take them }
+  order: array of Integer;
   printLock: TRTLCriticalSection;
 
 procedure RunJob(k: Integer);
@@ -512,8 +514,34 @@ begin
   repeat
     k := InterlockedIncrement(nextJob) - 1;
     if k >= Length(jobs) then Break;
-    RunJob(k);
+    RunJob(order[k]);
   until False;
+end;
+
+{ With several workers the largest files go first (by the size of the
+  input: the .jpg for a, the .pja for x and l), so that no big file is left
+  for the end while the other threads wait: on 30 photos of sizes 10x apart,
+  in name order, -th 8 took up to a fifth longer. A file that cannot be
+  read counts as 0 and goes last. The lines still come out in the order of
+  the inputs (nextPrint), and with one worker nothing changes, so x's
+  outputs are taken in the input order there, as before. }
+procedure ScheduleJobs(workers: Integer);
+var i, j, t: Integer; size: array of Int64; sr: TSearchRec;
+begin
+  order := nil; size := nil;
+  SetLength(order, Length(jobs)); SetLength(size, Length(jobs));
+  for i := 0 to High(jobs) do begin
+    order[i] := i; size[i] := 0;
+    if (workers > 1) and (FindFirst(jobs[i].name, faAnyFile, sr) = 0) then begin
+      size[i] := sr.Size; FindClose(sr);
+    end;
+  end;
+  { stable insertion sort, largest first: the same order every run }
+  for i := 1 to High(order) do begin
+    t := order[i]; j := i - 1;
+    while (j >= 0) and (size[order[j]] < size[t]) do begin order[j + 1] := order[j]; Dec(j); end;
+    order[j + 1] := t;
+  end;
 end;
 
 type
@@ -564,6 +592,7 @@ begin
   if workers > inputs.Count then workers := inputs.Count;
   bandThreads := threads div workers;
   nextJob := 0; nextPrint := 0;
+  ScheduleJobs(workers);
   InitCriticalSection(printLock);
   pool := nil;
   SetLength(pool, workers - 1);

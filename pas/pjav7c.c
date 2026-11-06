@@ -408,3 +408,120 @@ int pjav7_component_e(aenc_t *e, v7m_t *m, int16_t *coef, intptr_t bw, intptr_t 
   if (e->n > 0) { T.put(e->ctx, e->buf, e->n); e->n = 0; }
   return ok;
 }
+
+/* ---------- the raw-byte model (pjamodel.CodeRawBytes's loop) ---------- */
+/* Orders 0, 1 and 2 and a constant, mixed by a TMixer of 4 inputs and 8
+   selectors (the bit's position in the byte): the version-5 model of the
+   bytes PJA keeps as they are (APP segments, the tail). The same arithmetic
+   as pjamodel's TMixer and TAdaptiveBit, step by step: the dot product in
+   32 bits, TruncShr(dot, 16), the squash clamped to -2048..2047, pr shl 4,
+   err = ((bit shl 12) - pr) * MIX_LR, each weight plus
+   TruncShr(st * err, 14) clamped to +-MAX_WEIGHT. The lanes 4..7 of the
+   Pascal mixer hold zeros and never change, so they are left out. The
+   mixer starts fresh on every call, as CodeRawBytes's does; the counters
+   are the caller's, and the ones this call touched are put back as new at
+   the end (pjamodel.RawReset). */
+#define RAW_RESET_WHOLE 65536   /* pjamodel's RAW_RESET_WHOLE */
+static inline uint32_t rawhash2(uint32_t c2, uint32_t c1) {
+  return ((c2 << 8 | c1) * 2654435761u) >> (32 - 22 + 8);   /* pjamodel's Hash2, O2_BITS = 22 */
+}
+static inline __attribute__((always_inline)) void raw_loop(int enc, void *coder, abit_t *o0, abit_t *o1,
+                                                           abit_t *o2, uint8_t *raw, intptr_t len) {
+  const int16_t *st = T.st; const uint16_t *sq = T.sq;
+  const int32_t s3 = st[32768 >> 4];
+  int32_t w[8][4];
+  for (int s = 0; s < 8; s++) for (int i = 0; i < 4; i++) w[s][i] = 65536 / 4;
+  uint32_t c1 = 0, c2 = 0;
+  for (intptr_t i = 0; i < len; i++) {
+    uint32_t h = rawhash2(c2, c1), node = 1, byte = enc ? raw[i] : 0;
+    abit_t *q1 = o1 + (c1 << 8), *q2 = o2 + (h << 8);
+    /* The cache lines of the order-1 and order-2 counters, 16 to a line,
+       asked for ahead (prefetches change no value). Encoding, the next byte
+       is known, and so is its whole path through the tree. Decoding, this
+       byte's: nodes 1..63 are in the first four lines, and the line of
+       nodes 64..127 and of 128..255 is known two bits before (below). */
+    if (enc) {
+      if (i + 1 < len) {
+        uint32_t n2 = (uint32_t)raw[i + 1] | 256;
+        const abit_t *r1 = o1 + (byte << 8), *r2 = o2 + (rawhash2(c1, byte) << 8);
+        __builtin_prefetch(r2 + 1); __builtin_prefetch(r1 + 1);
+        for (int k = 4; k >= 1; k--) {
+          __builtin_prefetch(r2 + ((n2 >> k) & ~15u)); __builtin_prefetch(r1 + ((n2 >> k) & ~15u));
+        }
+      }
+    } else
+      for (int k = 0; k < 64; k += 16) { __builtin_prefetch(q2 + k); __builtin_prefetch(q1 + k); }
+    for (int b = 7; b >= 0; b--) {
+      abit_t *a = o0 + node, *bb = q1 + node, *c = q2 + node;
+      int32_t *wv = w[7 - b];
+      int32_t s0 = st[a->p >> 4], s1 = st[bb->p >> 4], s2 = st[c->p >> 4];
+      int32_t dot = (int32_t)((uint32_t)(s0 * wv[0]) + (uint32_t)(s1 * wv[1]) + (uint32_t)(s2 * wv[2]) +
+                              (uint32_t)(s3 * wv[3]));
+      int32_t pr = sq[clampi(truncshr(dot, 16), -2048, 2047) + 2048];
+      /* pjaarith's Encode or Decode at pr shl 4 (in [16, 65520]: no clamp) */
+      int bit;
+      if (enc) bit = ebit((aenc_t *)coder, (uint32_t)pr << 4, (byte >> b) & 1);
+      else bit = dbit((adec_t *)coder, (uint32_t)pr << 4);
+      int32_t err = ((bit << 12) - pr) * MIX_LR;
+      wv[0] = clampi(wv[0] + truncshr(s0 * err, 14), -MAX_W, MAX_W);
+      wv[1] = clampi(wv[1] + truncshr(s1 * err, 14), -MAX_W, MAX_W);
+      wv[2] = clampi(wv[2] + truncshr(s2 * err, 14), -MAX_W, MAX_W);
+      wv[3] = clampi(wv[3] + truncshr(s3 * err, 14), -MAX_W, MAX_W);
+      learn(a, bit); learn(bb, bit); learn(c, bit);
+      node = node * 2 + (uint32_t)bit;
+      if (!enc && node >= 4 && node < 16) { __builtin_prefetch(q2 + (node << 4)); __builtin_prefetch(q1 + (node << 4)); }
+    }
+    if (!enc) raw[i] = (uint8_t)(node - 256);
+    c2 = c1; c1 = node - 256;
+  }
+  /* the counters back as new (pjamodel.RawReset's walk). From
+     RAW_RESET_WHOLE bytes on the caller refills the tables whole instead,
+     which is cheaper than this walk's random stores into the 16 MB order-2
+     table, and leaves them in the same state. */
+  c1 = c2 = 0;
+  if (len >= RAW_RESET_WHOLE) return;
+  for (intptr_t i = 0; i < len; i++) {
+    uint32_t h = rawhash2(c2, c1), node = 1, byte = raw[i];
+    abit_t *q1 = o1 + (c1 << 8), *q2 = o2 + (h << 8);
+    for (int b = 7; b >= 0; b--) {
+      o0[node].p = 32768; o0[node].n = 0; o0[node].pad = 0;
+      q1[node].p = 32768; q1[node].n = 0; q1[node].pad = 0;
+      q2[node].p = 32768; q2[node].n = 0; q2[node].pad = 0;
+      node = node * 2 + ((byte >> b) & 1);
+    }
+    c2 = c1; c1 = byte;
+  }
+}
+/* compiled again for SSE4.1 where pjamodel's cpuid allows (the four
+   weights' products in pmulld, the same 32-bit arithmetic) */
+static void raw_d(adec_t *dc, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+  raw_loop(0, dc, o0, o1, o2, raw, len);
+}
+static void raw_e(aenc_t *e, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+  raw_loop(1, e, o0, o1, o2, raw, len);
+}
+#ifdef V7_SSE41
+__attribute__((target("sse4.1")))
+static void raw_d_sse41(adec_t *dc, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+  raw_loop(0, dc, o0, o1, o2, raw, len);
+}
+__attribute__((target("sse4.1")))
+static void raw_e_sse41(aenc_t *e, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+  raw_loop(1, e, o0, o1, o2, raw, len);
+}
+#endif
+/* len bytes of raw through the model, decoding (into raw) or encoding: dc
+   is pjaarith's TArithDecoder, e an aenc_t as pjav7_component_e takes */
+void pjav7_raw_d(adec_t *dc, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+#ifdef V7_SSE41
+  if (T.sse41) { raw_d_sse41(dc, o0, o1, o2, raw, len); return; }
+#endif
+  raw_d(dc, o0, o1, o2, raw, len);
+}
+void pjav7_raw_e(aenc_t *e, abit_t *o0, abit_t *o1, abit_t *o2, uint8_t *raw, intptr_t len) {
+#ifdef V7_SSE41
+  if (T.sse41) raw_e_sse41(e, o0, o1, o2, raw, len); else
+#endif
+  raw_e(e, o0, o1, o2, raw, len);
+  if (e->n > 0) { T.put(e->ctx, e->buf, e->n); e->n = 0; }
+}

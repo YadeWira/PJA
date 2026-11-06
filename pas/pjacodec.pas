@@ -347,6 +347,85 @@ begin
   Result := Build(head, jobs, stream);
 end;
 
+{ The header stream version 5 writes for this JPEG. The bands of a host
+  and of the file it came from are the same: the host's stream is the
+  file's with this instead of the file's own, and comparing the two tells
+  whether the parts pay. j is only read (its scans are copied before
+  CodeScanBits writes them back), so band threads may read it meanwhile. }
+function HeadBytes(const j: TJpeg): TBytes;
+var cd: TCoder; jj: TJpeg;
+begin
+  jj := j;
+  jj.scans := Copy(j.scans);
+  cd.InitEncoder;
+  CodeRaw(cd, jj.raw, MaxInt);
+  CodeScanBits(cd, jj);
+  Result := cd.enc.Finish;
+end;
+
+const
+  { raw bytes from which a header stream is worth a thread of its own: the
+    raw model costs about 350 instructions a bit, a thread and its fresh
+    tables (16 MB) a few milliseconds }
+  HELPER_RAW = 1 shl 16;
+
+type
+  { HeadBytes on another thread, while the caller does something else. The
+    tables libpja gives (GivenTables, a threadvar) go with it, or its header
+    stream would not be the caller's. }
+  THeadThread = class(TThread)
+    j: TJpeg;
+    given, head: TBytes;
+    procedure Execute; override;
+  end;
+
+procedure THeadThread.Execute;
+begin
+  try
+    SetGivenTables(given);
+    head := HeadBytes(j);
+  except
+    head := nil;
+  end;
+  ReleaseThreadModels;
+end;
+
+{ HeadBytes(j) started on a thread of its own; nil (the caller runs it
+  itself) with one thread, little raw, or no thread to be had }
+function StartHead(const j: TJpeg; threads: Integer): THeadThread;
+begin
+  Result := nil;
+  if (threads <= 1) or (Length(j.raw) < HELPER_RAW) then Exit;
+  try
+    Result := THeadThread.Create(True);
+  except
+    Exit(nil);
+  end;
+  Result.FreeOnTerminate := False;
+  Result.j := j;
+  Result.j.scans := Copy(j.scans);
+  Result.given := GetGivenTables;
+  try
+    Result.Start;
+  except
+    Result.Free;
+    Result := nil;
+  end;
+end;
+
+{ What StartHead's thread made (and the thread freed), or HeadBytes(j) here
+  when it had none }
+function FinishHead(var t: THeadThread; const j: TJpeg): TBytes;
+begin
+  if t = nil then Exit(HeadBytes(j));
+  t.WaitFor;
+  Result := t.head;
+  t.Free;
+  t := nil;
+  { a helper that failed (no memory): here, as without it }
+  if Result = nil then Result := HeadBytes(j);
+end;
+
 { ---------- reading a stream ---------- }
 
 type
@@ -407,31 +486,149 @@ begin
   Result := True;
 end;
 
-{ JPEG-LS: the stream with each model, the smaller one kept. Both are
-  exact; which one wins depends on the file (the symbols win on
-  near-lossless, the samples on most lossless photos). }
-function AssembleJls(var jl: TJls; threads: Integer; out stream: TBytes): Boolean;
-var cd: TCoder; head, other: TBytes; jobs: array of TBandJob; nb, b: Integer; model: Integer;
+{ JPEG-LS: one model's header stream: the raw bytes, which model, and the
+  samples model's run lengths. Always on the caller's thread: CodeRaw reads
+  its threadvars (the raw tables, the tables a library host gave). }
+function JlsHead(var jl: TJls; model: Integer): TBytes;
+var cd: TCoder;
 begin
-  stream := nil;
-  for model := 0 to 1 do begin
-    cd.InitEncoder;
-    CodeRaw(cd, jl.raw, MaxInt);
-    cd.Direct(Cardinal(model), 1);
-    if model = 0 then begin
-      CodeJlsRuns(cd, jl, MaxInt);
-      nb := JlsBandCount(jl);
-    end else nb := 1;
-    head := cd.enc.Finish;
-    jobs := nil;
-    SetLength(jobs, nb);
-    for b := 0 to nb - 1 do begin
-      jobs[b] := Default(TBandJob);
-      jobs[b].jl := @jl; jobs[b].symbols := model = 1; jobs[b].band := b; jobs[b].encoding := True;
+  cd.InitEncoder;
+  CodeRaw(cd, jl.raw, MaxInt);
+  cd.Direct(Cardinal(model), 1);
+  if model = 0 then CodeJlsRuns(cd, jl, MaxInt);
+  Result := cd.enc.Finish;
+end;
+
+type
+  TBandJobs = array of TBandJob;
+
+  { One model's bands (RunBands) on a thread of its own, while the caller
+    codes the other model. }
+  TBandsThread = class(TThread)
+    jobs: ^TBandJobs;
+    threads: Integer;
+    procedure Execute; override;
+  end;
+
+procedure TBandsThread.Execute;
+begin
+  try
+    RunBands(jobs^, threads);
+  except
+    { a job that did not run is not ok, and its model is left out }
+  end;
+  ReleaseThreadModels;
+end;
+
+{ A JPEG-LS file's symbol stream checked as it was written: its framing
+  read back with Decompress's own BandRanges, and the samples its reader
+  decoded (into h, from the header stream as Decompress reads it) rebuilt
+  into a file that has to be the input. }
+function JlsLiveChecked(const jpeg, stream, head: TBytes; const enc, rd: TBandJob; const h: THead): Boolean;
+var r: array of TRange; back: TBytes;
+begin
+  Result := False;
+  if not enc.ok or not rd.ok then Exit;
+  if (Length(stream) < STREAM_HEADER + Length(head)) or (stream[0] <> STREAM_VERSION) or (stream[1] <> 0) or
+     (GetU32(stream, 2) <> Cardinal(Length(head))) or
+     ((Length(head) > 0) and not CompareMem(@stream[STREAM_HEADER], @head[0], Length(head))) then Exit;
+  r := nil; SetLength(r, 1);
+  if not BandRanges(stream, STREAM_HEADER + Length(head), 1, r) then Exit;
+  if (r[0].last - r[0].first <> Length(enc.output)) or
+     ((Length(enc.output) > 0) and not CompareMem(@stream[r[0].first], @enc.output[0], Length(enc.output))) then Exit;
+  if not RecomposeJls(h.jl, back).Ok or (Length(back) <> Length(jpeg)) or
+     ((Length(back) > 0) and not CompareMem(@back[0], @jpeg[0], Length(back))) then Exit;
+  Result := True;
+end;
+
+{ JPEG-LS: the stream with each model, the smaller one kept (the samples
+  model on a tie). Both are exact; which one wins depends on the file (the
+  symbols win on near-lossless, the samples on most lossless photos).
+
+  With two threads or more and verify, the symbol stream is decoded while
+  it is written (as CompressLive does a JPEG's bands), into a second copy
+  of the samples built from its header stream as Decompress builds it.
+  `checked`: that check passed and the stream kept is that one, so it need
+  not be decompressed again (the symbols won on every photo measured).
+  The samples model's bands run on a thread of their own next to the
+  symbol stream when a thread is left for them (three or more, or two
+  without verify), else after it. }
+function AssembleJls(var jl: TJls; threads: Integer; out stream: TBytes; const jpeg: TBytes;
+                     verify: Boolean; out checked: Boolean): Boolean;
+var head0, head1, s0, s1: TBytes; jobs0, jobs1: TBandJobs; rd: TBandJob; nb, b, t0: Integer;
+    ok0, ok1, live: Boolean; h: THead; th: TBandsThread; dt: TBandThread;
+begin
+  stream := nil; checked := False;
+  head0 := JlsHead(jl, 0);
+  head1 := JlsHead(jl, 1);
+  nb := JlsBandCount(jl);
+  jobs0 := nil; SetLength(jobs0, nb);
+  for b := 0 to nb - 1 do begin
+    jobs0[b] := Default(TBandJob);
+    jobs0[b].jl := @jl; jobs0[b].band := b; jobs0[b].encoding := True;
+  end;
+  jobs1 := nil; SetLength(jobs1, 1);
+  jobs1[0] := Default(TBandJob);
+  jobs1[0].jl := @jl; jobs1[0].symbols := True; jobs1[0].encoding := True;
+  live := False;
+  rd := Default(TBandJob);
+  h := Default(THead);
+  if threads < 2 then begin
+    RunBands(jobs0, threads);
+    RunBand(jobs1[0]);
+  end else begin
+    { the live check: the symbol stream's reader on a thread of its own,
+      into h (maxRaw: the input's size, as Decompress is given it) }
+    if verify then begin
+      live := DecodeHead(head1, Length(jpeg), h).Ok and h.isLs and h.symbols and (h.nb = 1);
+      if live then begin
+        jobs1[0].live := TLiveStream.Create;
+        rd.jl := @h.jl; rd.symbols := True; rd.encoding := False; rd.live := jobs1[0].live;
+      end;
     end;
+    { the samples model: on the threads the symbol stream leaves, or, with
+      none left (two threads and the check), after it on all of them }
+    t0 := threads - 1;
+    if live then Dec(t0);
+    th := nil;
+    if t0 >= 1 then
+      try
+        th := TBandsThread.Create(True);
+      except
+        th := nil;
+      end;
+    try
+      if th <> nil then begin
+        th.jobs := @jobs0; th.threads := t0; th.FreeOnTerminate := False;
+        th.Start;
+      end;
+      dt := nil;
+      if live then begin
+        dt := NewBandThread(@rd);
+        if dt <> nil then dt.Start;
+      end;
+      RunBand(jobs1[0]);
+      { no thread for the reader: it reads here (a live stream keeps all it
+        is given) }
+      if live and (dt = nil) then RunBand(rd);
+      if dt <> nil then begin dt.WaitFor; dt.Free; end;
+      if th = nil then RunBands(jobs0, threads);
+    finally
+      { waited for in any case, never left on jobs about to be freed }
+      if th <> nil then begin th.WaitFor; th.Free; end;
+    end;
+  end;
+  try
     { a model that cannot code this file leaves the other }
-    if not Assemble(head, jobs, threads, other) then Continue;
-    if (stream = nil) or (Length(other) < Length(stream)) then stream := other;
+    ok0 := Build(head0, jobs0, s0);
+    ok1 := Build(head1, jobs1, s1);
+    if ok0 then stream := s0;
+    if ok1 and ((stream = nil) or (Length(s1) < Length(stream))) then begin
+      stream := s1;
+      checked := live and JlsLiveChecked(jpeg, s1, head1, jobs1[0], rd, h);
+    end;
+  finally
+    if live then jobs1[0].live.Free;
   end;
   Result := stream <> nil;
 end;
@@ -443,19 +640,14 @@ end;
   Decompress's own BandRanges, and the copy is rebuilt into a JPEG that has
   to be the input. The same checks as compressing and then decompressing,
   in about the time of one of them. }
-function CompressLive(const jpeg: TBytes; var j: TJpeg; const head: TBytes; threads: Integer;
+function CompressLive(const jpeg: TBytes; var j: TJpeg; const ownHead: TBytes; threads: Integer;
                       model: TModelKind; out stream: TBytes): Boolean;
 var h: THead; nb, b, i, k, pairs, next, made: Integer; enc, dec: array of TBandJob; r: array of TRange;
-    pool: array of TBandThread; back: TBytes; cr: TCodecResult;
+    pool: array of TBandThread; back, head: TBytes; cr: TCodecResult; all, headOk, first: Boolean;
 begin
   stream := nil;
   Result := False;
-  { maxRaw: the input's own size, as Decompress is given it, never a cap
-    below what CodeRaw took }
-  cr := DecodeHead(head, Length(jpeg), h);
-  if not cr.Ok or h.isLs then Exit;
   nb := BandCount(j);
-  if h.nb <> nb then Exit;
   enc := nil; dec := nil;
   SetLength(enc, nb); SetLength(dec, nb);
   for b := 0 to nb - 1 do begin
@@ -472,6 +664,7 @@ begin
     pairs := threads div 2;
     if pairs < 1 then pairs := 1;
     next := 0;
+    first := True;
     while next < nb do begin
       k := nb - next;
       if k > pairs then k := pairs;
@@ -484,8 +677,32 @@ begin
         if pool[made] = nil then Break;
         Inc(made);
       end;
-      if made = Length(pool) then begin
-        for i := 0 to High(pool) do pool[i].Start;
+      all := made = Length(pool);
+      { the encoders first: they need only j }
+      if all then for i := 0 to k - 1 do pool[2 * i].Start;
+      if first then begin
+        first := False;
+        { meanwhile, here: the header stream, and the readers' headers from
+          it as Decompress gets them (maxRaw: the input's own size, as
+          Decompress is given it, never a cap below what CodeRaw took) }
+        headOk := False;
+        try
+          if Length(ownHead) > 0 then head := ownHead else head := HeadBytes(j);
+          cr := DecodeHead(head, Length(jpeg), h);
+          headOk := cr.Ok and not h.isLs and (h.nb = nb);
+        except
+          headOk := False;
+        end;
+        if not headOk then begin
+          { no reader can start: the encoders running end on their own (a
+            live stream keeps all it is given), and are waited for }
+          if all then for i := 0 to k - 1 do pool[2 * i].WaitFor;
+          for i := 0 to made - 1 do pool[i].Free;
+          Exit;
+        end;
+      end;
+      if all then begin
+        for i := 0 to k - 1 do pool[2 * i + 1].Start;
         for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
       end else begin
         { not every thread was had: none started, those made let go, and
@@ -541,15 +758,15 @@ function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; veri
 
 function CompressOne(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                      model: TModelKind): TCodecResult;
-var j: TJpeg; jl: TJls;
+var j: TJpeg; jl: TJls; checked: Boolean;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
   if IsJls(jpeg) then begin
     Result.jpeg := VerifyJls(jpeg, jl);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
-    if not AssembleJls(jl, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
-    Result := VerifyStream(jpeg, stream, verify, threads);
+    if not AssembleJls(jl, threads, stream, jpeg, verify, checked) then Exit(CodecFail(ceNoRoundTrip));
+    if not checked then Result := VerifyStream(jpeg, stream, verify, threads);
   end else begin
     Result.jpeg := VerifyRoundTrip(jpeg, j);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
@@ -588,21 +805,21 @@ end;
 
 function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
                       model: TModelKind; const ownHead: TBytes): TCodecResult;
-var jl: TJls; cd: TCoder; head: TBytes; jobs: array of TBandJob; nb, b: Integer;
+var jl: TJls; head: TBytes; jobs: array of TBandJob; nb, b: Integer;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
   jobs := nil;
   begin
     { ownHead: another file's header stream with these bands (a host's,
-      whose bands are the file's), verified elsewhere }
-    if Length(ownHead) > 0 then head := ownHead
-    else begin
-      cd.InitEncoder;
-      CodeRaw(cd, j.raw, MaxInt);
-      CodeScanBits(cd, j);
-      head := cd.enc.Finish;
+      whose bands are the file's), verified elsewhere; or this file's own,
+      HeadBytes(j), already coded by CompressAt to weigh the parts }
+    if not j.lossless and verify and (threads >= 2) then begin
+      { the header stream made there, while the first bands' encoders run }
+      if not CompressLive(jpeg, j, ownHead, threads, model, stream) then Exit(CodecFail(ceNoRoundTrip));
+      Exit;
     end;
+    if Length(ownHead) > 0 then head := ownHead else head := HeadBytes(j);
     if j.lossless then begin
       { the samples of a lossless JPEG: JPEG-LS's samples model }
       LosslessView(j, jl);
@@ -613,10 +830,6 @@ begin
         jobs[b].jl := @jl; jobs[b].band := b; jobs[b].encoding := True;
       end;
     end else begin
-      if verify and (threads >= 2) then begin
-        if not CompressLive(jpeg, j, head, threads, model, stream) then Exit(CodecFail(ceNoRoundTrip));
-        Exit;
-      end;
       nb := BandCount(j);
       SetLength(jobs, nb);
       for b := 0 to nb - 1 do begin
@@ -784,20 +997,6 @@ type
     stream: TBytes;
   end;
 
-{ The header stream version 5 writes for this JPEG. The bands of a host
-  and of the file it came from are the same: the host's stream is the
-  file's with this instead of the file's own, and comparing the two tells
-  whether the parts pay. }
-function HeadBytes(const j: TJpeg): TBytes;
-var cd: TCoder; jj: TJpeg;
-begin
-  jj := j;
-  cd.InitEncoder;
-  CodeRaw(cd, jj.raw, MaxInt);
-  CodeScanBits(cd, jj);
-  Result := cd.enc.Finish;
-end;
-
 { The scans with a DRI in force and no restarts, and those whose EOB runs
   hold another number of correction bits than libjpeg's }
 function QuirkScans(const j: TJpeg): TQuirks;
@@ -849,7 +1048,8 @@ end;
 function CompressAt(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
                     model: TModelKind; depth: Integer; huffOnly: Boolean = False): TCodecResult;
 var j, sj, hj: TJpeg; parts: array of TPart; k, len, p, from, nextFF: SizeInt; n, i, c: Integer;
-    sub, ps, host, hs, hostHead: TBytes; ok, fit: Boolean; whole, withParts, without: Int64; quirks: TQuirks;
+    sub, ps, host, hs, hostHead, ownJ: TBytes; ok, fit, needOwn: Boolean; whole, withParts, without: Int64;
+    quirks: TQuirks; helper: THeadThread;
 begin
   stream := nil;
   { huffOnly (the zpaq-std plugin's pjax): Huffman JPEGs and parts of one
@@ -914,47 +1114,65 @@ begin
     end;
     if not ok then Inc(k);
   end;
-  hostHead := nil;
-  if n > 0 then begin
-    { the host }
-    host := nil; SetLength(host, Length(jpeg));
-    p := 0; from := 0;
-    for i := 0 to n - 1 do begin
-      if parts[i].off > from then Move(jpeg[from], host[p], parts[i].off - from);
-      Inc(p, parts[i].off - from);
-      if parts[i].mode and PART_ZEROS <> 0 then begin FillChar(host[p], parts[i].len, 0); Inc(p, parts[i].len); end;
-      from := parts[i].off + parts[i].len;
+  hostHead := nil; ownJ := nil; helper := nil;
+  { the parts pay or not by the file's own header stream against the
+    host's: with the file's raw bytes large and threads to spare, the
+    file's on a thread of its own while the host's is made here }
+  whole := 0;
+  for i := 0 to n - 1 do Inc(whole, parts[i].len);
+  needOwn := (n > 0) and ((whole * 4 < Length(jpeg)) or (Length(jpeg) < 1 shl 20));
+  if needOwn then helper := StartHead(j, threads);
+  try
+    if n > 0 then begin
+      { the host }
+      host := nil; SetLength(host, Length(jpeg));
+      p := 0; from := 0;
+      for i := 0 to n - 1 do begin
+        if parts[i].off > from then Move(jpeg[from], host[p], parts[i].off - from);
+        Inc(p, parts[i].off - from);
+        if parts[i].mode and PART_ZEROS <> 0 then begin FillChar(host[p], parts[i].len, 0); Inc(p, parts[i].len); end;
+        from := parts[i].off + parts[i].len;
+      end;
+      if from < Length(jpeg) then begin Move(jpeg[from], host[p], Length(jpeg) - from); Inc(p, Length(jpeg) - from); end;
+      SetLength(host, p);
+      { a host PJA does not take as the file (a part that was not where it
+        seemed) leaves the file whole }
+      if VerifyRoundTripFrom(host, j, jpeg, hj).Ok and SameQuirks(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
+      else n := 0;
+      hj := Default(TJpeg);
     end;
-    if from < Length(jpeg) then begin Move(jpeg[from], host[p], Length(jpeg) - from); Inc(p, Length(jpeg) - from); end;
-    SetLength(host, p);
-    { a host PJA does not take as the file (a part that was not where it
-      seemed) leaves the file whole }
-    if VerifyRoundTripFrom(host, j, jpeg, hj).Ok and SameQuirks(QuirkScans(hj), quirks) then hostHead := HeadBytes(hj)
-    else n := 0;
-    hj := Default(TJpeg);
-  end;
-  if n > 0 then begin
-    { the bands come after the header stream either way: the parts go only
-      if what comes before is smaller with them. Small parts have to win
-      (two copies of a thumbnail cost the raw bytes' model little, and a
-      small file pays the parts' framing). In a file of 1 MB or more whose
-      parts are a quarter of it (an MPO's images) they always win, and its
-      raw bytes would take long to code only to see it }
-    whole := 0;
-    for i := 0 to n - 1 do Inc(whole, parts[i].len);
-    if (whole * 4 < Length(jpeg)) or (Length(jpeg) < 1 shl 20) then begin
-      withParts := 6 + PART_ENTRY * n + STREAM_HEADER + Length(hostHead);
-      for i := 0 to n - 1 do Inc(withParts, Length(parts[i].stream));
-      without := STREAM_HEADER + Length(HeadBytes(j));
-      if not NoQuirks(quirks) then without := without + 6;
-      if withParts >= without then n := 0;
+    if n > 0 then begin
+      { the bands come after the header stream either way: the parts go only
+        if what comes before is smaller with them. Small parts have to win
+        (two copies of a thumbnail cost the raw bytes' model little, and a
+        small file pays the parts' framing). In a file of 1 MB or more whose
+        parts are a quarter of it (an MPO's images) they always win, and its
+        raw bytes would take long to code only to see it }
+      if needOwn then begin
+        withParts := 6 + PART_ENTRY * n + STREAM_HEADER + Length(hostHead);
+        for i := 0 to n - 1 do Inc(withParts, Length(parts[i].stream));
+        ownJ := FinishHead(helper, j);
+        without := STREAM_HEADER + Length(ownJ);
+        if not NoQuirks(quirks) then without := without + 6;
+        if withParts >= without then n := 0;
+      end;
+    end;
+  finally
+    { a helper not waited for above (no host after all, an exception): its
+      header stream is the file's all the same }
+    if helper <> nil then begin
+      helper.WaitFor;
+      if ownJ = nil then ownJ := helper.head;
+      helper.Free;
     end;
   end;
-  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model));
+  { with no parts, the file's own header stream, when it was made above:
+    the same bytes CompressJpeg would make }
+  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model, ownJ));
   { the host's stream: its header stream and the bands, coded once from the
     file, whose bands they are; the file's own with no parts }
   if n > 0 then Result := CompressJpeg(jpeg, j, hs, False, threads, model, hostHead)
-  else Result := CompressJpeg(jpeg, j, hs, False, threads, model);
+  else Result := CompressJpeg(jpeg, j, hs, False, threads, model, ownJ);
   if not Result.Ok then Exit;
   len := 6 + PART_ENTRY * n + Length(hs);
   for i := 0 to n - 1 do Inc(len, Length(parts[i].stream));
