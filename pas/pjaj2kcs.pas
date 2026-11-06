@@ -190,7 +190,7 @@ function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
 
 implementation
 
-uses pjamodel;
+uses pjamodel, pjathread;
 
 {$L pjaj2kt1.o}
 {$L pjaj2kmc.o}
@@ -2661,7 +2661,7 @@ type
     errors: array of string;      { each slice's, '' when it went through }
     procedure Loop(w: Integer);
   end;
-  TSliceThread = class(TThread)
+  TSliceThread = class(TJoinThread)
     run: TSliceRun; w: Integer;
     procedure Execute; override;
   end;
@@ -2710,7 +2710,7 @@ begin
     end;
     run.Loop(0);
     for i := 1 to m - 1 do
-      if pool[i] <> nil then begin pool[i].WaitFor; pool[i].Free; end;
+      if pool[i] <> nil then begin pool[i].Join; pool[i].Free; end;
     why := '';
     for i := 0 to n - 1 do if (why = '') and (run.errors[i] <> '') then why := run.errors[i];
     { a slice no worker took: one stopped at an error before it }

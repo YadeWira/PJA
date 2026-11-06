@@ -1521,8 +1521,18 @@ end;
 
 function ReadPatch(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer): TCodecResult; forward;
 type TKnown = array of TBytes;
+  TCodecErrors = array of TCodecError;
 function ReadJ2k(const stream: TBytes; out data: TBytes; maxRaw: SizeInt; threads: Integer;
   const known: TKnown): TCodecResult; forward;
+const
+  { a file's codestreams coded (and decoded) side by side when there are
+    several and none is larger than this (Motion JPEG 2000's frames, JPX
+    layers): a codestream's memory each at once }
+  CODESTREAMS_TOGETHER = 4 shl 20;
+{ ReadJ2k's: the codestreams whose stream src[i] is not nil decoded side by
+  side (each its bytes and its error) }
+procedure DecodeTogether(const src: TKnown; const modes: array of Byte; const cs: TJ2kCodestreams;
+  threads: Integer; out outs: TKnown; out errs: TCodecErrors); forward;
 
 function DecompressAt(const stream: TBytes; out jpeg: TBytes; maxRaw: SizeInt; threads: Integer;
                       expected: SizeInt; depth: Integer): TCodecResult;
@@ -1743,8 +1753,8 @@ const
   nil entries, otherwise }
 function ReadJ2k(const stream: TBytes; out data: TBytes; maxRaw: SizeInt; threads: Integer;
   const known: TKnown): TCodecResult;
-var k, i: Integer; p, off, len, slen, prevEnd, sp, cut, hp, op, gap: Int64; cd: TCoder; host, cs: TBytes;
-  e: TCodecError; mode: array of Byte;
+var k, i, nd: Integer; p, off, len, slen, prevEnd, sp, cut, hp, op, gap: Int64; cd: TCoder; host, cs: TBytes;
+  e: TCodecError; mode: array of Byte; src, pre: TKnown; perr: TCodecErrors; ccs: TJ2kCodestreams; big: Boolean;
 begin
   data := nil;
   if Length(stream) < 6 then Exit(CodecFail(ceBadStream));
@@ -1779,6 +1789,26 @@ begin
   { every codestream within the file }
   if prevEnd > Length(host) + cut then Exit(CodecFail(ceBadStream));
   if cut = 0 then begin data := host; Exit(CodecFail(ceOk)); end;
+  { several codestreams to decode, none large, threads for more than one:
+    decoded side by side first (each the same bytes), then put in place
+    below in order, an error where the loop below meets it }
+  src := nil; pre := nil; perr := nil;
+  if threads > 1 then begin
+    SetLength(src, k); SetLength(ccs, k);
+    p := 6; sp := 6 + Int64(J2K_ENTRY) * k; nd := 0; big := False;
+    for i := 0 to k - 1 do begin
+      len := GetU32(stream, p + 4); slen := GetU32(stream, p + 8);
+      ccs[i].off := 0; ccs[i].len := len;
+      if (mode[i] <> J2K_RAW) and not ((i < Length(known)) and (known[i] <> nil)) then begin
+        if len > CODESTREAMS_TOGETHER then big := True;
+        src[i] := Copy(stream, sp, slen);
+        Inc(nd);
+      end;
+      sp := sp + slen;
+      Inc(p, J2K_ENTRY);
+    end;
+    if (nd > 1) and not big then DecodeTogether(src, mode, ccs, threads, pre, perr) else src := nil;
+  end;
   { the host's bytes, and each codestream of mode 1 back in its place }
   SetLength(data, Length(host) + cut);
   p := 6; sp := 6 + Int64(J2K_ENTRY) * k; hp := 0; op := 0;
@@ -1790,7 +1820,10 @@ begin
       if gap > 0 then Move(host[hp], data[op], gap);
       hp := hp + gap; op := op + gap;
       if (i < Length(known)) and (known[i] <> nil) then cs := known[i]
-      else begin
+      else if (i < Length(src)) and (src[i] <> nil) then begin
+        if perr[i] <> ceOk then begin data := nil; Exit(CodecFail(perr[i])); end;
+        cs := pre[i];
+      end else begin
         if mode[i] = J2K_PIXELS then e := J2kMode2Dec(Copy(stream, sp, slen), len, threads, cs)
         else e := J2kMode1Dec(Copy(stream, sp, slen), len, threads, cs);
         if e <> ceOk then begin data := nil; Exit(CodecFail(e)); end;
@@ -1807,30 +1840,53 @@ begin
   Result := CodecFail(ceOk);
 end;
 
-{ A file of the JPEG 2000 family as version 8: each codestream in mode 1
-  or mode 2, whichever of them this program has (J2kMode1Enc,
-  J2kMode2Enc) gives the smaller stream, when that is smaller than the
-  codestream, else in mode 0; the rest of the file through the raw bytes'
-  model. Mode 2 is tried first, and mode 1 unless mode 2's stream is
-  already no longer than mode 1's could be at the least: the side
+type
+  { mode 1 coded on a thread of its own while mode 2 codes on the caller's
+    (CompressJ2k) }
+  TMode1Job = class(TJoinThread)
+    data: TBytes; off, len: Int64; threads: Integer;
+    ok: Boolean; s: TBytes; failed: Exception;
+    procedure Execute; override;
+  end;
+
+procedure TMode1Job.Execute;
+begin
+  try
+    ok := J2kMode1Enc(data, off, len, threads, False, s);
+  except
+    { raised again on the caller's thread, as if it had coded there }
+    ok := False; s := nil;
+    failed := Exception(AcquireExceptionObject);
+  end;
+end;
+
+const
+  { the largest codestream whose two modes are coded at the same time }
+  MODES_TOGETHER = 64 shl 20;
+
+{ The codestream data[off..off + len) in mode 2 or mode 1, whichever gives
+  the smaller stream that is smaller than the codestream (mode: J2K_RAW,
+  s nil, when neither does). Mode 2 is coded first, and mode 1 unless mode
+  2's stream is no longer than the least mode 1's could be: the side
   information (the same in both) and half the coded bytes it does not keep
   (mode 1 saves a fifth on the codestreams it does best: a bitonal page is
-  not tried twice). ceJpeg (NotJpeg) for a file that is not one or that is too large
-  for the stream's 32-bit places. }
-function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
-var cs: TJ2kCodestreams; cd: TCoder; body, host, back, c1, c2: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, pixels, total, floor1: Int64; md: array of Byte; was: TStage; tried1: Boolean;
+  not coded twice). Both are coded before either is decoded, and only the
+  stream kept is decoded and compared: the same choice as checking both
+  (the smaller of those that come back, mode 2 on a tie; mode 1 not coded
+  when mode 2's stream is below the least mode 1's could be, unless mode
+  2's does not come back) for one decoding instead of two. }
+procedure J2kChoose(const data: TBytes; off, len: Int64; threads: Integer; out s: TBytes; out mode: Byte);
+var c1, c2: TBytes; floor1: Int64; tried1: Boolean; job: TMode1Job; t2: Integer; failed: Exception;
 
-  { mode m's stream s gives codestream i back (--stats: the verify) }
-  function Checked(m: Integer; const s: TBytes): Boolean;
-  var e: TCodecError; w: TStage;
+  { mode m's stream gives the codestream back (--stats: the verify) }
+  function Checked(m: Integer; const st: TBytes): Boolean;
+  var e: TCodecError; w: TStage; back: TBytes;
   begin
     w := StageEnter(stVerify);
     try
-      if m = J2K_PIXELS then e := J2kMode2Dec(s, cs[i].len, threads, back)
-      else e := J2kMode1Dec(s, cs[i].len, threads, back);
-      Result := (e = ceOk) and (Length(back) = cs[i].len) and
-        ((cs[i].len = 0) or CompareMem(@back[0], @data[cs[i].off], cs[i].len));
+      if m = J2K_PIXELS then e := J2kMode2Dec(st, len, threads, back)
+      else e := J2kMode1Dec(st, len, threads, back);
+      Result := (e = ceOk) and (Length(back) = len) and ((len = 0) or CompareMem(@back[0], @data[off], len));
     except
       { as when the encoders decoded their own streams (mode 2's caught
         everything, out of memory too): the stream is not kept }
@@ -1844,10 +1900,195 @@ var cs: TJ2kCodestreams; cd: TCoder; body, host, back, c1, c2: TBytes; i: Intege
   procedure Try1;
   begin
     tried1 := True;
-    if not (Assigned(J2kMode1Enc) and J2kMode1Enc(data, cs[i].off, cs[i].len, threads, False, c1) and
-            (Length(c1) < cs[i].len)) then c1 := nil;
+    if not (Assigned(J2kMode1Enc) and J2kMode1Enc(data, off, len, threads, False, c1) and (Length(c1) < len)) then
+      c1 := nil;
   end;
 
+  { mode 1 on a thread beside mode 2, with threads to spare, where both are
+    likely to be coded: a reversible codestream (the main header's COD has
+    the 5/3; with the 9/7 mode 2 refuses at once, and mode 1 gets every
+    thread) of more than one bit (a bitonal page's mode 2 is nearly always
+    below the least mode 1's could be, and mode 1 is not coded for it), up
+    to MODES_TOGETHER bytes (both modes' memory at once) }
+  function Together: Boolean;
+  var c, nc, m: Integer; e, p: Int64;
+  begin
+    Result := False;
+    if (threads < 2) or not Assigned(J2kMode1Enc) or not Assigned(J2kMode2Enc) or
+       (len > MODES_TOGETHER) or (len < 42) then Exit;
+    { the SIZ: Csiz at 40, then each component's Ssiz }
+    e := off + len;
+    if (data[off] <> $FF) or (data[off + 1] <> $4F) or (data[off + 2] <> $FF) or (data[off + 3] <> $51) then Exit;
+    nc := (data[off + 40] shl 8) or data[off + 41];
+    if (nc < 1) or (42 + 3 * Int64(nc) > len) then Exit;
+    c := 0;
+    while (c < nc) and (data[off + 42 + 3 * c] and $7F = 0) do Inc(c);
+    if c = nc then Exit;
+    { the main header's marker segments, up to the first SOT }
+    p := off + 2;
+    while p + 4 <= e do begin
+      m := (data[p] shl 8) or data[p + 1];
+      if (m = $FF90) or (m < $FF30) then Exit;
+      if m = $FF52 then Exit((p + 13 < e) and (data[p + 13] = 1));
+      if m <= $FF3F then p := p + 2 else p := p + 2 + ((data[p + 2] shl 8) or data[p + 3]);
+    end;
+  end;
+
+begin
+  s := nil; mode := J2K_RAW;
+  floor1 := 0; c1 := nil; c2 := nil; tried1 := False; job := nil; t2 := threads;
+  if Together then begin
+    { the threads shared: the streams are the same for any number }
+    job := TMode1Job.Create(True);
+    job.data := data; job.off := off; job.len := len; job.threads := threads div 2;
+    job.FreeOnTerminate := False;
+    t2 := threads - threads div 2;
+    job.Start;
+  end;
+  try
+    if not (Assigned(J2kMode2Enc) and J2kMode2Enc(data, off, len, t2, False, c2, floor1) and
+            (Length(c2) < len)) then begin c2 := nil; floor1 := 0; end;
+  finally
+    if job <> nil then begin
+      job.Join;
+      tried1 := True;
+      if job.ok and (Length(job.s) < len) then c1 := job.s;
+      failed := job.failed;
+      job.Free;
+      if failed <> nil then raise failed;
+    end;
+  end;
+  { the same choice as with mode 1 coded after mode 2: next to a mode 2
+    stream below its floor, mode 1's is not looked at }
+  if (c2 <> nil) and (Length(c2) <= floor1) then begin c1 := nil; tried1 := False; end;
+  if not tried1 and ((c2 = nil) or (Length(c2) > floor1)) then Try1;
+  if (c1 <> nil) and ((c2 = nil) or (Length(c1) < Length(c2))) then begin
+    if Checked(J2K_MODEL, c1) then begin s := c1; mode := J2K_MODEL; end
+    else if (c2 <> nil) and Checked(J2K_PIXELS, c2) then begin s := c2; mode := J2K_PIXELS; end;
+  end else if c2 <> nil then begin
+    if Checked(J2K_PIXELS, c2) then begin s := c2; mode := J2K_PIXELS; end
+    else begin
+      if not tried1 then Try1;
+      if (c1 <> nil) and Checked(J2K_MODEL, c1) then begin s := c1; mode := J2K_MODEL; end;
+    end;
+  end;
+end;
+
+type
+  { a file's codestreams on several threads: each takes the next one not
+    taken (J2kChoose, or its stream decoded), until none is left or one
+    raised (raised again on the caller's thread) }
+  TCsPool = class;
+  TCsThread = class(TJoinThread)
+    pool: TCsPool;
+    procedure Execute; override;
+  end;
+  TCsPool = class
+    next: LongInt;
+    n, each: Integer;
+    stop: Boolean;
+    data: TBytes;
+    cs: TJ2kCodestreams;
+    ms: TKnown; md: array of Byte;
+    { decoding: each codestream's stream (nil: not decoded here) and mode
+      in, its bytes and its error out }
+    decoding: Boolean;
+    src: TKnown; errs: TCodecErrors;
+    failed: array of Exception;
+    procedure Loop;
+    procedure Run(threads: Integer);
+  end;
+
+procedure TCsThread.Execute;
+begin
+  pool.Loop;
+end;
+
+procedure TCsPool.Loop;
+var k: Integer;
+begin
+  repeat
+    if stop then Break;
+    k := InterLockedIncrement(next) - 1;
+    if k >= n then Break;
+    try
+      if not decoding then J2kChoose(data, cs[k].off, cs[k].len, each, ms[k], md[k])
+      else if src[k] = nil then
+      else if md[k] = J2K_PIXELS then errs[k] := J2kMode2Dec(src[k], cs[k].len, each, ms[k])
+      else errs[k] := J2kMode1Dec(src[k], cs[k].len, each, ms[k]);
+    except
+      failed[k] := Exception(AcquireExceptionObject);
+      stop := True;
+      Break;
+    end;
+  until False;
+end;
+
+{ every codestream, on up to threads threads (this one among them) }
+procedure TCsPool.Run(threads: Integer);
+var w: array of TCsThread; i, m: Integer;
+begin
+  m := threads; if m > n then m := n; if m < 1 then m := 1;
+  each := threads div m; if each < 1 then each := 1;
+  next := 0; stop := False;
+  SetLength(failed, n); SetLength(ms, n);
+  if Length(md) < n then SetLength(md, n);
+  if decoding then begin
+    SetLength(errs, n);
+    for i := 0 to n - 1 do errs[i] := ceOk;
+  end;
+  SetLength(w, m);
+  for i := 1 to m - 1 do begin
+    try
+      w[i] := TCsThread.Create(True);
+    except
+      w[i] := nil;
+    end;
+    if w[i] = nil then Break;
+    w[i].pool := Self; w[i].FreeOnTerminate := False;
+    w[i].Start;
+  end;
+  Loop;
+  for i := 1 to m - 1 do
+    if w[i] <> nil then begin w[i].Join; w[i].Free; end;
+  for i := 0 to n - 1 do
+    if failed[i] <> nil then raise failed[i];
+end;
+
+procedure DecodeTogether(const src: TKnown; const modes: array of Byte; const cs: TJ2kCodestreams;
+  threads: Integer; out outs: TKnown; out errs: TCodecErrors);
+var pool: TCsPool; i: Integer;
+begin
+  pool := TCsPool.Create;
+  try
+    pool.decoding := True; pool.n := Length(src); pool.cs := cs; pool.src := src;
+    SetLength(pool.md, Length(src));
+    for i := 0 to High(src) do pool.md[i] := modes[i];
+    pool.Run(threads);
+    outs := pool.ms; errs := pool.errs;
+  finally
+    pool.Free;
+  end;
+end;
+
+{ several codestreams, none larger than CODESTREAMS_TOGETHER, and threads
+  for more than one }
+function CsTogether(const cs: TJ2kCodestreams; threads: Integer): Boolean;
+var i: Integer;
+begin
+  Result := (threads > 1) and (Length(cs) > 1);
+  for i := 0 to High(cs) do
+    if cs[i].len > CODESTREAMS_TOGETHER then Exit(False);
+end;
+
+{ A file of the JPEG 2000 family as version 8: each codestream in mode 1
+  or mode 2 (J2kChoose, with whichever of them this program has:
+  J2kMode1Enc, J2kMode2Enc), else in mode 0; the rest of the file through
+  the raw bytes' model. ceJpeg (NotJpeg) for a file that is not one or that
+  is too large for the stream's 32-bit places. }
+function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
+var cs: TJ2kCodestreams; cd: TCoder; body, host, back: TBytes; i: Integer; p, hp, op, n: SizeInt;
+  ms, known: TKnown; cut, pixels, total: Int64; md: array of Byte; was: TStage; pool: TCsPool;
 begin
   stream := nil;
   { --stats (pjastage): the box tree walked is the parse; each codestream
@@ -1860,28 +2101,21 @@ begin
   StageEnter(stEncode);
   SetLength(ms, Length(cs)); SetLength(known, Length(cs)); SetLength(md, Length(cs));
   cut := 0; pixels := 0;
-  for i := 0 to High(cs) do begin
-    ms[i] := nil; known[i] := nil; md[i] := J2K_RAW;
-    { both modes coded first, and a stream decoded and compared only when it
-      is the one kept: the same choice as checking both (the smaller of
-      those that come back, mode 2 on a tie; mode 1 not coded when mode 2's
-      stream is below the least mode 1's could be, unless mode 2's does not
-      come back) for one decoding instead of two }
-    floor1 := 0; c1 := nil; c2 := nil; tried1 := False;
-    if not (Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, False, c2, floor1) and
-            (Length(c2) < cs[i].len)) then begin c2 := nil; floor1 := 0; end;
-    if (c2 = nil) or (Length(c2) > floor1) then Try1;
-    if (c1 <> nil) and ((c2 = nil) or (Length(c1) < Length(c2))) then begin
-      if Checked(J2K_MODEL, c1) then begin ms[i] := c1; md[i] := J2K_MODEL; end
-      else if (c2 <> nil) and Checked(J2K_PIXELS, c2) then begin ms[i] := c2; md[i] := J2K_PIXELS; end;
-    end else if c2 <> nil then begin
-      if Checked(J2K_PIXELS, c2) then begin ms[i] := c2; md[i] := J2K_PIXELS; end
-      else begin
-        if not tried1 then Try1;
-        if (c1 <> nil) and Checked(J2K_MODEL, c1) then begin ms[i] := c1; md[i] := J2K_MODEL; end;
-      end;
+  if CsTogether(cs, threads) then begin
+    { the codestreams side by side: each one's stream is the same }
+    pool := TCsPool.Create;
+    try
+      pool.data := data; pool.cs := cs; pool.n := Length(cs);
+      SetLength(pool.ms, Length(cs)); SetLength(pool.md, Length(cs));
+      pool.Run(threads);
+      for i := 0 to High(cs) do begin ms[i] := pool.ms[i]; md[i] := pool.md[i]; end;
+    finally
+      pool.Free;
     end;
-    c1 := nil; c2 := nil;
+  end else
+    for i := 0 to High(cs) do J2kChoose(data, cs[i].off, cs[i].len, threads, ms[i], md[i]);
+  for i := 0 to High(cs) do begin
+    known[i] := nil;
     if md[i] <> J2K_RAW then begin
       known[i] := Copy(data, cs[i].off, cs[i].len);
       cut := cut + cs[i].len;
