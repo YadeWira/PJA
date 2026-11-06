@@ -4,8 +4,9 @@
   A description is a tree (TInfoNode) that prints as indented text or as
   one line of JSON. Each format has its provider: a probe that says the
   bytes are its own, and a describe that fills the tree from the file's
-  structure (pjainfojpeg: JPEG, JPEG-LS and what is inside them; pjainfopja:
-  the .pja and its stream). A unit registers its provider when it starts;
+  structure (pjainfojpeg: JPEG, JPEG-LS and what is inside them; pjainfoj2k:
+  the JPEG 2000 family's boxes and codestreams; pjainfopja: the .pja and
+  its stream). A unit registers its provider when it starts;
   the first whose probe says yes describes the file. A new format is a new
   unit and a line in the program's uses.
 
@@ -64,6 +65,9 @@ var
     DescribeFile sets it): a .pja that declares more is not decoded, as x
     refuses it, however little it holds }
   InfoMaxOutput: QWord = High(QWord);
+  { the threads a provider may use for work it does (pjainfoj2k's analysis
+    of each codestream; DescribeFile sets it) }
+  InfoThreads: Integer = 1;
 
 { A format's provider, tried in the order they were registered. }
 procedure RegisterInfoProvider(const name: string; probe: TInfoProbe; describe: TInfoDescribe);
@@ -350,6 +354,7 @@ begin
     else if f and 5 <> 0 then Result := Result + ' (quirks)'
     else Result := Result + ' (parts)';
   end;
+  if p.payload[0] = STREAM_J2K then Result := Result + ' (JPEG 2000)';
 end;
 
 { the stream's version, 0 when it has none (stored as is) }
@@ -401,6 +406,12 @@ begin
   end else if r.codec.repaired then begin
     n.Str('repaired', r.codec.jpeg.Text);
     why := ', repaired: ' + r.codec.jpeg.Text;
+  end else if r.codec.j2k then begin
+    { the bytes in codestreams of mode 1 (modelled); the rest as bytes }
+    n.Num('j2k_modelled_bytes', r.codec.j2kModelled);
+    if r.codec.j2kModelled > 0 then
+      why := ', ' + IntToStr(r.codec.j2kModelled) + ' B of codestreams modelled (mode 1)'
+    else why := ', no codestream modelled: all as bytes (mode 0)';
   end;
   line := 'takes it: stream ' + StreamWords(pja) + ', ' + IntToStr(Length(d)) + ' B -> ' +
           IntToStr(Length(pja)) + ' B';
@@ -415,6 +426,7 @@ begin
   Result := TInfoNode.Create(ikObject);
   Result.Str('file', name);
   InfoMaxOutput := maxOutput;
+  InfoThreads := threads;
   { a bug met here is what a report is for: it goes in the description,
     as internal_error, instead of ending the command }
   try

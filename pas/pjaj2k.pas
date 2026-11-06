@@ -60,6 +60,9 @@ function CodestreamEnd(const data: TBytes; off, limit: Int64): Int64;
   codestream, and by the brand of its ftyp box jp2, jpx, jpm, mj2 or jph;
   '' for another file }
 function J2kExtension(const data: TBytes): string;
+{ A box that holds boxes, whose jp2c boxes the walk looks into (pjainfoj2k
+  walks the same tree); t its type, 4 bytes big-endian }
+function J2kIsSuperbox(t: Cardinal): Boolean;
 
 implementation
 
@@ -128,7 +131,7 @@ begin
   end;
 end;
 
-function IsSuperbox(t: Cardinal): Boolean;
+function J2kIsSuperbox(t: Cardinal): Boolean;
 begin
   { JP2 and JPX (15444-1 and -2), JPM (-6), and the ISO base media file
     format's that Motion JPEG 2000 (-3) uses; an mdat holds an MJ2's frames
@@ -174,7 +177,7 @@ begin
         w.cs[w.n].off := p + head; w.cs[w.n].len := len - head;
         Inc(w.n);
       end;
-    end else if IsSuperbox(t) and (depth < MAX_J2K_DEPTH) then
+    end else if J2kIsSuperbox(t) and (depth < MAX_J2K_DEPTH) then
       Walk(data, p + head, p + len, depth + 1, w);
     p := p + len;
   end;

@@ -5,8 +5,8 @@
   SIMD path, the threads; the command line; and for the file, its size,
   its BLAKE3-128, what PJA does with it and its structure (pjainfo).
 
-  Privacy: no pixels, no metadata contents (EXIF, XMP, ICC, comments: only
-  their sizes), no folders (a name only, never its path). The file itself
+  Privacy: no pixels, no metadata contents (EXIF, XMP, ICC, comments,
+  JPEG 2000's XML, UUID and label boxes: only their sizes), no folders (a name only, never its path). The file itself
   goes only with --with-file, copied beside the report for the person to
   attach, and only if they choose to. }
 unit pjareport;

@@ -49,7 +49,7 @@ function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out 
 
 implementation
 
-uses pjacodec;
+uses pjacodec, pjastage;
 
 const
   LAYOUT = 0;
@@ -197,7 +197,7 @@ end;
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
   out why: string): TMode1Result;
 var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; k, s: Integer;
-  p: SizeInt; total: Int64;
+  p: SizeInt; total: Int64; was: TStage;
 begin
   stream := nil; why := '';
   sl := TSlices.Create(True, threads);
@@ -232,12 +232,16 @@ begin
   finally
     sl.Free;
   end;
-  { checked: the stream alone gives the codestream back }
+  { checked: the stream alone gives the codestream back (--stats: the
+    verify, pjastage) }
+  was := StageEnter(stVerify);
   if (J2kMode1Decode(stream, len, threads, back) <> m1Ok) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
+    StageEnter(was);
     stream := nil; why := 'verify';
     Exit(m1Refused);
   end;
+  StageEnter(was);
   Result := m1Ok;
 end;
 

@@ -40,29 +40,31 @@ Versions 0 to 4 are never written; 9 and up are left for later kinds of
 file, and a release refuses one it does not know as `FutureVersion`
 (`pas/tests/test_versions.pas`).
 
-Stream version 8 is fixed as 0.9.5 writes it: its layout (flags, the
-table of codestreams, their streams, the host), flag value 0 and
-codestream mode 0 (raw: the codestream's bytes stay in the host, coded
-with the other bytes) keep their meaning forever, and every release from
-0.9.5 on reads what 0.9.5 writes. It is a whole file, as BYTES is: never
-a part of a version 6 stream nor the repaired file inside a PATCH stream
-(a reader refuses it there as `BadStream`). Codestream mode 1 (the
-codestream taken apart and its code-blocks' decisions through a
-context-mixing model, `doc/CODEC.md`, "JPEG 2000, stage C") joins what is
-fixed when 0.9.5 ships: its stream's layout (layout byte 0, the check, the
+Stream version 8 is fixed from 0.9.5, with its codestream modes 0 and 1:
+its layout (flags, the table of codestreams, their streams, the host),
+flag value 0, codestream mode 0 (raw: the codestream's bytes stay in the
+host, coded with the other bytes) and codestream mode 1 keep their
+meaning forever, and every release from 0.9.5 on reads what 0.9.5 writes.
+It is a whole file, as BYTES is: never a part of a version 6 stream nor
+the repaired file inside a PATCH stream (a reader refuses it there as
+`BadStream`). For mode 1 (the codestream taken apart and its code-blocks'
+decisions through a context-mixing model, `doc/CODEC.md`, "JPEG 2000,
+stage C") that is: its stream's layout (layout byte 0, the check, the
 slices, the side information through the raw bytes' model and at most
 n + n / 4 + 65,536 bytes for a codestream of n, each slice's
 decisions), the side information's blob (version 2, its ten streams and
 its slice table), the rules that rebuild a codestream from it, and the
 model's contexts, counters, mixer, maps and constants, bit for bit. Later
 stages (a bitonal pixel mode, HTJ2K, DICOM fragments) come only as new
-codestream mode values, a new layout byte of mode 1 (1 is meant for a
-codestream coded on from the file's previous one: MJ2 frames), or new flags, in this
-same layout; nothing a release has written changes meaning. A program
-without mode 1's model (the zpaq-std plugin) reads mode 1 as
-`FutureVersion`; the encoder may change which codestreams it models,
-which code-blocks it keeps as bytes, its
-slices and its tables' sizes (all written in the stream). A release that does not know a mode
+codestream mode values, a new layout byte of mode 1 (layout 1 is
+reserved for a codestream coded with the model and the side information's
+context as the file's previous codestream left them: MJ2 frames, JPX; 0.9.5
+reads it as `FutureVersion`), or new flags, in this same layout; nothing a
+release has written changes meaning. A program without mode 1's model
+(the zpaq-std plugin) reads mode 1 as `FutureVersion`; the encoder may
+change which codestreams it models, which code-blocks it keeps as bytes,
+its slices and its tables' sizes (all written in the stream). A release
+that does not know a mode
 or a flag refuses the stream as `FutureVersion` (`PJA_E_VERSION`) before
 decoding it, never reads it as something else: a `.pja` of a JPEG 2000
 file written by a later release with such a mode needs that release, or a

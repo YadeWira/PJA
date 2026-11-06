@@ -78,12 +78,37 @@ Any file: what it is and what PJA does with it. Each format has a provider
   the index counts it, from its own header, `mpf_offset`); anything that
   does not fit (`problems`). Past 300 segments and 100 problems they are
   counted, not listed (`segments_not_listed`, `problems_not_listed`).
+- **JPEG 2000** (`pas/pjainfoj2k.pas`: raw codestreams, JP2, JPX, JPM,
+  Motion JPEG 2000, JPH), from the boxes and the markers alone: the box
+  tree (each box's type, place, length and depth; ftyp's brands, ihdr's
+  size, components and bits, colr's method and enumerated colour space);
+  then each codestream PJA finds (the very list stream version 8 keeps):
+  its main header's markers with place and length; SIZ (size, offsets,
+  tiles and their grid, each component's bits, sign and subsampling); COD
+  (levels, layers, progression, code-block size and style, the wavelet:
+  5/3 reversible or 9/7 irreversible, MCT, precincts, SOP, EPH); QCD's
+  quantization; CAP and `ht` (HTJ2K: CAP's Part 15 bit or the HT
+  code-block style); its tile-parts (tile, part, place, length, header);
+  every marker met with how many; what is after the EOC; and what PJA does
+  with it: `mode 1 (modelled): 612 B -> 586 B, 4.25% less`, or `mode 0 (as
+  bytes): HTJ2K` with the analysis's reason (HTJ2K, Part 2, a limit, a
+  marker that does not parse...) or that its stream would not be smaller.
+  That is mode 1's own work (as `a` does it, on `-th`'s threads), so a
+  large JPEG 2000 file takes `info` about what it takes `a`. Past 300
+  boxes and main-header markers, 100 problems, 64 tile-parts and 64
+  components a codestream, and 32 codestreams, they are counted, not
+  listed (nor analysed). The XML, UUID, label, URL and IPR boxes, an ICC
+  profile and a COM marker's text are only measured: `metadata_bytes: XML
+  31 B, UUID 0 B, ICC 0 B, labels 15 B, URLs 0 B, IPR 0 B, 2 COM (66 B);
+  contents not shown`.
 - **.pja** (`pas/pjainfopja.pas`): the container (version, flags, the
   original's size, BLAKE3-128 and extension, stored or not) and the stream:
   its version and model; for versions 5 and 7, the image its header stream
   describes and the number of bands (only the raw bytes' model is decoded,
   never the bands); for version 6, as bytes, PATCH (the edits, then the
   repaired file's stream) or parts (each JPEG inside, then the host's).
+  For version 8 (JPEG 2000), each codestream's place, mode and stream (mode
+  1: its slices, which count as its bands), and the host's stream.
   A `.pja` that declares an original larger than `--max-output` is not
   decoded (`not_decoded`), as `x` refuses it.
 
@@ -91,7 +116,10 @@ Then `pja: ...`: for a `.pja`, whether it extracts and verifies; for
 anything else, what `a --no-verify` would do: `takes it: stream version 7,
 1748 B -> 1431 B (81.86%)`, `takes it ..., as bytes: BadRst@1670` (PJA did
 not take it as a JPEG and why: the reason and the byte where it was found),
-`..., repaired: BadRst@...`, or `refuses it: Codec(Jpeg(NotJpeg@0))`.
+`..., repaired: BadRst@...`, for JPEG 2000 `takes it: stream version 8
+(JPEG 2000), 3230 B -> 3084 B (95.48%), 3025 B of codestreams modelled
+(mode 1)` (`j2k_modelled_bytes` in `--json`), or `refuses it:
+Codec(Jpeg(NotJpeg@0))`.
 Exit 1 only for a file that cannot be read. `--json` gives the same tree.
 
 Metadata is never printed, only its size: `metadata_bytes: Exif 1818 B,
@@ -110,7 +138,7 @@ A plain-text bug report, to stdout or to `-o`'s file:
   as `info` gives them (with `a`'s verification).
 
 **What is not in it**: no pixel and no coefficient, no metadata contents
-(EXIF, XMP, ICC, comments: only how many bytes), no folder names. A
+(EXIF, XMP, ICC, comments, JPEG 2000's XML, UUID and label boxes: only how many bytes), no folder names. A
 report on a file that hits a bug says so (`internal_error`) instead of
 ending.
 
@@ -138,9 +166,10 @@ temporary folder and is deleted: nothing is written beside the inputs. A
 
 ### `pja selftest`
 
-The binary carries five small samples (a baseline JPEG in 4:2:0, a
+The binary carries six small samples (a baseline JPEG in 4:2:0, a
 progressive one, an arithmetic-coded one with restarts, a near-lossless
-JPEG-LS, and the baseline one again as stream version 5, the model of the
+JPEG-LS, a JPEG 2000 codestream (RPCL, SOP and EPH) that goes as stream version 8's mode 1,
+and the baseline one again as stream version 5, the model of the
 `.pja` made before 0.1.0 and of the zpaq-std plugin's frozen codecs, with
 SSE4.1 code of its own: `pas/pjaselftest.inc`, written by
 `tools/gen_selftest.py` from `tests/` and `pas/tests/selftest_v5.pja`),
@@ -201,7 +230,13 @@ and a JPEG-LS's symbol stream, are decoded while they are encoded, and that
 time is `encode`'s); `decode` (`x`, `t`); `hash` BLAKE3; `write` the
 output, verified, flushed to the disk (unless `--no-sync`) and renamed;
 `other` what falls between. `threads` are the file's own (what `-th`
-leaves each file), `bands` the stream's.
+leaves each file), `bands` the stream's. For a JPEG 2000 file, `parse` is
+the walk of its boxes, `encode` each codestream taken apart and its
+decisions through the model (stream version 8's mode 1), `verify` both
+mode 1's own check of each codestream's stream and the whole stream read
+back; its `bands` are the slices of its codestreams of mode 1 (each with
+its own model, decoded on a thread of its own). The largest files go first
+and the threads are shared out the same way as for JPEG files.
 
 ### `--json`
 
@@ -344,9 +379,9 @@ measured against the old spelling.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (149 cells: round trips, JPEG 2000, existing outputs, links,
+Tested by `pas/tests/cli.sh` (191 cells with `tests/j2k`: round trips, JPEG 2000, existing outputs, links,
 damage, `--keep-corrupt`, `--max-output`, threads, outputs shared by two
-inputs, a write cut short, every usage error; `t`, `info`, `report` and its
-privacy, `bench`, `selftest`, `--cpu` on every path here, `--stats`,
+inputs, a write cut short, every usage error; `t`, `info` (JPEG 2000 too), `report` and its
+privacy (XML and COM text too), `bench`, `selftest`, `--cpu` on every path here, `--stats`,
 `--json`, and the end of a run that meets a bug), and
 on Windows by `pas/tests/windows.ps1` (28 cells, the wildcards among them).

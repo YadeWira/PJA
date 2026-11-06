@@ -1,6 +1,6 @@
 # PJA
 
-**packJPG Algorithm**: lossless recompression of **JPEG** and **JPEG-LS** files, in FreePascal,
+**packJPG Algorithm**: lossless recompression of **JPEG**, **JPEG-LS** and **JPEG 2000** files, in FreePascal,
 with the coefficient model's core in C and some x86-64 assembly; no
 libraries. The successor of [packJPG](https://github.com/YadeWira/packJPG):
 a new codec and format of its own (it does not read `.pjg` files), smaller
@@ -34,7 +34,7 @@ comes back byte for byte, and nothing is written unless it verified.
 | [PRA](https://github.com/YadeWira/PRA) | raster images (PNM, BMP, TIFF, PSD, HDR, ...) | [packPNM](https://github.com/packjpg/packPNM) |
 | [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | [packPNG](https://github.com/YadeWira/packPNG) |
 | [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
-| **PJA** | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
+| **PJA** | JPEG, JPEG-LS and JPEG 2000 | [packJPG](https://github.com/YadeWira/packJPG) |
 
 ## Against other compressors
 
@@ -234,9 +234,10 @@ It writes a plain-text report and prints a link that opens a [new
 issue][issues] with it filled in: add what you ran and what you expected.
 The report has PJA's version and build, the system, the processor and its
 SIMD path, the command line, and for the file its size, hash, structure
-(markers, frame, scans) and what PJA does with it. It does **not** have the
-image (no pixels), the contents of its metadata (EXIF, XMP, ICC, comments:
-only their sizes), or folder names. The file itself is attached only if you
+(markers, frame, scans; for JPEG 2000 the boxes, each codestream's SIZ, COD
+and tiles, and its mode) and what PJA does with it. It does **not** have the
+image (no pixels), the contents of its metadata (EXIF, XMP, ICC, comments,
+JPEG 2000's XML and UUID boxes: only their sizes), or folder names. The file itself is attached only if you
 choose to: `--with-file` puts a copy beside the report. `pja info FILE`
 shows the same structure, `pja selftest` checks the binary on every SIMD
 path, and a run that hits a bug says so and exits with 3

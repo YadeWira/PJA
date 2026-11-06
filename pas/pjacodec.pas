@@ -1798,12 +1798,17 @@ end;
   for the stream's 32-bit places. }
 function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
 var cs: TJ2kCodestreams; cd: TCoder; body, host, back: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, total: Int64;
+  ms, known: TKnown; cut, total: Int64; was: TStage;
 begin
   stream := nil;
+  { --stats (pjastage): the box tree walked is the parse; each codestream
+    taken apart and its decisions modelled, the encode (mode 1's own check
+    of its stream, pjaj2km, the verify); the stream read back, the verify }
+  StageEnter(stParse);
   if (Length(data) >= High(Cardinal)) or not J2kCodestreams(data, cs) then begin
     Result := CodecFail(ceJpeg); Result.jpeg.err := jeNotJpeg; Exit;
   end;
+  StageEnter(stEncode);
   SetLength(ms, Length(cs)); SetLength(known, Length(cs));
   cut := 0;
   for i := 0 to High(cs) do begin
@@ -1848,11 +1853,14 @@ begin
   Result.j2kModelled := cut;
   { checked: the stream gives the file back; each mode 1 stream was decoded
     and compared when it was made, so its codestream is taken as known }
-  if verify and (not ReadJ2k(stream, back, Length(data), threads, known).Ok or (Length(back) <> Length(data)) or
-     ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data)))) then begin
+  if not verify then Exit;
+  was := StageEnter(stVerify);
+  if not ReadJ2k(stream, back, Length(data), threads, known).Ok or (Length(back) <> Length(data)) or
+     ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data))) then begin
     stream := nil;
     Result := CodecFail(ceNoRoundTrip);
   end;
+  StageEnter(was);
 end;
 
 function CompressPjax(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;

@@ -2,9 +2,10 @@
 """Writes pas/pjaselftest.inc: the samples `pja selftest` carries inside the
 binary, and the .pja each one has to give (doc/CLI.md, selftest).
 
-Four small files of tests/ (a baseline JPEG in 4:2:0, a progressive one, an
-arithmetic-coded one with restarts, a near-lossless JPEG-LS), about 5.7 KB,
-and the .pja the given pja command makes of each. The formats are frozen
+Five small files of tests/ (a baseline JPEG in 4:2:0, a progressive one, an
+arithmetic-coded one with restarts, a near-lossless JPEG-LS, a JPEG 2000
+codestream that goes as stream version 8's mode 1), about 8 KB, and the
+.pja the given pja command makes of each. The formats are frozen
 (doc/STABILITY.md): those bytes never change, on any platform or SIMD path.
 
 And one more: the baseline JPEG as stream version 5 (the model of the .pja
@@ -22,7 +23,7 @@ import os, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'pas', 'pjaselftest.inc')
 SAMPLES = ['jpg/baseline_color.jpg', 'jpg/prog_huffman.jpg', 'jpg/arith_restart.jpg',
-           'jls/plasma17x13_sample_near1.jls']
+           'jls/plasma17x13_sample_near1.jls', 'j2k/rpcl_sop_eph.j2k']
 # (sample, its .pja) of stream version 5
 V5_SAMPLES = [('jpg/baseline_color.jpg', 'pas/tests/selftest_v5.pja')]
 

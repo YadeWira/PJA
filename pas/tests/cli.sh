@@ -424,6 +424,53 @@ check "info on a .pja: the container and its stream" bash -c "
 check "info on a damaged .pja: does not extract it, rc 0" bash -c "'$PJA' info '$W/t/damaged.pja' | grep -q 'does not extract it'"
 check "info on something else: PJA refuses it, rc 0" bash -c "'$PJA' info '$W/text.jpg' | grep -q 'refuses it: '"
 check "info on a missing file: rc 1" test "$(rc "$PJA" info "$W/missing.jpg")" -eq 1
+if [ -e "$W/in/two_codestreams.jpx" ]; then
+  mkdir -p "$W/j2ki"
+  check "info on a JPX: its boxes, two codestreams with SIZ and COD, each in mode 1, and that PJA takes it" bash -c "
+    o=\$('$PJA' info '$W/in/two_codestreams.jpx') && grep -q 'format: JPX' <<< \"\$o\" && grep -q 'ftyp at 12, 24 B: brand jpx' <<< \"\$o\" &&
+    grep -q '  ihdr at 44, 22 B: 64x64, 3 component(s), 8 bits' <<< \"\$o\" && grep -q 'jp2c at 809, 2421 B: codestream 1' <<< \"\$o\" &&
+    grep -q 'codestream_count: 2' <<< \"\$o\" && grep -q 'SIZ at 199, 47 B: 64x64, 3 component(s) of 8 8 8 bits' <<< \"\$o\" &&
+    grep -q 'COD at .*5 level(s), 1 layer(s), LRCP, code-blocks 64x64 (none), 5/3 reversible' <<< \"\$o\" &&
+    [ \$(grep -c 'pja: mode 1 (modelled): ' <<< \"\$o\") -eq 2 ] &&
+    grep -q 'pja: takes it: stream version 8 (JPEG 2000), .* B of codestreams modelled (mode 1)' <<< \"\$o\""
+  check "info on a tiled codestream: the tile grid, its tile-parts, TLM and PLT, PCRL" bash -c "
+    o=\$('$PJA' info '$W/in/pcrl_tiles_plt_tlm.j2k') && grep -q 'format: JPEG 2000 codestream' <<< \"\$o\" &&
+    grep -q 'tile_grid: 2x2' <<< \"\$o\" && grep -q 'tile 1 part 0 at ' <<< \"\$o\" && grep -q 'tiles_present: 4' <<< \"\$o\" &&
+    grep -q 'markers: SOC, SIZ, COD, TLM, PLT x36, QCD, COM, SOT x36, SOD x36, EOC' <<< \"\$o\" &&
+    grep -q 'progression: PCRL' <<< \"\$o\" && grep -q 'eoc: true' <<< \"\$o\""
+  # the code-block style's HT bit set in the COD (byte 63): HTJ2K, which PJA keeps as bytes
+  python3 -I -c "
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[63] = 0x40; open(sys.argv[2], 'wb').write(d)" "$W/in/plasma_cs.j2k" "$W/j2ki/ht.j2k"
+  check "info on an HTJ2K codestream: ht true, mode 0 and the analysis's reason" bash -c "
+    o=\$('$PJA' info '$W/j2ki/ht.j2k') && grep -q 'code-blocks 64x64 (HT)' <<< \"\$o\" && grep -q '  ht: true' <<< \"\$o\" &&
+    grep -q 'pja: mode 0 (as bytes): HTJ2K' <<< \"\$o\" && grep -q 'no codestream modelled: all as bytes (mode 0)' <<< \"\$o\""
+  check "  privacy: no XML, label or COM text, in info, --json and report, only their sizes" bash -c "
+    for c in info 'info --json' report; do
+      o=\$('$PJA' \$c '$W/in/two_codestreams.jpx') || exit 1
+      ! grep -q 'a test file of PJA' <<< \"\$o\" && ! grep -q 'two codestreams' <<< \"\$o\" && ! grep -q 'OpenJPEG' <<< \"\$o\" || exit 1
+    done
+    '$PJA' info '$W/in/two_codestreams.jpx' | grep -q 'metadata_bytes: XML 31 B, UUID 0 B, ICC 0 B, labels 15 B, URLs 0 B, IPR 0 B, 2 COM (66 B); contents not shown' &&
+    '$PJA' info '$W/in/two_codestreams.jpx' | grep -q 'xml  at 112, 39 B: contents not shown'"
+  check "info --json on the JPEG 2000 family: each file an object with its codestreams" bash -c "
+    '$PJA' info --json '$W/in/two_codestreams.jpx' '$W/in/two_frames.mj2' '$W/in/plasma.jp2' '$W/in/plasma_cs.j2k' |
+    python3 -I -c 'import json, sys; o = [json.loads(l) for l in sys.stdin]; assert len(o) == 5 and \"summary\" in o[-1]
+assert all(x[\"format\"] != \"unknown\" and len(x[\"codestreams\"]) >= 1 for x in o[:-1])' &&
+    '$PJA' info --json '$W/in/two_frames.mj2' | head -1 | python3 -I -c '
+import json, sys; o = json.load(sys.stdin); assert o[\"format\"] == \"Motion JPEG 2000\" and o[\"codestream_count\"] == 2
+assert all(c[\"pja\"][\"mode\"] in (0, 1) and c[\"siz\"][\"components\"] >= 1 for c in o[\"codestreams\"])
+assert o[\"pja\"][\"stream_version\"] == 8'"
+  check "info on a JPEG 2000 file cut short and damaged: its problems, rc 0, no internal error" bash -c "
+    head -c 1500 '$W/in/pcrl_tiles_plt_tlm.j2k' > '$W/j2ki/cut.j2k' && o=\$('$PJA' info '$W/j2ki/cut.j2k') &&
+    grep -q 'problems:' <<< \"\$o\" && grep -q 'no EOC' <<< \"\$o\" && ! grep -q internal_error <<< \"\$o\""
+  check "info on the .pja of a JPEG 2000 file: stream version 8, each codestream's mode and slices" bash -c "
+    '$PJA' a -q -f '$W/in/two_codestreams.jpx' -o '$W/j2ki/t.pja' && o=\$('$PJA' info '$W/j2ki/t.pja') &&
+    grep -q 'version: 8' <<< \"\$o\" && [ \$(grep -c 'mode 1 (modelled), stream .* B in 1 slice(s)' <<< \"\$o\") -eq 2 ] &&
+    grep -q 'bands: 2' <<< \"\$o\" && grep -q 'pja: extracts it' <<< \"\$o\""
+  check "a --stats on a JPEG 2000 file: parse, encode and verify, its slices as bands; bench too" bash -c "
+    '$PJA' a -f --stats -th 1 '$W/in/two_codestreams.jpx' -o '$W/j2ki/s.pja' |
+    grep -q 'stats: read .*parse .*encode .*verify .*write .*; 1 thread(s), 2 band(s)' &&
+    '$PJA' bench -r 1 '$W/in/two_codestreams.jpx' | grep -q '^  a .* MB/s  (.*encode .*verify'"
+fi
 
 echo "--- report"
 python3 -I -c "

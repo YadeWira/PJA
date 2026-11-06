@@ -1,7 +1,8 @@
 { pja selftest (doc/CLI.md): the samples inside the binary (pjaselftest.inc,
   written by tools/gen_selftest.py: a baseline JPEG, a progressive one, an
-  arithmetic-coded one, a JPEG-LS, and the baseline one again as stream
-  version 5, the model of older .pja files) compressed and extracted on every SIMD
+  arithmetic-coded one, a JPEG-LS, a JPEG 2000 codestream (stream version
+  8, mode 1), and the baseline one again as stream version 5, the model of
+  older .pja files) compressed and extracted on every SIMD
   path this machine and this build have (pjasysinfo), with one thread and
   with two (two decode the bands while they are encoded). Each .pja has to
   be the very bytes the include holds, on every path, and each has to come

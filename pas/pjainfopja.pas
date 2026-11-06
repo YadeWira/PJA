@@ -29,7 +29,7 @@ function StreamBands(const s: TBytes; maxRaw: QWord): Integer;
 
 implementation
 
-uses pjaformat, pjacodec, pjajpeg, pjajls, pjamodel;
+uses Math, pjaformat, pjacodec, pjajpeg, pjajls, pjamodel;
 
 const
   { doc/CODEC.md, version 6 }
@@ -37,6 +37,9 @@ const
   PART_ENTRY = 13;
   PART_ZEROS = 1; PART_COPY = 2;
   MAX_LISTED_PARTS = 64;
+  { doc/CODEC.md, version 8 }
+  J2K_ENTRY = 13;
+  J2K_LISTED = 64;
   MAX_STREAM_DEPTH = 4;
 
 function ProbePja(const d: TBytes): Boolean;
@@ -99,17 +102,98 @@ begin
   Result := Copy(s, p, Length(s) - p);
 end;
 
+{ version 8: the slices of a mode 1 stream (doc/CODEC.md: its byte 0 the
+  layout, then a 4-byte check, then S); 0 when it cannot be told }
+function J2kSlices(const s: TBytes; at, len: Int64): Int64;
+begin
+  Result := 0;
+  if (at < 0) or (len < 9) or (at + len > Length(s)) then Exit;
+  Result := GetU32(s, at + 5);
+end;
+
+{ version 8: the slices of its codestreams of mode 1, the bands' kin (each
+  its own model, on a thread of its own) }
+function J2kStreamSlices(const s: TBytes): Int64;
+var k, i, p, sp, slen: Int64;
+begin
+  Result := 0;
+  if Length(s) < 6 then Exit;
+  k := GetU32(s, 2);
+  if 6 + J2K_ENTRY * k > Length(s) then Exit;
+  sp := 6 + J2K_ENTRY * k;
+  i := 0;
+  while i < k do begin
+    p := 6 + J2K_ENTRY * i;
+    slen := GetU32(s, p + 8);
+    if s[p + 12] = 1 then Result := Result + J2kSlices(s, sp, slen);
+    sp := sp + slen;
+    Inc(i);
+  end;
+end;
+
 function StreamBands(const s: TBytes; maxRaw: QWord): Integer;
 var j: TJpeg; jl: TJls; symbols: Boolean;
 begin
   Result := 0;
   if Length(s) < 2 then Exit;
   if s[0] = STREAM_PARTS then Exit(StreamBands(InnerStream(s), maxRaw));
+  if s[0] = STREAM_J2K then Exit(Integer(Min(J2kStreamSlices(s), High(Integer))));
   if StreamHeaders(s, j, CapRaw(maxRaw)).Ok then begin
     if not j.lossless then Result := BandCount(j);
   end else if StreamJlsHeaders(s, jl, symbols, CapRaw(maxRaw)).Ok then begin
     if symbols then Result := 1 else Result := JlsBandCount(jl);
   end;
+end;
+
+{ version 8 (doc/CODEC.md): its codestreams, each with its place, mode and
+  stream, then the host (the file's other bytes, the raw bytes' model) }
+procedure DescribeJ2kStream(const s: TBytes; n: TInfoNode);
+var k, i, p, sp, slen, modelled, slices: Int64; mode: Integer; list, it: TInfoNode;
+begin
+  n.Str('kind', 'JPEG 2000 family (codestreams, each with a mode; the rest as bytes)');
+  if Length(s) < 6 then begin n.Str('problem', 'cut short'); Exit; end;
+  n.Num('flags', s[1]);
+  k := GetU32(s, 2);
+  n.Num('codestreams', k);
+  if 6 + J2K_ENTRY * k > Length(s) then begin n.Str('problem', 'codestream entries past the end'); Exit; end;
+  list := n.List('codestream_list');
+  sp := 6 + J2K_ENTRY * k;
+  modelled := 0; slices := 0;
+  i := 0;
+  while i < k do begin
+    p := 6 + J2K_ENTRY * i;
+    slen := GetU32(s, p + 8);
+    mode := s[p + 12];
+    if mode = 1 then begin
+      modelled := modelled + 1;
+      slices := slices + J2kSlices(s, sp, slen);
+    end;
+    if i < J2K_LISTED then begin
+      it := list.Obj;
+      it.Num('offset', GetU32(s, p));
+      it.Num('length', GetU32(s, p + 4));
+      it.Num('mode', mode);
+      it.Num('stream_bytes', slen);
+      it.line := 'at ' + IntToStr(GetU32(s, p)) + ', ' + IntToStr(GetU32(s, p + 4)) + ' B, mode ' + IntToStr(mode);
+      case mode of
+        0: it.line := it.line + ' (as bytes, in the host)';
+        1: begin
+             it.Num('slices', J2kSlices(s, sp, slen));
+             it.line := it.line + ' (modelled), stream ' + IntToStr(slen) + ' B in ' +
+                        IntToStr(J2kSlices(s, sp, slen)) + ' slice(s)';
+           end;
+        else it.line := it.line + ' (a later release''s)';
+      end;
+    end;
+    sp := sp + slen;
+    Inc(i);
+  end;
+  if k > J2K_LISTED then n.Num('codestreams_not_listed', k - J2K_LISTED);
+  n.Num('modelled', modelled);
+  { the slices: the bands of JPEG 2000 (--stats counts them as bands) }
+  n.Num('bands', slices);
+  if sp <= Length(s) then n.Num('host_stream_bytes', Length(s) - sp)
+  else n.Str('problem', 'streams past the end');
 end;
 
 procedure DescribeStream(const s: TBytes; maxRaw: QWord; n: TInfoNode; depth: Integer);
@@ -142,6 +226,10 @@ begin
       if symbols then begin n.Str('jls_model', 'symbols'); n.Num('bands', 1); end
       else begin n.Str('jls_model', 'samples'); n.Num('bands', JlsBandCount(jl)); end;
     end else n.Str('problem', 'its header stream does not decode');
+    Exit;
+  end;
+  if s[0] = STREAM_J2K then begin
+    DescribeJ2kStream(s, n);
     Exit;
   end;
   if s[0] <> STREAM_PARTS then begin

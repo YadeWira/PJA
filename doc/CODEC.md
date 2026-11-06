@@ -3125,3 +3125,37 @@ code-block above, the rules against the last ones) is a later mode 1
 layout. Speed: SSE4.1 or AVX2 copies of the mixer (10% measured) and
 codestreams of a file in parallel. A single-tile codestream is one slice,
 one thread.
+
+## JPEG 2000 and the 0.9.5 command together (06/11/2026)
+
+The JPEG 2000 work (stream version 8, stages A to C) and the 0.9.5 speed,
+durability and command branches merged into one. Nothing in a stream
+changed: the stream hashes of `.github/test.sh` (JPEG's and JPEG 2000's
+lines) and `test_j2kcs -mode1`'s digest are the ones each branch had.
+
+- **The stage timers** (`--stats`, `bench`; `pjastage`) count JPEG 2000
+  too: `parse` is the walk of the box tree (`J2kCodestreams`), `encode`
+  each codestream taken apart with its decisions through the model, and
+  `verify` both mode 1's own check of each codestream's stream (`pjaj2km`
+  decodes it before it gives it) and the whole stream read back. A
+  codestream's slices count as its bands (`pjainfopja.StreamBands`).
+- **Scheduling**: the largest files first and the threads shared out
+  between files and within each (bands, slices) apply to JPEG 2000 files
+  as they are: the order goes by the file's size, and the threads a file
+  gets go to its codestreams' slices.
+- **`pja selftest`** carries a JPEG 2000 codestream (tests/j2k's
+  `rpcl_sop_eph.j2k`, RPCL with SOP and EPH, 2318 B -> 554 B in mode 1),
+  whose `.pja` has to be the same bytes on every SIMD path.
+- **`pja info` and `report`** describe JPEG 2000 files (`pjainfoj2k`):
+  the box tree, each codestream's SIZ, COD, CAP and tiles, its markers,
+  and what PJA does with it: mode 1 with the bytes its stream takes, or
+  mode 0 with the analysis's reason. 400 damaged copies of tests/j2k's
+  files: no exception, and each file's mode 1 bytes the same as `a`'s.
+
+Speed, alternating A/B, best of 3, 8 threads (`taskset -c 0-7`), `a` and
+`x` of the whole set: 10 photos of the corpus (7.6 MB), the merged binary
+against rel-095 before the merge, 4.46 / 2.21 s against 4.51 / 2.13 s,
+then 4.54 / 2.15 against 4.57 / 2.15 and 4.60 / 2.14 against 4.71 / 2.25
+(the same within the noise, the same bytes); three real JPEG 2000 files
+(1.3 MB), against the j2k branch alone, 4.57 / 2.25 s against 4.65 /
+2.28 s, the same bytes.
