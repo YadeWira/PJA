@@ -802,3 +802,15 @@ stop:
   S->prevBe = st0.prevBe; S->prevLen = st0.prevLen; S->beLow = st0.beLow; S->beHigh = st0.beHigh;
   return 1;
 }
+
+/* The compiler that built the C part, for the command's --version and
+   report: a string constant, no library */
+const char *pjasys_cc(void) {
+#if defined(__clang__)
+  return "clang " __clang_version__;
+#elif defined(__GNUC__)
+  return "gcc " __VERSION__;
+#else
+  return "unknown C compiler";
+#endif
+}

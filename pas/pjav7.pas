@@ -16,6 +16,15 @@ unit pjav7;
 
 interface
 
+{ Which SIMD copies of the loop pjav7c.c was built with: 1 SSE4.1, 2 AVX2,
+  4 SSE2 in the plain copy (the command's --version, --cpu and selftest) }
+function V7Paths: Integer;
+{ pjamodel's tables handed to the C again, after UseSse41 or UseAvx2
+  changed (the command's --cpu): no band may be running }
+procedure V7Retable;
+{ the C compiler that built pjav7c.c and pjasysc.c, with its version }
+function V7Compiler: string;
+
 implementation
 
 uses SysUtils, pjaarith, pjamodel, pjablake3, pjajpeg;
@@ -36,6 +45,8 @@ procedure pjav7_tables(constref t: TV7Tables); cdecl; external;
 procedure pjasys_b3chunks(input: PByte; n: SizeInt; counter: QWord; cv: PLongWord); cdecl; external;
 function pjasys_huffenc(var hs: THuffEncScan): SizeInt; cdecl; external;
 function pjasys_huffdec(var hs: THuffDecScan): SizeInt; cdecl; external;
+function pjav7_paths: LongInt; cdecl; external;
+function pjasys_cc: PChar; cdecl; external;
 
 { pjasysc.c's huff_t is THuff as laid out here: no padding anywhere }
 function HuffLayoutOk: Boolean;
@@ -97,11 +108,26 @@ begin
   enc^.x1 := e.x1; enc^.x2 := e.x2;
 end;
 
+function V7Paths: Integer;
+begin
+  Result := pjav7_paths;
+end;
+
+procedure V7Retable;
 var t: TV7Tables;
-initialization
+begin
   V7FillTables(t);
   t.put := @Put; t.get := @Get;
   pjav7_tables(t);
+end;
+
+function V7Compiler: string;
+begin
+  Result := StrPas(pjasys_cc);
+end;
+
+initialization
+  V7Retable;
   V7Code := @Code;
   { pjasysc.c's helpers, for the units that have no C of their own }
   Blake3Chunks := @pjasys_b3chunks;

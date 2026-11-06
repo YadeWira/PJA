@@ -170,6 +170,11 @@ var
   RawCode: TRawCode = nil;
 
 procedure V7FillTables(out t: TV7Tables);
+{ The SIMD copies the models take (UseSse41, UseAvx2 below), for the
+  command's --cpu and selftest: SetSimd only with no band running, and for
+  version 7 followed by pjav7.V7Retable }
+procedure GetSimd(out sse41, avx2: Boolean);
+procedure SetSimd(sse41, avx2: Boolean);
 
 const
   { JPEG-LS: one band per JLS_BAND_SAMPLES samples, at most MAX_BANDS, at
@@ -1523,6 +1528,16 @@ begin
   RawDirty := m^.dirty;
   PoolLuma := m^.luma; PoolChroma := m^.chroma;
   Dispose(m);
+end;
+
+procedure GetSimd(out sse41, avx2: Boolean);
+begin
+  sse41 := UseSse41; avx2 := UseAvx2;
+end;
+
+procedure SetSimd(sse41, avx2: Boolean);
+begin
+  UseSse41 := sse41; UseAvx2 := avx2;
 end;
 
 procedure V7FillTables(out t: TV7Tables);

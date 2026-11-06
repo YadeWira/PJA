@@ -16,6 +16,10 @@ if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 2
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/pu" "$OUT/in" "$OUT/p" "$OUT/x" "$OUT/st"
 
 echo "== build"
+# the commit the command names in --version and report (release.yml sets
+# it; '' where there is no git)
+PJA_COMMIT=${PJA_COMMIT:-$(git rev-parse --short=7 HEAD 2>/dev/null || true)}
+export PJA_COMMIT
 # the C part (CC: the platform's C compiler). A compiler given by its full
 # path (MSYS2's MinGW-w64 gcc on Windows) needs its own folder on PATH for
 # its DLLs and its cc1/as; without it, it fails without a word.
@@ -33,6 +37,8 @@ sh pas/build_c.sh "$OUT/pc" $CPIC || { echo "the plugin's C part did not build (
 $FPC -O3 -dPJA_FAST $PIC -Fupas -Fipas -Fupas/plugin -Fipas/plugin -Fo"$OUT/pc" -FU"$OUT/pu" -o"$OUT/pja_plugin" \
   pas/plugin/pja_zpaqstd.pas > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/pja$EXE" --version
+# the samples inside the binary, on every SIMD path this runner has
+"$OUT/pja$EXE" selftest
 
 echo "== libpja"
 sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; echo "FAIL: libpja did not build"; exit 1; }

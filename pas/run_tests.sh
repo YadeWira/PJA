@@ -21,12 +21,17 @@ for prog in test_blake3 test_format test_corruption test_pjafs zpaql_segments te
   $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
-# the command as it is shipped: the fast build
+# the command as it is shipped: the fast build, with the commit it names in
+# --version and report (as the zpaq-std plugin's build.sh)
+export PJA_COMMIT=${PJA_COMMIT:-$(git -C "$PAS" describe --always --dirty --abbrev=7 2>/dev/null || true)}
 mkdir -p "$OUT/fast"
 $FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/fast" -o"$OUT/pja" "$PAS/pjacli.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 
 echo "== tests"
+# the samples pja selftest carries: the files of tests/ and the .pja the
+# command makes of them (the formats are frozen: they never change)
+python3 "$PJA/tools/gen_selftest.py" --check "$OUT/pja"
 "$OUT/test_blake3" "$PAS/tests/kat.txt" | tail -1
 "$OUT/test_format" "$PJA/tests/jpg" "$PJA/tests/jls" | tail -1
 "$OUT/test_corruption" "$PJA/tests/jpg" "$PJA/tests/jls" | grep -E '^  (format|end to end)|cells, '
