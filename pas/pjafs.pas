@@ -590,7 +590,7 @@ var act: SigActionRec; mask: TSigSet;
 begin
   DeleteLive;
   FillChar(act, SizeOf(act), 0);
-  act.sa_handler := SigActionHandler_t(Pointer(PtrUInt(SIG_DFL)));
+  act.sa_handler := SigActionHandler(Pointer(PtrUInt(SIG_DFL)));
   fpSigAction(sig, @act, nil);
   fpSigEmptySet(mask);
   fpSigAddSet(mask, sig);
@@ -605,7 +605,7 @@ const SIGS: array[0..3] of cint = (SIGINT, SIGTERM, SIGHUP, SIGPIPE);
 var act, old: SigActionRec; i: Integer;
 begin
   FillChar(act, SizeOf(act), 0);
-  act.sa_handler := SigActionHandler_t(@OnSignal);
+  act.sa_handler := SigActionHandler(@OnSignal);
   fpSigEmptySet(act.sa_mask);
   { one handler at a time: a second signal waits }
   for i := 0 to High(SIGS) do fpSigAddSet(act.sa_mask, SIGS[i]);
