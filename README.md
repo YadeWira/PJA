@@ -95,12 +95,18 @@ byte for byte:
 | zstd --ultra -22 | 99.72% | 0.28% |
 | brotli -q 11 | 99.67% | 0.33% |
 | zpaq -m5 | 99.56% | 0.44% (18 min) |
-| **PJA 0.9.5** | **91.53%** | **8.47%** |
+| **PJA 0.9.6** | **91.58%** | **8.42%** |
 
 By kind: scanned 1-bit book pages about 70% smaller (the pixels through a
 bitonal model, better than JBIG1); book and map scans 9 to 17%; solar,
 Sentinel-2 and medical images 6 to 7%. It is slower than on JPEG (about
-0.1-0.25 MB/s per thread to compress).
+0.1-0.25 MB/s per thread to compress); since 0.9.6 a set like this one
+compresses in less than half the time on 8 threads (303 s → 136 s).
+
+HTJ2K (High-Throughput JPEG 2000, since 0.9.6): 716 real codestreams
+(460 MB of Netflix cinema frames, DICOM from public PACS and test sets,
+photos) come out **11.2% smaller**; lossless and lossy photos made with
+OpenJPH and Grok, 27%.
 
 ## Safe by design
 
@@ -228,18 +234,19 @@ kept as its pixels, through a pixel model, when that is smaller: bitonal
 (1-bit) book pages come out **more than two thirds smaller** (70.6% on the
 Internet Archive's). On 113 real-world codestreams (book
 pages, maps, solar and satellite images, DICOM; 150 MB) the codestreams come out
-**8.5% smaller**, 17% on the book pages; on 30 files from seven encoders,
-11.8%. It is slower than for JPEG (about 0.1 to 0.25 MB/s to compress and
-0.2 to 0.5 MB/s to extract on one thread; a large tiled codestream uses
-several). Since 0.9.6 **HTJ2K** codestreams too (`.jph`, `.jhc`, DICOM
+**8.4% smaller**, 17% on the book pages; on 30 files from seven encoders,
+11.7%. It is slower than for JPEG (about 0.1 to 0.25 MB/s to compress and
+0.2 to 0.5 MB/s to extract on one thread; a tiled codestream, the two
+modes of a lossless one, and a file's frames or layers use several). Since 0.9.6 **HTJ2K** codestreams too (`.jph`, `.jhc`, DICOM
 frames): each HT code-block's segments are decoded and written again
 exactly as their encoder ended them (OpenJPH, Grok, OpenHTJ2K, Kakadu), its
 values through a model, or a lossless codestream's pixels through the
 pixel models: **11% smaller** on 716 real HTJ2K codestreams (460 MB of
 cinema frames, DICOM and photos), 27% on lossless and lossy photos.
-Part 2 codestreams are kept as bytes. The 7-Zip
-plugin and the zpaq-std codecs leave JPEG 2000 files as they are, for now
-([details](doc/CODEC.md)).
+Part 2 codestreams are kept as bytes. Since 0.9.6 zpaq-std has a JPEG 2000
+codec too, `pja2k` (Part 1 codestreams, their decisions through the model;
+its ZPAQL decoder lets any zpaq extract them without the plugin). The 7-Zip
+plugin leaves JPEG 2000 files as they are, for now ([details](doc/CODEC.md)).
 
 ## Install
 

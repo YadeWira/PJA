@@ -382,6 +382,6 @@ HRESULT pja7z_GetModuleProp(uint32_t prop, propvariant_t *v) {
   if (!v) return E_INVALIDARG;
   v->vt = VT_EMPTY;
   if (prop == M_INTERFACE_TYPE) { v->vt = VT_UI4; v->v.u32 = 0; }   /* no virtual destructor */
-  else if (prop == M_VERSION) { v->vt = VT_UI4; v->v.u32 = (0u << 16) | 95u; }   /* 0.95 = PJA 0.9.5, checked against PJA_VERSION by run_tests.sh */
+  else if (prop == M_VERSION) { v->vt = VT_UI4; v->v.u32 = (0u << 16) | 96u; }   /* 0.96 = PJA 0.9.6, checked against PJA_VERSION by run_tests.sh */
   return S_OK;
 }

@@ -113,7 +113,7 @@ have been written already. The same holds for a `PJAF` version past 2, a
 `PJAB` version past 1, and a file record whose codec stream is of a
 version the decoder does not know (`doc/STABILITY.md`).
 
-The filter does not look for JPEG 2000 files yet (0.9.5 takes them in
+The filter does not look for JPEG 2000 files yet (0.9.5 and later take them in
 `pja_compress` and the command only): they stay among the raw bytes, for
 the compressor after it.
 
@@ -160,8 +160,8 @@ and no exception or signal leaves the library: errors are return codes.
 
 | function | does |
 |---|---|
-| `pja_version()` | `"pja 0.9.5"` |
-| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG, JPEG-LS or (0.9.5: stream version 8, its codestreams modelled or as their pixels) JPEG 2000 file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
+| `pja_version()` | `"pja 0.9.6"` |
+| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG, JPEG-LS or (0.9.5: stream version 8, its codestreams modelled or as their pixels; 0.9.6: HTJ2K too) JPEG 2000 file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
 | `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash; `PJA_E_VERSION` for one a newer PJA wrote |
 | `pja_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
 | `pja_filter_decode(read, ctx, write, ctx, threads)` | its stream → the bytes |
