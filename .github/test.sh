@@ -100,3 +100,13 @@ for f in "$OUT"/st7/*; do mv "$f" "$OUT/st/v7_$(basename "$f")"; done
 [ "$(wc -l < "$OUT/streams.txt")" -ge 30 ] || { echo "FAIL: too few streams"; exit 1; }
 $SHA "$OUT/streams.txt" | cut -c1-64 > hash.txt
 echo "$(wc -l < "$OUT/streams.txt" | tr -d ' ') streams, SHA-256 of their list: $(cat hash.txt)"
+
+echo "== JPEG 2000 stage B: each codestream taken apart and put back together"
+# not a format yet (stage C codes it): the side information and the decisions
+# in pjaj2kcs's blob, rebuilt from the blob alone; its digest should be the
+# same on every platform
+mkdir -p "$OUT/uj"
+$FPC -O3 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/uj" -o"$OUT/test_j2kcs$EXE" pas/tests/test_j2kcs.pas > "$OUT/fpc.log" 2>&1 \
+  || { cat "$OUT/fpc.log"; exit 1; }
+"$OUT/test_j2kcs$EXE" -q -min 14 -fuzz 20 tests/j2k > "$OUT/j2kcs.txt" || { cat "$OUT/j2kcs.txt"; echo "FAIL: test_j2kcs"; exit 1; }
+grep -E '^(files|fuzz|blobs)' "$OUT/j2kcs.txt"

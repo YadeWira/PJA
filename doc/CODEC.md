@@ -2260,3 +2260,158 @@ above) is now tested and has an error code of its own:
   files of the block, and damaged data to "Data Error", as before
   (checked on archives with the filter's version, a record tag and a
   codec stream's version changed, and with a byte of a stream flipped).
+
+## JPEG 2000, stage B: each codestream taken apart and put back together (05/11/2026)
+
+Stage B rebuilds a JPEG 2000 Part 1 codestream byte for byte from its
+headers, some side information and the decisions of its code-blocks. PJA
+parses and decodes the codestream itself; the research prototype
+(`rb.c`) read logs from an instrumented OpenJPEG instead. Nothing writes
+this yet: stage C codes the result with a model as stream version 8's
+mode 1, and only then is it fixed. Until stage C, `J2kAnalyze` and
+`J2kRebuild` are only called from the test.
+
+**Where.** `pas/pjaj2kcs.pas` (Pascal, `$R+ $Q+`) parses the main header
+and the tile-part headers. It builds tiles, resolutions, bands, precincts
+and code-blocks, walks the five progressions and the POCs, decodes and
+writes packet headers (tag trees, inclusion, zero bit-planes, passes,
+Lblock, lengths) and holds the rules. `pas/pjaj2kt1.c` (C in the
+`pjav7c.c` style: no memory taken, no library called, every buffer's size
+passed and checked) holds tier-1:
+- the coding passes decoded from a code-block's segments, with the MQ and
+  raw (BYPASS) decoders and every code-block style (BYPASS, RESET,
+  RESTART, CAUSAL, ERTERM, SEGMARK);
+- the same passes replayed from the decisions' bits alone, which gives
+  each decision its context back (compiled twice, once for each mode);
+- the MQ encoder with both terminations, FLUSH and ERTERM;
+- the lengths those terminations would give at each pass end;
+- the prefix checks;
+- BYPASS packing.
+
+Each decision is one byte, `ctx << 1 | bit`: contexts 0-8 zero coding,
+9-13 sign, 14-16 refinement, 17 run length, 18 uniform, 19 a raw bit. The
+bit is the one the coder codes; for a sign, that is before the prediction's
+xor. The decoder follows OpenJPEG 2's conventions: past a segment's end
+its bytes are FF, and an FF followed by a byte above 8F ends the data. It
+was checked decision by decision against an instrumented OpenJPEG. HL
+(x0b = 1) takes the vertical neighbours first in table D.1. OpenJPEG's
+table swaps at band 2, but in its transposed flag layout, so it agrees.
+
+**The blob.** A version byte (1), the lengths of ten streams as
+varints, then the streams:
+
+| stream | what |
+|---|---|
+| `hdr` | the main header's and the tile-parts' marker segments as they are, except a TLM or a PLT that follows from the rest (kept as its Z, its style and its count); per tile-part Isot, TPsot, TNsot and Psot (its real length, 0, or the number when the codestream is cut short); what follows the last tile-part |
+| `layout` | per tile its packets; per tile-part how many are in it and the bytes after them that are not a packet (padding, a cut, DICOM fragment headers) |
+| `t2` | per packet, empty or not, SOP, EPH, Nsop against the count; per code-block of a packet, whether it is in, and its new passes against those left (3 Mb - 2 by the QCD) |
+| `zbp` | zero bit-planes on first inclusion, against the band's last |
+| `tree` | the tag-tree nodes whose value the decoder learnt differently from the canonical one (a node is the least of its leaves, a leaf the layer of first inclusion or the zero bit-planes, never included: no value) |
+| `lblock` | per inclusion, Lblock over the least the lengths need |
+| `t1rule` | per code-block whether it is kept as bytes; per segment how it ends; per layer boundary inside a segment its rule |
+| `t1x` | explicit data: kept bytes, literal tails, explicit lengths |
+| `hdrx` | per packet, whether its header is the canonical one, and if not, its bytes |
+| `dec` | the decisions, a bit each, in the order tile, component, resolution, band, code-block (raster in the band) |
+
+How a segment ends (MQ):
+- empty;
+- FLUSH;
+- ERTERM;
+- the shortest valid prefix of FLUSH's bytes, or of ERTERM's: the length
+  goes down a byte at a time, at most 32, while the shorter prefix still
+  decodes every decision with FF after it;
+- a literal tail: the bytes committed when the last decision is coded,
+  then how far the bits go along with FLUSH's or ERTERM's, the next bit
+  the other way, then the rest as they are;
+- raw bytes.
+
+A BYPASS segment is its bits with a 0101.., 0 or 1 padding, or raw
+bytes. Where a layer cuts a segment:
+- OpenJPEG's rule, the bytes committed + 3 with a last FF dropped (for a
+  BYPASS segment, the bytes that hold its bits);
+- Kakadu's, the shortest prefix within K - 3 to K + 8 that decodes the
+  passes so far;
+- what the decoder has read after those passes: its byte pointer + 1,
+  and one more when its bit counter has at most one bit left. Found here,
+  in Adobe's Photoshop plugin and in other LuraTech-like files;
+- the length against OpenJPEG's.
+
+The analysis tries the cheap rules first, and the rebuild works out only
+the one it is told.
+
+**Refused**: the codestream stays in mode 0, and the reason is counted.
+- HTJ2K: the CAP's Part 15 bit, or code-block style 0x40;
+- Part 2's decomposition styles (DFS, ADS) and coding styles;
+- a header that does not parse;
+- what passes the limits: 65,535 tiles, 16,384 components, 2^21
+  code-blocks and 2^22 precincts a tile, 2^26 progression steps, 2^25
+  code-block entries a tile.
+
+Not refused:
+- a packet that does not fit its tile-part (the rest of that tile-part
+  is kept as it is);
+- a code-block of more than 120 passes (kept as bytes);
+- PPM and PPT: read in the order of Zppm/Zppt and kept as they are.
+
+`J2kAnalyze` rebuilds the blob before it says yes, and anything that does
+not come back is refused as `verify` (that never happened on the corpus).
+`J2kRebuild` checks every number it reads against what it has built. A
+damaged blob gives a refusal or other bytes, never an exception. In
+fuzzing, damaged blobs came back as a codestream 9% to 23% of the time:
+there is no hash in the blob, and stage C's stream has one.
+
+**Two things the parser had to learn.**
+- Conformance file g3_colr has its PPM marker segments in decreasing
+  Zppm. The data goes in the order of the index, not of the file.
+- p0_02 has an FF30 in its main header. FF30 to FF3F are markers with no
+  segment, which a decoder skips.
+
+**Tests.** `pas/tests/test_j2kcs.pas`:
+- analyses each codestream of the files given;
+- rebuilds it from a copy of the blob, after the analysis is gone, and
+  compares;
+- with `-fuzz N`, damages copies of each codestream (bits flipped
+  anywhere or in the first 512 bytes, bytes set to FF/00, cut short) and
+  of each blob;
+- prints a digest of all the blobs, the same on every platform (x86-64
+  and i386 gave the same digest on tests/j2k and on the 30 rebuild
+  files).
+
+`tests/j2k` gets five codestreams that cover what the others lack
+(tests/README.md): every code-block style, BYPASS cut by layers,
+RPCL with precincts and SOP/EPH, PCRL with tiles and tile-parts and
+PLT/TLM, and CPRL with a tile POC. `run_codec_tests.sh` and
+`.github/test.sh` run it. The streams' hash is unchanged (3387e58d…).
+
+**Results** (05/11/2026). "Side" means the side information, without
+the decisions:
+
+| set | codestreams | rebuilt byte for byte | refused | side, xz -9e | decisions per byte |
+|---|---|---|---|---|---|
+| tests/j2k | 14 | 14 | 0 | 2,884 B of 29,728 | 7.0 |
+| 30 rebuild files (7 encoder families, 26.1 MB) | 30 | 30 | 0 | 128,268 B, 0.49% | 12.8 |
+| gap1 real-world (113, 150.1 MB) | 113 | 113 | 0 | 415,620 B, 0.28% | 10.8 |
+| sample corpus, local and extracted from DICOM/PDF (1,669) | 1,669 | 1,663 | 6: 2 HTJ2K, 2 tiles, 1 Part 2, 1 cut header | | |
+| downloads (705 codestreams in 515 files) | 705 | 552 | 153: 87 HTJ2K, the rest broken or fuzz files | | |
+
+No codestream failed, nothing crashed and nothing timed out, here or
+under fuzzing:
+- 5,640 damaged codestreams and 4,400 damaged blobs from the downloads;
+- 2,094 and 1,602 more from the conformance, jpylyzer, rebuild and
+  tests sets;
+- 2,700 and 2,700 from tests/j2k.
+
+On gap1:
+- 0 header exceptions, 65 tree overrides;
+- tails 4.5 bits each on 61,147 segments;
+- segments: 180k FLUSH, 307k ERTERM, 12k shortest prefix, 61k tails;
+- layer boundaries: 8,308 OpenJPEG, 22,933 shortest prefix, 744 decoder
+  reach, 2 explicit.
+
+The extracted DICOM codestreams whose fragments were not joined keep the
+fragment headers and everything after them as layout bytes.
+
+**Speed** (one thread, this machine, decode plus rebuild): the analysis
+with its check runs at 0.65 to 1.0 MB/s of codestream, the rebuild alone
+at 1.6 to 2.8 MB/s. Tier-1 takes about 75% of the time; the replay is
+dearer than the decode, because it reads its decisions bit by bit.

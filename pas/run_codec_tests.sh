@@ -18,7 +18,7 @@ echo "== build"
 # the C part (stream version 7's model), and the same without SSE2
 "$PAS/build_c.sh" "$OUT/c"
 "$PAS/build_c.sh" "$OUT/cplain" -DPJA_V7_PLAIN
-for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt test_threads test_versions test_j2k; do
+for prog in test_jpeg test_jpeg_corrupt test_tolerances test_jls test_arith test_codec test_codec_corrupt test_threads test_versions test_j2k test_j2kcs; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -76,6 +76,8 @@ echo "-- stream version 8 (the JPEG 2000 family): the codestreams found, every s
 "$OUT/test_j2k" "$PJA/tests/j2k" | tail -1
 "$OUT/test_codec" "$PJA/tests/j2k" 7 | tail -2
 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
+echo "-- JPEG 2000 stage B: each codestream taken apart, put back together from the blob alone, and damaged copies"
+"$OUT/test_j2kcs" -q -min 14 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
 echo "-- what a later release writes: FutureVersion (codec byte 0 from 9 to 255, PATCH, version 8, .pja)"
 "$OUT/test_versions" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -2
 
