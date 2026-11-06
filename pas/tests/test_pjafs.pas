@@ -59,9 +59,17 @@ begin
   if not ForceDirectories(Result) then raise Exception.Create('could not create ' + Result);
 end;
 var d, outside: string; q: RawByteString; f: TFsResult;
-    oc: TOutcome; i: Integer; foreign, hGood: THash16;
-const TEMP_DIRS: array[0..11] of string = ('verify', 'keep', 'final_outside', 'final_outside_x', 'dangling',
-        'dangling_x', 'hard', 'hard_x', 'foreign', 'corrupt_link', 'dirs', 'long');
+    oc: TOutcome; i: Integer; foreign, hGood: THash16; pid: Int64; note: RawByteString; dead: string;
+const TEMP_DIRS: array[0..13] of string = ('verify', 'keep', 'final_outside', 'final_outside_x', 'dangling',
+        'dangling_x', 'hard', 'hard_x', 'foreign', 'corrupt_link', 'dirs', 'long', 'left', 'left_clean');
+
+{ a file of `age` seconds }
+procedure PutOld(const f: string; age: Integer);
+begin
+  PutText(f, 'left');
+  if FileSetDate(f, DateTimeToFileDate(Now - age / 86400)) <> 0 then raise Exception.Create('FileSetDate ' + f);
+end;
+
 begin
   cells := 0; failures := 0;
   if ParamCount < 1 then begin Writeln('usage: test_pjafs <temp_dir>'); Halt(2); end;
@@ -97,7 +105,7 @@ begin
   f := WriteVerified(d + '/ok.jpg', B('correct contents'), H16('correct contents'), omDelete, False, oc);
   Check(f.Ok and (oc.kind = ocVerified) and (oc.path = d + '/ok.jpg'), 'positive control: Verified');
   Check(ReadText(d + '/ok.jpg') = 'correct contents', 'the good case stays on disk');
-  Check(not Exists(d + '/.pja-tmp0'), '  through a temporary, not left behind');
+  Check(not Exists(d + '/' + TempName(0)), '  through a temporary, not left behind');
   foreign := H16('something else');
   f := WriteVerified(d + '/bad.jpg', B('correct contents'), foreign, omDelete, False, oc);
   Check(f.Ok and (oc.kind = ocDeleted), 'foreign hash: Deleted');
@@ -133,14 +141,14 @@ begin
      and (ReadText(d + '/f.jpg.corrupt') = 'bad'), '  and with keep, too: it goes to .corrupt');
   f := WriteVerified(d + '/f.jpg', B('x'), H16('x'), omDelete, True, oc);
   Check(f.Ok and (ReadText(d + '/f.jpg') = 'x'), 'with overwrite: replaces it');
-  Check(not Exists(d + '/.pja-tmp0'), '  without leaving the temporary');
-  PutText(d + '/.pja-tmp0', 'taken');
+  Check(not Exists(d + '/' + TempName(0)), '  without leaving the temporary');
+  PutText(d + '/' + TempName(0), 'taken');
   f := WriteVerified(d + '/g.jpg', B('y'), H16('y'), omDelete, True, oc);
-  Check(f.Ok and (ReadText(d + '/g.jpg') = 'y') and (ReadText(d + '/.pja-tmp0') = 'taken'),
+  Check(f.Ok and (ReadText(d + '/g.jpg') = 'y') and (ReadText(d + '/' + TempName(0)) = 'taken'),
      '  with temporary 0 taken, it uses another and does not touch it');
   f := WriteVerified(d + '/h.jpg', B('z'), H16('z'), omDelete, False, oc);
-  Check(f.Ok and (ReadText(d + '/h.jpg') = 'z') and (ReadText(d + '/.pja-tmp0') = 'taken')
-     and not Exists(d + '/.pja-tmp1'), '  and without overwrite too');
+  Check(f.Ok and (ReadText(d + '/h.jpg') = 'z') and (ReadText(d + '/' + TempName(0)) = 'taken')
+     and not Exists(d + '/' + TempName(1)), '  and without overwrite too');
   ForceDirectories(d + '/folder.jpg');
   f := WriteVerified(d + '/folder.jpg', B('x'), H16('x'), omDelete, True, oc);
   Check((not f.Ok) and DirectoryExists(d + '/folder.jpg'), 'over a directory, not even with overwrite: ' + f.Text);
@@ -158,6 +166,54 @@ begin
   f := WriteVerified('sub/rel.jpg', B('r'), H16('r'), omDelete, False, oc);
   Check(f.Ok and (ReadText(d + '/sub/rel.jpg') = 'r'), 'relative path with a directory');
   SetCurrentDir(TMP);
+
+  Writeln('--- the temporary name: PJA''s own pattern, with the pid');
+  Check(IsTempName('.pja-tmp-123-0', pid) and (pid = 123), '.pja-tmp-123-0: pid 123');
+  Check(IsTempName('.pja-tmp-4294967295-999', pid) and (pid = 4294967295), '  the largest pid, the last try');
+  Check(IsTempName('.pja-tmp7', pid) and (pid = 0), '.pja-tmp7 (0.9.0 and earlier): no pid');
+  Check(IsTempName(TempName(5), pid) and (pid = GetProcessID), 'TempName carries this process''s pid');
+  Check(not IsTempName('.pja-tmp', pid) and not IsTempName('.pja-tmp-12', pid) and not IsTempName('.pja-tmp-1-', pid)
+     and not IsTempName('.pja-tmp-01-0', pid) and not IsTempName('.pja-tmp-1-1000', pid)
+     and not IsTempName('.pja-tmp-0-0', pid) and not IsTempName('.pja-tmp-1-0x', pid) and not IsTempName('x.pja-tmp-1-0', pid)
+     and not IsTempName('.pja-tmp1234', pid) and not IsTempName('.pja-tmp-a-0', pid) and not IsTempName('.pja-tmp-99999999999-0', pid),
+     'anything else is not one');
+
+  Writeln('--- leftovers of an interrupted run: noticed, deleted only when asked');
+  { 4294967295 is no process's pid, here or on Windows }
+  dead := '.pja-tmp-4294967295-';
+  d := TempDir('left');
+  PutOld(d + '/' + dead + '0', 2 * LEFTOVER_AGE);
+  PutOld(d + '/' + dead + '1', 60);                         { fresh: may still be written }
+  PutOld(d + '/' + TempName(9), 2 * LEFTOVER_AGE);          { a live process's: this one }
+  PutOld(d + '/.pja-tmp-x', 2 * LEFTOVER_AGE);               { not the pattern }
+  note := CheckLeftovers(d + '/out.jpg', False);
+  Check(Pos('found 1 leftover temporary', note) > 0, 'one found: ' + note);
+  Check(Exists(d + '/' + dead + '0'), '  and without asking, nothing deleted');
+  Check(CheckLeftovers(d + '/other.jpg', False) = '', '  each directory once per run');
+  d := TempDir('left_clean');
+  PutOld(d + '/' + dead + '0', 2 * LEFTOVER_AGE);
+  PutOld(d + '/.pja-tmp3', 2 * LEFTOVER_AGE);
+  PutOld(d + '/' + dead + '1', 60);
+  PutOld(d + '/' + TempName(9), 2 * LEFTOVER_AGE);
+  PutOld(d + '/.pja-tmp-x', 2 * LEFTOVER_AGE);
+  ForceDirectories(d + '/' + dead + '2');
+  FileSetDate(d + '/' + dead + '2', DateTimeToFileDate(Now - 2 * LEFTOVER_AGE / 86400));
+  {$ifndef MSWINDOWS}
+  PutText(d + '/victim', 'kept');
+  MakeLink(d + '/victim', d + '/' + dead + '3');
+  { pid 1 is alive (init; in a container it may be pja itself) }
+  PutOld(d + '/.pja-tmp-1-0', 2 * LEFTOVER_AGE);
+  {$endif}
+  note := CheckLeftovers(d + '/out.jpg', True);
+  Check(Pos('deleted 2 leftover temporaries', note) > 0, 'asked: an old one of a dead pid and an old-pattern one: ' + note);
+  Check(not Exists(d + '/' + dead + '0') and not Exists(d + '/.pja-tmp3'), '  both gone');
+  Check(Exists(d + '/' + dead + '1') and Exists(d + '/' + TempName(9)) and Exists(d + '/.pja-tmp-x'),
+     '  a fresh one, a live process''s and another name stay');
+  Check(DirectoryExists(d + '/' + dead + '2'), '  a directory with the name stays');
+  {$ifndef MSWINDOWS}
+  Check(IsLink(d + '/' + dead + '3') and (ReadText(d + '/victim') = 'kept'), '  a link with the name stays, its target too');
+  Check(Exists(d + '/.pja-tmp-1-0'), '  nor one of pid 1, which is alive');
+  {$endif}
 
   { --- Defects measured on 2026-10-09 in the previous Rust version. }
   {$ifndef MSWINDOWS}
@@ -199,7 +255,7 @@ begin
   f := WriteVerified(d + '/' + q, B('k'), H16('other'), omKeep, False, oc);
   Check(f.Ok and (oc.kind = ocKept) and (oc.path = d + '/pja.corrupt') and (ReadText(d + '/pja.corrupt') = 'k'),
      'keep: <name>.corrupt is too long, pja.corrupt beside it');
-  Check(not Exists(d + '/.pja-tmp0'), 'no temporary left');
+  Check(not Exists(d + '/' + TempName(0)), 'no temporary left');
 
   Writeln('--- corrupt_name_taken_by_a_dangling_link');
   d := TempDir('corrupt_link');
@@ -214,6 +270,6 @@ begin
 
   Writeln;
   Writeln(cells, ' cells, ', failures, ' failures');
-  {$ifdef MSWINDOWS} if (failures > 0) or (cells < 32) then Halt(1);
-  {$else} if (failures > 0) or (cells < 49) then Halt(1); {$endif}
+  {$ifdef MSWINDOWS} if (failures > 0) or (cells < 44) then Halt(1);
+  {$else} if (failures > 0) or (cells < 62) then Halt(1); {$endif}
 end.

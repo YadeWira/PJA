@@ -143,7 +143,10 @@ Each row is a case with its expected result, and it is in the tests.
 | case | expected |
 |---|---|
 | link (symbolic or hard) with the output's name | without overwrite: the name is taken (a dangling link takes it too); with overwrite, the entry is replaced and **it is never written through** |
-| any write | to a new temporary file with a short name of its own (`.pja-tmpN`) in the same directory, which takes the output's name only once complete: **cut short, it leaves no truncated file under that name** |
+| any write | to a new temporary file with a short name of its own (`.pja-tmp-PID-N`) in the same directory, which takes the output's name only once complete: **cut short, it leaves no truncated file under that name** |
+| a power cut | the temporary's data is flushed to the disk (`fsync`, `FlushFileBuffers`) before it takes the name, and the directory after (Unix; Windows has no such call and leaves the name to the file system's journal): **the output is whole or absent, never empty under its name** (unless the run asked for `--no-sync`). A failed flush of the directory fails the run (`NotSynced`) with the output already in place |
+| SIGINT, SIGTERM, SIGHUP, SIGPIPE (Ctrl-C, closing the console) | the temporaries being written are deleted, from a fixed table and without allocating, and the process ends by the same signal (130 for SIGINT); one ignored at start stays ignored |
+| a temporary left by a SIGKILL or a crash | the next run that writes in that directory names it; `--clean-temps` deletes it: only PJA's name pattern, a regular file, older than an hour, of a process that is gone (pid 1 included in the ones asked about; another machine's processes cannot be seen) |
 | the output already exists | rejected, unless overwrite is requested; the name is given without replacing anything (link, or MoveFileEx without REPLACE_EXISTING), so one taken meanwhile is rejected too |
 | with overwrite | the temporary is renamed on top: **what was there is only replaced by something that verified** |
 | the output is a directory | rejected, even if overwrite is requested |

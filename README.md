@@ -96,10 +96,11 @@ photos and the same damage ([how][wSafe]):
 | written promise that its files keep opening | **yes** ([STABILITY](doc/STABILITY.md)) | no | archived | no | ISO standard |
 
 It is design, not luck: a stored hash and size, a decode-and-compare before
-writing, a temporary that takes the output's name only when it is complete,
-and a clean refusal of anything it does not understand. What it does not
-do: repair a damaged `.pja` (keep backups, or use an archiver with recovery
-records) or authenticate it (the hash catches accidents, not tampering).
+writing, a temporary that takes the output's name only when it is complete
+and on the disk (and is deleted on Ctrl-C), and a clean refusal of anything
+it does not understand. What it does not do: repair a damaged `.pja` (keep
+backups, or use an archiver with recovery records) or authenticate it (the
+hash catches accidents, not tampering).
 
 ## Against archivers
 
