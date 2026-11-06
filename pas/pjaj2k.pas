@@ -64,6 +64,19 @@ function J2kExtension(const data: TBytes): string;
   walks the same tree); t its type, 4 bytes big-endian }
 function J2kIsSuperbox(t: Cardinal): Boolean;
 
+threadvar
+  { > 0: a codestream whose SIZ declares more samples (its image area times
+    its components, more than its planes hold) is refused before it is
+    decoded (pjaj2kcs, pjaj2kpx). pjacodec decodes a file's small
+    codestreams side by side under it, and those refused there again alone:
+    the memory of several at once stays small }
+  J2kSamplesCap: Int64;
+
+{ (x - xo) (y - yo) n, 0 for an empty area, High(Int64) past it }
+function J2kAreaTimes(x, y, xo, yo, n: Int64): Int64;
+{ that of a SIZ marker segment (from its marker); -1 when it is not one }
+function J2kSizSamples(const siz: TBytes): Int64;
+
 implementation
 
 const
@@ -129,6 +142,23 @@ begin
     if (psot < 14) or (psot > limit - p) then Exit;
     p := p + psot;
   end;
+end;
+
+function J2kAreaTimes(x, y, xo, yo, n: Int64): Int64;
+var a, b: Int64;
+begin
+  a := x - xo; b := y - yo;
+  if (a <= 0) or (b <= 0) or (n <= 0) then Exit(0);
+  if b > High(Int64) div a then Exit(High(Int64));
+  Result := a * b;
+  if n > High(Int64) div Result then Exit(High(Int64));
+  Result := Result * n;
+end;
+
+function J2kSizSamples(const siz: TBytes): Int64;
+begin
+  if (Length(siz) < 40) or (Be16(siz, 0) <> $FF51) then Exit(-1);
+  Result := J2kAreaTimes(Be32(siz, 6), Be32(siz, 10), Be32(siz, 14), Be32(siz, 18), Be16(siz, 38));
 end;
 
 function J2kIsSuperbox(t: Cardinal): Boolean;

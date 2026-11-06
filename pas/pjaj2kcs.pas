@@ -193,7 +193,7 @@ function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
 
 implementation
 
-uses pjamodel, pjathread;
+uses pjamodel, pjathread, pjaj2k;
 
 {$L pjaj2kt1.o}
 {$L pjaj2kmc.o}
@@ -2822,6 +2822,8 @@ begin
         p := p + n[i];
       end;
       j.ReadHeaders;
+      if (J2kSamplesCap > 0) and (J2kAreaTimes(j.xsiz, j.ysiz, j.xosiz, j.yosiz, j.ncomp) > J2kSamplesCap) then
+        Refuse('more samples than the cap');
       used := TileList(j);
       nu := 0;
       for i := 0 to High(used) do nu := nu + used[i];

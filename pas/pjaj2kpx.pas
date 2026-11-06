@@ -100,7 +100,7 @@ function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; o
 
 implementation
 
-uses pjacodec, pjastage;
+uses pjacodec, pjastage, pjaj2k;
 
 {$L pjaj2kpm.o}
 
@@ -548,6 +548,9 @@ begin
   if not CodeRaw(cd, blob, bound) then Exit(m2Bad);
   { the planes from its SIZ, within the bounds, before they are decoded }
   if not J2kBlobSiz(blob, raw) then Exit(m2Bad);
+  if (J2kSamplesCap > 0) and (J2kSizSamples(raw) > J2kSamplesCap) then begin
+    why := 'more samples than the cap'; Exit(m2Bad);
+  end;
   px := TPx.Create(False);
   try
     why := ParseSiz(raw, px.siz);

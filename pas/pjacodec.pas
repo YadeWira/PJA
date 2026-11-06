@@ -1529,6 +1529,9 @@ const
     several and none is larger than this (Motion JPEG 2000's frames, JPX
     layers): a codestream's memory each at once }
   CODESTREAMS_TOGETHER = 4 shl 20;
+  { and none whose SIZ declares more samples (pjaj2kcs.J2kSamplesCap):
+    eight at once take about what one at the bounds does }
+  SAMPLES_TOGETHER = 1 shl 22;
 { ReadJ2k's: the codestreams whose stream src[i] is not nil decoded side by
   side (each its bytes and its error) }
 procedure DecodeTogether(const src: TKnown; const modes: array of Byte; const cs: TJ2kCodestreams;
@@ -1790,8 +1793,9 @@ begin
   if prevEnd > Length(host) + cut then Exit(CodecFail(ceBadStream));
   if cut = 0 then begin data := host; Exit(CodecFail(ceOk)); end;
   { several codestreams to decode, none large, threads for more than one:
-    decoded side by side first (each the same bytes), then put in place
-    below in order, an error where the loop below meets it }
+    decoded side by side first (each the same bytes, under the samples'
+    cap), then put in place below in order; one refused there is decoded
+    again on its own below, which gives the error where the loop meets it }
   src := nil; pre := nil; perr := nil;
   if threads > 1 then begin
     SetLength(src, k); SetLength(ccs, k);
@@ -1820,10 +1824,10 @@ begin
       if gap > 0 then Move(host[hp], data[op], gap);
       hp := hp + gap; op := op + gap;
       if (i < Length(known)) and (known[i] <> nil) then cs := known[i]
-      else if (i < Length(src)) and (src[i] <> nil) then begin
-        if perr[i] <> ceOk then begin data := nil; Exit(CodecFail(perr[i])); end;
-        cs := pre[i];
-      end else begin
+      else if (i < Length(src)) and (src[i] <> nil) and (perr[i] = ceOk) then cs := pre[i]
+      else begin
+        { (decoded side by side and refused, maybe for the cap alone: again,
+          on its own, which says why) }
         if mode[i] = J2K_PIXELS then e := J2kMode2Dec(Copy(stream, sp, slen), len, threads, cs)
         else e := J2kMode1Dec(Copy(stream, sp, slen), len, threads, cs);
         if e <> ceOk then begin data := nil; Exit(CodecFail(e)); end;
@@ -2014,8 +2018,15 @@ begin
     try
       if not decoding then J2kChoose(data, cs[k].off, cs[k].len, each, ms[k], md[k])
       else if src[k] = nil then
-      else if md[k] = J2K_PIXELS then errs[k] := J2kMode2Dec(src[k], cs[k].len, each, ms[k])
-      else errs[k] := J2kMode1Dec(src[k], cs[k].len, each, ms[k]);
+      else begin
+        J2kSamplesCap := SAMPLES_TOGETHER;
+        try
+          if md[k] = J2K_PIXELS then errs[k] := J2kMode2Dec(src[k], cs[k].len, each, ms[k])
+          else errs[k] := J2kMode1Dec(src[k], cs[k].len, each, ms[k]);
+        finally
+          J2kSamplesCap := 0;
+        end;
+      end;
     except
       failed[k] := Exception(AcquireExceptionObject);
       stop := True;
@@ -2071,14 +2082,17 @@ begin
   end;
 end;
 
-{ several codestreams, none larger than CODESTREAMS_TOGETHER, and threads
-  for more than one }
-function CsTogether(const cs: TJ2kCodestreams; threads: Integer): Boolean;
-var i: Integer;
+{ several codestreams, none larger than CODESTREAMS_TOGETHER nor declaring
+  more than SAMPLES_TOGETHER samples, and threads for more than one }
+function CsTogether(const data: TBytes; const cs: TJ2kCodestreams; threads: Integer): Boolean;
+var i: Integer; n: Int64;
 begin
   Result := (threads > 1) and (Length(cs) > 1);
-  for i := 0 to High(cs) do
-    if cs[i].len > CODESTREAMS_TOGETHER then Exit(False);
+  for i := 0 to High(cs) do begin
+    if (cs[i].len > CODESTREAMS_TOGETHER) or (cs[i].len < 42) then Exit(False);
+    n := J2kSizSamples(Copy(data, cs[i].off + 2, 40));
+    if (n < 0) or (n > SAMPLES_TOGETHER) then Exit(False);
+  end;
 end;
 
 { A file of the JPEG 2000 family as version 8: each codestream in mode 1
@@ -2101,7 +2115,7 @@ begin
   StageEnter(stEncode);
   SetLength(ms, Length(cs)); SetLength(known, Length(cs)); SetLength(md, Length(cs));
   cut := 0; pixels := 0;
-  if CsTogether(cs, threads) then begin
+  if CsTogether(data, cs, threads) then begin
     { the codestreams side by side: each one's stream is the same }
     pool := TCsPool.Create;
     try
