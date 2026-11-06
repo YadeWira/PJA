@@ -71,7 +71,23 @@ type
     rule: array[0..15] of Int64;      { segments by how they end }
     brule: array[0..3] of Int64;      { layer boundaries: OpenJPEG's, shortest prefix, explicit, decoder's reach }
     side: array[0..J2K_NSTREAMS - 1] of Int64;
+    { the analysis', for the zpaq-std plugin's ZPAQL decoder (its limits and
+      memory): the largest SIZ value, the components, the most levels, the
+      largest Mb and band side, the header's records (an upper bound of
+      their words), and per tile what J2kTileCost says (the most). Maxima:
+      AddStats keeps the larger of each }
+    zSiz, zNcomp, zMaxNl, zMaxMb, zMaxDim, zHdr, zTileWords, zTileBytes: Int64;
   end;
+
+  { a tile's counts, for J2kTileCost: its components, resolutions, bands,
+    code-blocks, precincts, precinct bands, tag tree nodes, packet entries,
+    pieces of segments, packets, its tile-parts' marker segments, its
+    progression changes, the model's maps (bytes), the largest code-block's
+    decisions bound (pjaj2km_cb's cap) and its tile-parts' bytes }
+  TJ2kTileCounts = record
+    ncomp, nres, nbands, ncb, nprec, npb, nodes, nie, npc, npk, items, pocs, mapNeed, maxCap, tileBytes: Int64;
+  end;
+  TJ2kTileCostFn = procedure(const c: TJ2kTileCounts; out words, bytes: Int64);
 
 type
   { what is done with the decisions (doc/CODEC.md, "JPEG 2000, stage C"):
@@ -141,6 +157,12 @@ const
   { the slices: one per J2K_SLICE_BYTES of codestream, at most one a tile
     and J2K_MAX_SLICES }
   J2K_SLICE_BYTES = 4 shl 20; J2K_MAX_SLICES = 64;
+
+var
+  { set by the zpaq-std plugin (pjazsj2k): what its ZPAQL decoder takes for a
+    tile; the analysis keeps the most in TJ2kStats.zTileWords and zTileBytes.
+    nil elsewhere (nothing is counted) }
+  J2kTileCost: TJ2kTileCostFn = nil;
 
 { The side information (the blob without the decisions) of a codestream of
   len bytes is at most this many bytes: the analysis refuses a codestream
@@ -553,6 +575,7 @@ type
     tileOut: TBW; tilePk: array of Int64;
     { tier-1 buffers }
     symb, fb, eb, segdata: TBytes;
+    tileMaxCap: Int64;                 { analysis: the tile's largest cap of a code-block the model codes }
     passend: array of LongInt;
     stb: TBytes;
     seglen, segpass, segp0: array of LongInt;
@@ -609,6 +632,7 @@ type
     procedure BitsOut(v: QWord; n: Integer);
     procedure TTEncode(base, leaf, thr: Integer);
     procedure Pass3;
+    procedure TileCost;
     procedure IndexTps;
     procedure Tile(t: Integer);
     procedure WriteHeaders;
@@ -842,6 +866,14 @@ begin
   if n = 0 then Refuse('no tile-part');
   tail := Copy(cs, p, e - p);
   SplitPpm;
+  { the plugin's ZPAQL: the SIZ, and its header's records }
+  st.zSiz := Max64(st.zSiz, Max64(Max64(Max64(xsiz, ysiz), Max64(xosiz, yosiz)),
+    Max64(Max64(xtsiz, ytsiz), Max64(xtosiz, ytosiz))));
+  st.zNcomp := Max64(st.zNcomp, ncomp);
+  L := 0;
+  for i := 0 to High(tps) do L := L + Length(tps[i].items);
+  st.zHdr := Max64(st.zHdr, 107 * Int64(Length(main)) + 5 * Int64(ncomp) + 14 * Int64(Length(tps)) + 7 * L +
+    Int64(nxt) * nyt);
 end;
 
 { what holds for tile t: the main header's, then its tile-parts' headers }
@@ -934,6 +966,7 @@ begin
     cg.dx := cdx[c]; cg.dy := cdy[c];
     cg.x0 := CeilDiv(tx0, cg.dx); cg.y0 := CeilDiv(ty0, cg.dy); cg.x1 := CeilDiv(tx1, cg.dx); cg.y1 := CeilDiv(ty1, cg.dy);
     nl := par.cod[c].nl; cg.nres := nl + 1; cg.res0 := ix; cg.sty := par.cod[c].sty;
+    st.zMaxNl := Max64(st.zMaxNl, nl);
     if Length(ress) < ix + cg.nres then SetLength(ress, 2 * Length(ress) + cg.nres + 8);
     for r := 0 to nl do begin
       rg := Default(TResG);
@@ -974,6 +1007,8 @@ begin
         else bg.mb := par.qnt[c].guard + 8;
         if Length(bands) <= nb then SetLength(bands, 2 * Length(bands) + 8);
         bands[nb] := bg; rg.band[b] := nb; Inc(nb);
+        st.zMaxMb := Max64(st.zMaxMb, bg.mb);
+        st.zMaxDim := Max64(st.zMaxDim, Max64(bg.x1 - bg.x0, bg.y1 - bg.y0));
       end;
       ress[ix] := rg; Inc(ix);
     end;
@@ -1919,6 +1954,7 @@ begin
   { decode (analysis) or replay (rebuild) }
   if an then begin
     ok := (npass <= MAXPASSES) and (w <= 1024) and (h <= 1024) and (w * h <= 4096);
+    if ok and (cap > tileMaxCap) then tileMaxCap := cap;
     nsym := -1;
     if ok then begin
       EnsureB(symb, cap);
@@ -2374,6 +2410,24 @@ begin
   end;
 end;
 
+{ the zpaq-std plugin's: what its ZPAQL takes for this tile (analysis) }
+procedure TJ2k.TileCost;
+var c: TJ2kTileCounts; i, q: Integer; words, bytes: Int64;
+begin
+  c := Default(TJ2kTileCounts);
+  c.ncomp := ncomp; c.nres := Length(ress); c.nbands := Length(bands); c.ncb := ncb; c.nprec := nprec;
+  c.npb := npb; c.nodes := nnd; c.nie := nie; c.npc := npc; c.npk := npk; c.pocs := Length(par.pocs);
+  c.mapNeed := kmMapSize; c.maxCap := tileMaxCap;
+  for i := 0 to High(tileTps) do begin
+    q := tileTps[i];
+    c.items := c.items + Length(tps[q].items);
+    c.tileBytes := c.tileBytes + tps[q].dend - tps[q].hstart;
+  end;
+  J2kTileCost(c, words, bytes);
+  st.zTileWords := Max64(st.zTileWords, words);
+  st.zTileBytes := Max64(st.zTileBytes, bytes);
+end;
+
 procedure TJ2k.Tile(t: Integer);
 var i, k, j, q, pi: Integer; w: TBW; v: Int64; b: TBytes; tpw: string;
 begin
@@ -2391,6 +2445,7 @@ begin
   SetLength(bandZ, Length(bands));
   for i := 0 to High(bandZ) do bandZ[i] := 0;
   pkdPos := 0; nsopLast := -1;
+  tileMaxCap := 0;
   Inc(st.tiles);
   if an then begin
     curTp := 0; curPos := tps[tileTps[0]].dstart;
@@ -2434,6 +2489,7 @@ begin
     if tpw <> '' then Refuse('pixels: ' + tpw);
   end;
   Pass3;
+  if an and Assigned(J2kTileCost) then TileCost;
   if not an then
     { the tile-parts }
     for i := 0 to High(tileTps) do
@@ -2723,6 +2779,9 @@ begin
   a.tails := a.tails + b.tails; a.tailBits := a.tailBits + b.tailBits; a.decisions := a.decisions + b.decisions;
   for i := 0 to 15 do a.rule[i] := a.rule[i] + b.rule[i];
   for i := 0 to 3 do a.brule[i] := a.brule[i] + b.brule[i];
+  a.zSiz := Max64(a.zSiz, b.zSiz); a.zNcomp := Max64(a.zNcomp, b.zNcomp); a.zMaxNl := Max64(a.zMaxNl, b.zMaxNl);
+  a.zMaxMb := Max64(a.zMaxMb, b.zMaxMb); a.zMaxDim := Max64(a.zMaxDim, b.zMaxDim); a.zHdr := Max64(a.zHdr, b.zHdr);
+  a.zTileWords := Max64(a.zTileWords, b.zTileWords); a.zTileBytes := Max64(a.zTileBytes, b.zTileBytes);
 end;
 
 type

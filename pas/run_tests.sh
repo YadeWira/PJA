@@ -90,6 +90,19 @@ python3 "$PJA/tools/zpaql/test_pjadec.py" --o --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}
 python3 "$PJA/tools/zpaql/test_pjadec.py" --o --lz --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
 python3 "$PJA/tools/zpaql/test_pjadec.py" --v8 --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
 python3 "$PJA/tools/zpaql/test_pjadec.py" --v8 --lz --pjalsx "$OUT/zpaqlsx" "${ZSX[@]}" | tail -1
+# the JPEG 2000 codec (stream version 8, modes 0 and 1): a raw codestream and a
+# JP2, each with the H and M of its query, then both in one block
+rm -rf "$OUT/zpaqlk"; mkdir -p "$OUT/zpaqlk"
+ZK=("$PJA/tests/j2k/plasma_cs.j2k" "$PJA/tests/j2k/gray_12bit.jp2")
+"$OUT/zpaql_segments" --pjk "$OUT/zpaqlk" "${ZK[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pjk "$OUT/zpaqlk" "${ZK[@]}" | tail -1
+# the plugin as zpaq-std loads it (ctypes): its codecs, what the JPEG 2000
+# codec takes, its compress, query and decompress
+sh "$PAS/build_c.sh" "$OUT/pc" -fPIC
+mkdir -p "$OUT/pu"
+$FPC -O3 -dPJA_FAST -Cg -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -Fo"$OUT/pc" -FU"$OUT/pu" \
+  -o"$OUT/pja_plugin.so" "$PAS/plugin/pja_zpaqstd.pas" > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
+python3 "$PAS/tests/probe_plugin.py" "$OUT/pja_plugin.so" "$PJA/tests/j2k" "$PJA/tests/jpg" "$PJA/tests/jls"
 # the version 7 codecs: pja7 (gray and 4:2:0, chroma against the luma, Cr
 # against Cb), pjax7 (a DNL, 12 bits); each also as its z
 rm -rf "$OUT/zpaql7"; mkdir -p "$OUT/zpaql7"

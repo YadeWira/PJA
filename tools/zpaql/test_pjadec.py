@@ -17,6 +17,10 @@ block, as zpaq-std groups them.
         the 8 codecs' (v8zpaql.inc): pja78's, pjax78's, pjals8's, pjall8's,
         pjalsx8's, and with --lz their z; without a codec flag, JPEG-LS files
         through pjals8 (JPEGs, pja's as before)
+    test_pjadec.py --pjk <segment dir> <file> ...
+        the JPEG 2000 codec's (j2kzpaql.inc: stream version 8, modes 0 and
+        1), each file alone with the H and M of its query ($3 | $4 << 8 in
+        its .args), then the two smallest as segments of one block
     test_pjadec.py --lz [--pjax|...] <segment dir> <file> ...
         the z codec's instead (lzzpaql.inc; v7zpaql.inc's for --pja7 and
         --pjax7), per decoder on ONE block: its
@@ -38,6 +42,55 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 
 
 args = sys.argv[1:]
+
+
+def pjk_test(segdir, files):
+    """the JPEG 2000 codec's decoder: each file, then two in one block"""
+    cfg = zconfig('PJK', 'j2kzpaql.inc')
+    fails = 0
+
+    def load(f):
+        n = os.path.join(segdir, os.path.splitext(os.path.basename(f))[0])
+        a = int(open(n + '.args').read())
+        if a < 0:
+            raise RuntimeError('the query refused it')
+        return open(n + '.seg', 'rb').read(), open(f, 'rb').read(), a & 255, a >> 8
+    for f in files:
+        t = time.time()
+        try:
+            seg, want, ph, pm = load(f)
+            out, steps, size = zpaqlvm.run_config(cfg, seg, [math.ceil(math.log2(len(seg))),
+                                                             math.ceil(math.log2(len(want))), ph, pm])
+            ok = out == want
+        except Exception as e:
+            ok = False
+            ph = pm = '?'
+            print('  %s: %s' % (os.path.basename(f), e))
+        if not ok:
+            fails += 1
+        print('  %-24s %s (%d bytes, H 2^%s words, M 2^%s bytes, %.0f s)' % (
+            os.path.basename(f), 'the original' if ok else 'DIFFERS', os.path.getsize(f), ph, pm, time.time() - t))
+    group = sorted(files, key=os.path.getsize)[:2][::-1]
+    if len(group) == 2:
+        t = time.time()
+        try:
+            loaded = [load(f) for f in group]
+            segs = [x[0] for x in loaded]
+            outs, steps, size = zpaqlvm.run_segments(cfg, segs, [math.ceil(math.log2(max(map(len, segs)))),
+                                                                 math.ceil(math.log2(max(len(x[1]) for x in loaded))),
+                                                                 max(x[2] for x in loaded), max(x[3] for x in loaded)])
+            ok = outs == [x[1] for x in loaded]
+        except Exception as e:
+            ok = False
+            print('  block: %s' % e)
+        if not ok:
+            fails += 1
+        print('  one block: %s %s (%.0f s)' % (' + '.join(os.path.basename(f) for f in group),
+                                               'each the original' if ok else 'DIFFERS', time.time() - t))
+    print('%d JPEG 2000 files through the pjk decoder, %d failures' % (len(files), fails))
+    sys.exit(1 if fails else 0)
+
+
 # --lz: the z codec's decoder, on the segments as LZ77
 # --o: the o codecs' decoders (the same programs, compiled with opt=2)
 ozp = '--o' in args[:3]
@@ -83,6 +136,10 @@ def zconfig(name, incname='lzzpaql.inc'):
     part = inc[inc.index('  %s_ZPAQL: AnsiString =' % name):]
     part = part[:part.index(';\n')]
     return '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", part, re.M)) + '\n'
+
+
+if args[:1] == ['--pjk']:
+    pjk_test(args[1], args[2:])
 
 
 if ozp:

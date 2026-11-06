@@ -44,6 +44,11 @@ type
   compared before it is given. m1Refused (and why) when it is not taken. }
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
   out why: string): TMode1Result;
+{ The same, with the analysis' statistics (the zpaq-std plugin's: its ZPAQL's
+  limits and memory, pjaj2kcs.TJ2kStats) and the side information's length
+  (the blob, before the raw bytes' model) }
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
 { A mode 1 stream back to its codestream, which must be len bytes. }
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
 
@@ -196,17 +201,25 @@ end;
 
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
   out why: string): TMode1Result;
-var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; k, s: Integer;
+var st: TJ2kStats; blobLen: Int64;
+begin
+  Result := J2kMode1EncodeSt(data, off, len, threads, stream, why, st, blobLen);
+end;
+
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
+var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; cd: TCoder; k, s: Integer;
   p: SizeInt; total: Int64; was: TStage;
 begin
-  stream := nil; why := '';
+  stream := nil; why := ''; blobLen := 0;
+  st := Default(TJ2kStats);
   sl := TSlices.Create(True, threads);
   try
     lk := Default(TJ2kModelLink);
     lk.kind := kmEncode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads;
-    st := Default(TJ2kStats);
     if not J2kAnalyzeWith(data, off, len, lk, blob, why, st) then Exit(m1Refused);
     if Length(blob) > J2kSideBound(len) then begin why := 'side information too large'; Exit(m1Refused); end;
+    blobLen := Length(blob);
     s := sl.nAsked;
     if (s < 1) or (s > J2K_MAX_SLICES) then begin why := 'internal: slices'; Exit(m1Refused); end;
     for k := 0 to s - 1 do

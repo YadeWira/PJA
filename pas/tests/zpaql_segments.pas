@@ -9,33 +9,38 @@
     zpaql_segments --pjall <out dir> <jpeg> ...  the pjall codec's (lossless JPEG)
     zpaql_segments --pjalsx <out dir> <jls> ...  the pjalsx codec's (subsampled JPEG-LS)
     zpaql_segments --pja7 <out dir> <jpeg> ...   the pja7 codec's (stream version 7)
-    zpaql_segments --pjax7 <out dir> <jpeg> ...  the pjax7 codec's (pjax's, version 7) }
+    zpaql_segments --pjax7 <out dir> <jpeg> ...  the pjax7 codec's (pjax's, version 7)
+    zpaql_segments --pjk <out dir> <file> ...    the JPEG 2000 codec's (pjazsj2k: stream
+                                                 version 8, modes 0 and 1); its .args is
+                                                 the query's, $3 | $4 << 8 }
 program zpaql_segments;
 
 {$mode objfpc}{$H+}
 
-uses {$ifdef unix}cthreads,{$endif} SysUtils, Classes, pjajls, pjacodec, pjazpaqlargs, pjav7;
+uses {$ifdef unix}cthreads,{$endif} SysUtils, Classes, pjajls, pjacodec, pjazpaqlargs, pjav7, pjazsj2k;
 
 var data, stream, seg: TBytes; f: TFileStream; i, first: Integer; name, outDir: string; t: Text;
-    pjax, pjall, pjalsx, pja7, pjax7: Boolean;
+    pjax, pjall, pjalsx, pja7, pjax7, pjk: Boolean;
 begin
   pjax := ParamStr(1) = '--pjax';
   pjall := ParamStr(1) = '--pjall';
   pjalsx := ParamStr(1) = '--pjalsx';
   pja7 := ParamStr(1) = '--pja7';
   pjax7 := ParamStr(1) = '--pjax7';
+  pjk := ParamStr(1) = '--pjk';
   first := 2; outDir := ParamStr(1);
-  if pjax or pjall or pjalsx or pja7 or pjax7 then begin first := 3; outDir := ParamStr(2); end;
+  if pjax or pjall or pjalsx or pja7 or pjax7 or pjk then begin first := 3; outDir := ParamStr(2); end;
   for i := first to ParamCount do begin
     f := TFileStream.Create(ParamStr(i), fmOpenRead or fmShareDenyNone);
     try
       data := nil; SetLength(data, f.Size);
       if f.Size > 0 then f.ReadBuffer(data[0], f.Size);
     finally f.Free; end;
-    if (pjax and not CompressPjax(data, stream, True, 1).Ok) or
+    if (pjk and not PjkCompress(data, stream, 1)) or
+       (pjax and not CompressPjax(data, stream, True, 1).Ok) or
        (pjax7 and not CompressPjax(data, stream, True, 1, True).Ok) or
        (pja7 and not Compress(data, stream, False, 1, False, False, True).Ok) or
-       (not (pjax or pjax7 or pja7) and not Compress(data, stream, False, 1, False, False).Ok) then begin
+       (not (pjax or pjax7 or pja7 or pjk) and not Compress(data, stream, False, 1, False, False).Ok) then begin
       WriteLn(StdErr, ParamStr(i), ': not compressed'); Halt(1);
     end;
     seg := nil; SetLength(seg, 4 + Length(stream));
@@ -47,7 +52,8 @@ begin
     try f.WriteBuffer(seg[0], Length(seg)); finally f.Free; end;
     Assign(t, IncludeTrailingPathDelimiter(outDir) + ChangeFileExt(name, '.args'));
     Rewrite(t);
-    if pjax then WriteLn(t, ZpaqlPjaxArgs(stream))
+    if pjk then WriteLn(t, PjkArgs(stream))
+    else if pjax then WriteLn(t, ZpaqlPjaxArgs(stream))
     else if pjax7 then WriteLn(t, ZpaqlPjaxArgs(stream, True))
     else if pja7 then WriteLn(t, ZpaqlArgs7(stream))
     else if pjall then WriteLn(t, ZpaqlLjpegArgs(stream))

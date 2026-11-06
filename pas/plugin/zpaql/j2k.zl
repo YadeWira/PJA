@@ -1,0 +1,95 @@
+"""Stream version 8 for ZPAQL (doc/CODEC.md, "JPEG 2000 for zpaq-std"):
+a file of the JPEG 2000 family, its codestreams in mode 0 (among the
+host's bytes) or mode 1 (j2kcs.zl, j2kmodel.zl, j2kt1.zl), the host through
+the raw bytes' model (pjadec.zl's coderaw). Mode 2 is not this program's:
+the codec never writes it (an error here)."""
+
+
+def probem():
+    """M's size, as probeh finds H's"""
+    global kmsize
+    old0 = M[0]
+    M[0] = 90
+    k = 0
+    kmsize = 0
+    while k < 32:
+        off = 1 << k
+        old = M[off]
+        M[off] = 165
+        if M[0] == 165:
+            M[0] = old0
+            kmsize = off
+            return
+        M[off] = old
+        k += 1
+    M[0] = old0
+
+
+def ku32(p):
+    return M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+
+
+def main():
+    global hp, kmp, ktmp, origsize
+    hp = base(HEAP)
+    probeh()
+    probem()
+    tables()
+    ktables()
+    origsize = ku32(0)
+    n = inlen()
+    kmp = n
+    ktmp = kmalloc(16)
+    if n < SEG + 6 or M[SEG] != 8 or M[SEG + 1] != 0:
+        error()
+    k = ku32(SEG + 2)
+    if k > 16384 or SEG + 6 + 13 * k > n:
+        error()
+    tab = SEG + 6
+    sp = tab + 13 * k
+    prev = 0
+    for i in range(k):
+        e = tab + 13 * i
+        off = ku32(e)
+        ln = ku32(e + 4)
+        sl = ku32(e + 8)
+        md = M[e + 12]
+        if md > 1 or ln < 1 or off < prev:
+            error()
+        if md == 0 and sl != 0:
+            error()
+        if md == 1 and (sl < 1 or sl > n - sp):
+            error()
+        sp += sl
+        prev = off + ln
+    # the host
+    dinit(sp, n)
+    coderaw(origsize)
+    host = rawbase
+    hlen = rawlen
+    # the file: the host's bytes, each codestream of mode 1 in its place
+    hq = 0
+    op = 0
+    sp = tab + 13 * k
+    for i in range(k):
+        e = tab + 13 * i
+        off = ku32(e)
+        ln = ku32(e + 4)
+        sl = ku32(e + 8)
+        if M[e + 12] == 1:
+            if off < op or off - op > hlen - hq:
+                error()
+            while op < off:
+                out(H[host + hq])
+                hq += 1
+                op += 1
+            kcsdecode(sp, sl, ln)
+            op += ln
+        sp += sl
+    while hq < hlen:
+        out(H[host + hq])
+        hq += 1
+        op += 1
+    if op != origsize:
+        error()
+    reset(hp)

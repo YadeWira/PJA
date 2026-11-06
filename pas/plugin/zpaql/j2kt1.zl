@@ -1,0 +1,399 @@
+"""JPEG 2000 tier-1 for ZPAQL: pjaj2kt1.c's MQ encoder with both
+terminations, the lengths they give at each pass end, the MQ decoder that
+checks a prefix, and BYPASS packing, line by line."""
+
+# QE | NMPS << 16 | NLPS << 22 | SWITCH << 28 (ISO/IEC 15444-1, table C.2)
+KQE = table([22017 | (1 << 16) | (1 << 22) | (1 << 28), 13313 | (2 << 16) | (6 << 22), 6145 | (3 << 16) | (9 << 22),
+             2753 | (4 << 16) | (12 << 22), 1313 | (5 << 16) | (29 << 22), 545 | (38 << 16) | (33 << 22),
+             22017 | (7 << 16) | (6 << 22) | (1 << 28), 21505 | (8 << 16) | (14 << 22), 18433 | (9 << 16) | (14 << 22),
+             14337 | (10 << 16) | (14 << 22), 12289 | (11 << 16) | (17 << 22), 9217 | (12 << 16) | (18 << 22),
+             7169 | (13 << 16) | (20 << 22), 5633 | (29 << 16) | (21 << 22),
+             22017 | (15 << 16) | (14 << 22) | (1 << 28), 21505 | (16 << 16) | (14 << 22),
+             20737 | (17 << 16) | (15 << 22), 18433 | (18 << 16) | (16 << 22), 14337 | (19 << 16) | (17 << 22),
+             13313 | (20 << 16) | (18 << 22), 12289 | (21 << 16) | (19 << 22), 10241 | (22 << 16) | (19 << 22),
+             9217 | (23 << 16) | (20 << 22), 8705 | (24 << 16) | (21 << 22), 7169 | (25 << 16) | (22 << 22),
+             6145 | (26 << 16) | (23 << 22), 5633 | (27 << 16) | (24 << 22), 5121 | (28 << 16) | (25 << 22),
+             4609 | (29 << 16) | (26 << 22), 4353 | (30 << 16) | (27 << 22), 2753 | (31 << 16) | (28 << 22),
+             2497 | (32 << 16) | (29 << 22), 2209 | (33 << 16) | (30 << 22), 1313 | (34 << 16) | (31 << 22),
+             1089 | (35 << 16) | (32 << 22), 673 | (36 << 16) | (33 << 22), 545 | (37 << 16) | (34 << 22),
+             321 | (38 << 16) | (35 << 22), 273 | (39 << 16) | (36 << 22), 133 | (40 << 16) | (37 << 22),
+             73 | (41 << 16) | (38 << 22), 37 | (42 << 16) | (39 << 22), 21 | (43 << 16) | (40 << 22),
+             9 | (44 << 16) | (41 << 22), 5 | (45 << 16) | (42 << 22), 1 | (45 << 16) | (43 << 22),
+             22017 | (46 << 16) | (46 << 22)])
+KCTX = array(38)         # the contexts: I[19], then MPS[19]
+KCTX0 = array(38)
+KCTXD = array(38)        # the decoder's
+KPEV = array(256)        # a segment's internal pass ends
+KKPV = array(768)        # at each: bytes committed, FLUSH's and ERTERM's lengths
+
+# the MQ encoder: its buffer is M[kebuf ..]; kebp is its position (byte
+# kebuf + kebp is the one under way); kecap its size
+kea = 0
+kec = 0
+kect = 0
+kebp = 0
+kebuf = 0
+kecap = 0
+# the MQ decoder over M[kdd .. kdd + kdn), bytes FF past it
+kdd = 0
+kdn = 0
+kdp = 0
+kda = 0
+kdc = 0
+kdct = 0
+
+
+def kctxreset(x):
+    for i in range(38):
+        H[x + i] = 0
+    H[x + 18] = 46
+    H[x + 17] = 3
+    H[x] = 4
+
+
+def kbyteout():
+    global kebp, kec, kect
+    if kebp + 2 >= kecap:
+        error()
+    a = kebuf + kebp
+    if M[a] == 255:
+        kebp += 1
+        M[a + 1] = kec >> 20
+        kec = kec & 1048575
+        kect = 7
+    elif (kec & 134217728) == 0:
+        kebp += 1
+        M[a + 1] = kec >> 19
+        kec = kec & 524287
+        kect = 8
+    else:
+        M[a] = M[a] + 1
+        if M[a] == 255:
+            kec = kec & 134217727
+            kebp += 1
+            M[a + 1] = kec >> 20
+            kec = kec & 1048575
+            kect = 7
+        else:
+            kebp += 1
+            M[a + 1] = kec >> 19
+            kec = kec & 524287
+            kect = 8
+
+
+def krenorme():
+    global kea, kec, kect
+    while True:
+        kea = kea << 1
+        kec = kec << 1
+        kect -= 1
+        if kect == 0:
+            kbyteout()
+        if kea & 32768:
+            break
+
+
+def kmqenc(cx, d):
+    global kea, kec
+    x = base(KCTX)
+    i = H[x + cx]
+    e = KQE[i]
+    q = e & 65535
+    if d == H[x + 19 + cx]:
+        kea = kea - q
+        if (kea & 32768) == 0:
+            if kea < q:
+                kea = q
+            else:
+                kec = kec + q
+            H[x + cx] = (e >> 16) & 63
+            krenorme()
+        else:
+            kec = kec + q
+    else:
+        kea = kea - q
+        if kea < q:
+            kec = kec + q
+        else:
+            kea = q
+        if e >> 28:
+            H[x + 19 + cx] = H[x + 19 + cx] ^ 1
+        H[x + cx] = (e >> 22) & 63
+        krenorme()
+
+
+def kendflush():
+    """FLUSH on the encoder as it stands: the segment's length (from the
+    byte under way at kebuf + 0)"""
+    global kec
+    t = kec + kea
+    kec = kec | 65535
+    if kec >= t:
+        kec = kec - 32768
+    kec = kec << kect
+    kbyteout()
+    kec = kec << kect
+    kbyteout()
+    if M[kebuf + kebp] == 255:
+        return kebp - 1
+    return kebp
+
+
+def kenderterm():
+    global kec, kect
+    k = 12 - kect
+    while slt(0, k):
+        kec = kec << kect
+        kect = 0
+        kbyteout()
+        k = k - kect
+    if M[kebuf + kebp] != 255:
+        kbyteout()
+    return kebp - 1
+
+
+kestate = array(6)
+
+
+def kesave():
+    H[base(kestate)] = kea
+    H[base(kestate) + 1] = kec
+    H[base(kestate) + 2] = kect
+    H[base(kestate) + 3] = kebp
+    H[base(kestate) + 4] = kebuf
+    H[base(kestate) + 5] = kecap
+
+
+def kerestore():
+    global kea, kec, kect, kebp, kebuf, kecap
+    kea = H[base(kestate)]
+    kec = H[base(kestate) + 1]
+    kect = H[base(kestate) + 2]
+    kebp = H[base(kestate) + 3]
+    kebuf = H[base(kestate) + 4]
+    kecap = H[base(kestate) + 5]
+
+
+ktmp = 0                 # 16 bytes of M for end_lengths
+
+
+def kendlengths(j):
+    """end_lengths: KKPV[3j + 1], KKPV[3j + 2]"""
+    global kebp, kebuf, kecap
+    kesave()
+    M[ktmp] = M[kebuf + kebp]
+    kebuf = ktmp
+    kebp = 0
+    kecap = 16
+    KKPV[3 * j + 1] = H[base(kestate) + 3] + kendflush()
+    kerestore()
+    kesave()
+    M[ktmp] = M[kebuf + kebp]
+    kebuf = ktmp
+    kebp = 0
+    kecap = 16
+    KKPV[3 * j + 2] = H[base(kestate) + 3] + kenderterm()
+    kerestore()
+
+
+kenf = 0
+kene = 0
+kekk = 0
+
+
+def kmqencode(sym, n, npe, reset, f, e, cap):
+    """pjaj2k_mq_encode: M[sym .. sym + n) from KCTX (updated), resetting
+    it after each internal pass end KPEV[0 .. npe) when reset; FLUSH's
+    bytes at M[f + 1 ..] (kenf of them), ERTERM's at M[e + 1 ..] (kene),
+    kekk the bytes committed at the end, KKPV at each pass end"""
+    global kea, kec, kect, kebp, kebuf, kecap, kenf, kene, kekk
+    kea = 32768
+    kec = 0
+    kect = 12
+    kebp = 0
+    kebuf = f
+    kecap = cap
+    M[f] = 0
+    i = 0
+    j = 0
+    while True:
+        en = n
+        if j < npe:
+            en = KPEV[j]
+        if en < i or en > n:
+            error()
+        while i < en:
+            c = M[sym + i]
+            if c >= 38:
+                error()
+            kmqenc(c >> 1, c & 1)
+            i += 1
+        if j >= npe:
+            break
+        KKPV[3 * j] = 0
+        if kebp > 0:
+            KKPV[3 * j] = kebp - 1
+        kendlengths(j)
+        if reset:
+            kctxreset(base(KCTX))
+        j += 1
+    kekk = 0
+    if kebp > 0:
+        kekk = kebp - 1
+    for k in range(kebp + 1):
+        M[e + k] = M[f + k]
+    kesave()
+    kenf = kendflush()
+    kerestore()
+    kebuf = e
+    kene = kenderterm()
+
+
+# ---------------------------------------------------------------- the decoder
+
+def krdb(i):
+    if i < kdn:
+        return M[kdd + i]
+    return 255
+
+
+def kbytein():
+    global kdc, kdct, kdp
+    if krdb(kdp) == 255:
+        if krdb(kdp + 1) > 143:
+            kdc = kdc + 65280
+            kdct = 8
+        else:
+            kdp += 1
+            kdc = kdc + (krdb(kdp) << 9)
+            kdct = 7
+    else:
+        kdp += 1
+        kdc = kdc + (krdb(kdp) << 8)
+        kdct = 8
+
+
+def kinitdec(d, n):
+    global kdd, kdn, kdp, kdc, kda, kdct
+    kdd = d
+    kdn = n
+    kdp = 0
+    kdc = krdb(0) << 16
+    kbytein()
+    kdc = kdc << 7
+    kdct -= 7
+    kda = 32768
+
+
+def kmqdec(cx):
+    global kda, kdc, kdct
+    x = base(KCTXD)
+    i = H[x + cx]
+    e = KQE[i]
+    qe = e & 65535
+    kda = kda - qe
+    if (kdc >> 16) < qe:
+        if kda < qe:
+            kda = qe
+            d = H[x + 19 + cx]
+            H[x + cx] = (e >> 16) & 63
+        else:
+            kda = qe
+            d = 1 - H[x + 19 + cx]
+            if e >> 28:
+                H[x + 19 + cx] = H[x + 19 + cx] ^ 1
+            H[x + cx] = (e >> 22) & 63
+    else:
+        kdc = kdc - (qe << 16)
+        if (kda & 32768) == 0:
+            if kda < qe:
+                d = 1 - H[x + 19 + cx]
+                if e >> 28:
+                    H[x + 19 + cx] = H[x + 19 + cx] ^ 1
+                H[x + cx] = (e >> 22) & 63
+            else:
+                d = H[x + 19 + cx]
+                H[x + cx] = (e >> 16) & 63
+        else:
+            return H[x + 19 + cx]
+    while True:
+        if kdct == 0:
+            kbytein()
+        kda = kda << 1
+        kdc = kdc << 1
+        kdct -= 1
+        if kda & 32768:
+            break
+    return d
+
+
+def kmqrun(x, n, sym, lim, npe, reset):
+    """decodes the first lim decisions of M[sym ..] from M[x .. x + n) and
+    KCTX0 (reset after the pass ends KPEV when reset): 1 if they all come
+    out the same"""
+    for k in range(38):
+        KCTXD[k] = KCTX0[k]
+    kinitdec(x, n)
+    j = 0
+    for i in range(lim):
+        c = M[sym + i]
+        while j < npe and KPEV[j] == i:
+            if reset:
+                kctxreset(base(KCTXD))
+            j += 1
+        if (c >> 1) >= 19:
+            return 0
+        if kmqdec(c >> 1) != (c & 1):
+            return 0
+    return 1
+
+
+def kmqreach(x, n, sym, lim, npe, reset):
+    if kmqrun(x, n, sym, lim, npe, reset) == 0:
+        return 4294967295
+    return kdp + 1 + (slt(kdct, 2))
+
+
+def kminprefix(x, n, sym, nsym, npe, reset):
+    l = n
+    while l > 0 and l + 32 > n and kmqrun(x, l - 1, sym, nsym, npe, reset):
+        l -= 1
+    return l
+
+
+def krawpack(sym, n, pad, o, cap):
+    """pjaj2k_raw_pack into M[o ..]; its length"""
+    if cap < 4 or n >= 7 * (cap - 3):
+        error()
+    p = 0
+    ct = 8
+    c = 0
+    prev = 0
+    for i in range(n):
+        if ct == 0:
+            M[o + p] = c
+            p += 1
+            prev = c
+            ct = 8
+            if prev == 255:
+                ct = 7
+            c = 0
+        ct -= 1
+        c = c | ((M[sym + i] & 1) << ct)
+    full = 8
+    if prev == 255:
+        full = 7
+    if ct < full:
+        bv = 0
+        while ct > 0:
+            ct -= 1
+            if pad == 0:
+                c = c | (bv << ct)
+                bv = bv ^ 1
+            elif pad == 2:
+                c = c | (1 << ct)
+        M[o + p] = c
+        p += 1
+    while p > 0 and M[o + p - 1] == 255:
+        p -= 1
+    return p
