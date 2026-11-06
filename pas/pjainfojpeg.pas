@@ -33,6 +33,9 @@ uses pjajpeg, pjajls;
 const
   { segments listed one by one; past these, counted }
   MAX_LISTED = 300;
+  { problems listed one by one; past these, counted (a file of FF 00 has
+    one every two bytes) }
+  MAX_PROBLEMS = 100;
   { JPEGs found inside a file, and how deep inside inside }
   MAX_EMBEDDED = 32;
   MAX_DEPTH = 2;
@@ -50,6 +53,8 @@ type
   TWalk = record
     ls: Boolean;               { a JPEG-LS frame (SOF55) }
     frames, scans, restarts, listed, segments: Integer;
+    problems: Integer;         { found, listed or not }
+    nearMax: Integer;          { JPEG-LS: the largest NEAR of a scan (0: lossless) }
     eoiEnd: SizeInt;           { just past the EOI; -1 with none }
     exif, xmp, icc, comments, otherApp: Int64;   { bytes }
     commentCount: Integer;
@@ -212,9 +217,14 @@ begin
     it.Str('type', Hex(attr and $FFFFFF, 6));
     it.Str('kind', MpfTypeWords(attr and $FFFFFF));
     it.Num('size', size);
-    it.Num('offset', off);
-    it.line := Hex(attr and $FFFFFF, 6) + ' ' + MpfTypeWords(attr and $FFFFFF) + ', ' + IntToStr(size) +
-               ' B at ' + IntToStr(off);
+    { the index counts from its own TIFF header (base), and the first
+      image, the file itself, is at 0: offset is the place in the file,
+      as everywhere else; mpf_offset as the index has it }
+    it.Num('mpf_offset', off);
+    if off = 0 then it.Num('offset', 0) else it.Num('offset', base + off);
+    it.line := Hex(attr and $FFFFFF, 6) + ' ' + MpfTypeWords(attr and $FFFFFF) + ', ' + IntToStr(size) + ' B';
+    if off = 0 then it.line := it.line + ' at 0 (this image)'
+    else it.line := it.line + ' at ' + IntToStr(base + off) + ' (' + IntToStr(off) + ' in the MPF index)';
     Inc(entries);
   end;
 end;
@@ -264,6 +274,8 @@ var p, q, len, segEnd, k, ff, dataStart: SizeInt; m, L, i, nc, rst: Integer;
 
   procedure Problem(const s: string);
   begin
+    Inc(w.problems);
+    if w.problems > MAX_PROBLEMS then Exit;
     if problems = nil then problems := n.List('problems');
     problems.Add(TInfoNode.Create(ikText)).value := s;
   end;
@@ -431,6 +443,11 @@ begin
       end;
       $DA: begin
         Inc(w.scans);
+        { JPEG-LS: NEAR, past the components (listed or not) }
+        if w.ls and (k < segEnd) then begin
+          i := k + 1 + 2 * d[k];
+          if (i < segEnd) and (d[i] > w.nearMax) then w.nearMax := d[i];
+        end;
         if (it <> nil) and (k < segEnd) then begin
           nc := d[k];
           words := '';
@@ -481,6 +498,7 @@ begin
     p := segEnd;
   end;
   if (w.eoiEnd < 0) and (p >= len) then Problem('no EOI');
+  if w.problems > MAX_PROBLEMS then n.Num('problems_not_listed', w.problems - MAX_PROBLEMS);
 end;
 
 procedure DescribeJpeg(const d: TBytes; n: TInfoNode);
@@ -498,7 +516,11 @@ begin
   if w.frames > 0 then begin
     n.Bool('progressive', w.sofMarker in [$C2, $C6, $CA, $CE]);
     n.Bool('arithmetic', (w.sofMarker >= $C9) and (w.sofMarker <= $CF));
-    n.Bool('lossless', w.sofMarker in [$C3, $C7, $CB, $CF, $F7]);
+    { JPEG-LS with NEAR above 0 is near-lossless: the samples may differ
+      from the image's by up to NEAR }
+    n.Bool('lossless', (w.sofMarker in [$C3, $C7, $CB, $CF]) or ((w.sofMarker = $F7) and (w.nearMax = 0)));
+    if w.sofMarker = $F7 then n.Bool('near_lossless', w.nearMax > 0);
+    if w.nearMax > 0 then n.Num('near', w.nearMax);
     n.Bool('hierarchical', w.sofMarker in [$C5..$C7, $CD..$CF]);
   end;
   n.Num('restart_interval', w.ri);

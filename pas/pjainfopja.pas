@@ -243,6 +243,15 @@ begin
   if p.orig_size > 0 then c.Fixed('ratio_percent', 100 * Length(d) / p.orig_size);
   if p.stored then Exit;
   st := n.Obj('stream');
+  { the header stream decodes up to the original's size: one larger than
+    --max-output (x refuses it) is not decoded, or a small file that
+    declares gigabytes would keep info and report busy for minutes }
+  if p.orig_size > InfoMaxOutput then begin
+    st.Num('bytes', Length(p.payload));
+    if Length(p.payload) > 0 then st.Num('version', p.payload[0]);
+    st.Str('not_decoded', 'the original is larger than --max-output');
+    Exit;
+  end;
   DescribeStream(p.payload, p.orig_size, st);
 end;
 

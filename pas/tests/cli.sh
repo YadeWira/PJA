@@ -213,7 +213,7 @@ check "--help: rc 0" "$PJA" --help
 echo "--- version, selftest, --cpu"
 check "--version: the build, the compilers, the SIMD path" bash -c "
   o=\$('$PJA' --version) && head -1 <<< \"\$o\" | grep -q '^pja [0-9]' &&
-  for k in commit built fpc c_compiler target system cpu_features cpu_path cpu_paths_supported processors; do
+  for k in commit built fpc c_compiler target system cpu_features cpu_path cpu_paths_supported c_simd_copies processors; do
     grep -q \"^\$k: \" <<< \"\$o\" || exit 1; done"
 check "-V: the same" bash -c "[ \"\$('$PJA' -V)\" = \"\$('$PJA' --version)\" ]"
 check "selftest: every check passed, rc 0" bash -c "'$PJA' selftest | grep -q 'checks passed'"
@@ -290,7 +290,7 @@ check "  a link to a new issue, its body the report, under 6000 characters" bash
   [[ \$u == https://github.com/YadeWira/PJA/issues/new?template=bug_report.yml\&title=*\&body=PJA%20bug%20report* ]] &&
   [ \${#u} -le 6000 ] && ! grep -q PRIVATE <<< \"\$u\""
 check "  a long one: the link cut, saying so" bash -c "
-  u=\$('$PJA' report '$W/scans1024.jpg' | grep '^https://') && [ \${#u} -le 6000 ] && grep -q '%5Bcut' <<< \"\$u\""
+  u=\$('$PJA' report '$W/scans1024.jpg' | grep '^https://') && [ \${#u} -le 6000 ] && grep -q 'lines%20cut%20here' <<< \"\$u\""
 check "report -o: the report in that file, the link on the screen" bash -c "
   '$PJA' report '$W/private.jpg' -o '$W/rep/out.txt' | grep -q '^https://github.com/YadeWira/PJA/issues/new' &&
   grep -q '^PJA bug report' '$W/rep/out.txt' && ! grep -q PRIVATE '$W/rep/out.txt'"
@@ -353,6 +353,87 @@ check "an access violation, in a worker thread: rc 3" bash -c "
   PJA_TEST_CRASH=access '$PJA' a -f -th 4 '$W/bug.jpg' '$W/in/solid_color.jpg' -o '$W/bugs/' 2> '$W/bug2.txt'; [ \$? -eq 3 ] &&
   grep -q 'EAccessViolation' '$W/bug2.txt' && grep -q 'This is a bug in PJA' '$W/bug2.txt'"
 check "a file that fails as a file is not a bug: rc 1" bash -c "'$PJA' a '$W/text.jpg' 2> '$W/nb.txt'; [ \$? -eq 1 ] && ! grep -q 'bug' '$W/nb.txt'"
+
+echo "--- the review's cases"
+check "selftest has a stream version 5 sample (its own SSE4.1 kernels)" bash -c "'$PJA' selftest | grep -q '(version 5): '"
+check "selftest --cpu=plain: that path alone" bash -c "'$PJA' selftest --cpu=plain -q | grep -q 'on 1 path(s) (plain)'"
+check "the default path is among those --cpu takes" bash -c "
+  p=\$('$PJA' --version | sed -n 's/^cpu_path: //p') && '$PJA' --cpu=\$p --version > /dev/null"
+check "--cpu avx2 (a space) before the command: rc 2, naming --cpu=avx2" bash -c "
+  '$PJA' --cpu avx2 selftest 2>&1 | grep -q 'write --cpu=avx2' && [ \$('$PJA' --cpu avx2 selftest > /dev/null 2>&1; echo \$?) -eq 2 ]"
+check "  and after it" bash -c "'$PJA' selftest --cpu plain 2>&1 | grep -q 'write --cpu=plain'"
+check "report --with-file without a file: rc 2" test "$(rc "$PJA" report --with-file)" -eq 2
+# a .pja that declares 65536 times its payload (about 4 GB) of version 5
+python3 -I -c "
+import sys, struct, random
+random.seed(1); hdr = random.randbytes(65562)
+payload = bytes([5, 0]) + struct.pack('<I', len(hdr)) + hdr
+open(sys.argv[1], 'wb').write(b'PJA\x01' + bytes([3, 0, 0, 0]) + struct.pack('<Q', 65536 * len(payload)) + bytes(16) + payload)" \
+  "$W/bomb.pja"
+check "info on a .pja declaring more than --max-output: not decoded, at once" bash -c "
+  timeout 10 '$PJA' info '$W/bomb.pja' | grep -q 'not_decoded: the original is larger than --max-output'"
+check "  report too" bash -c "timeout 10 '$PJA' report '$W/bomb.pja' | grep -q 'not_decoded'"
+python3 -I -c "
+import sys; open(sys.argv[1], 'wb').write(b'\xff\xd8' + b'\xff\x00' * (1 << 19) + b'\xff\xd9')" "$W/ff00.jpg"
+check "a JPEG of FF 00 only: its problems listed up to 100, then counted" bash -c "
+  o=\$('$PJA' info '$W/ff00.jpg') && [ \$(grep -c 'FF 00 outside a scan' <<< \"\$o\") -eq 100 ] &&
+  grep -q 'problems_not_listed: 524188' <<< \"\$o\""
+check "  info --json of it small, report too" bash -c "
+  [ \$('$PJA' info --json '$W/ff00.jpg' | wc -c) -lt 20000 ] && [ \$('$PJA' report '$W/ff00.jpg' | wc -c) -lt 30000 ]"
+if [ -w /dev/full ]; then
+  check "output on a full disk: said, rc 1, not a bug (t, list, info, --version, selftest)" bash -c "
+    for c in 't $W/t/grayscale.pja' 'list $W/t/grayscale.pja' 'info $W/in/grayscale.jpg' '--version' 'selftest -q'; do
+      '$PJA' \$c > /dev/full 2> '$W/full.txt'; [ \$? -eq 1 ] || exit 1
+      grep -q 'could not write the output' '$W/full.txt' && ! grep -q 'bug' '$W/full.txt' || exit 1
+    done"
+fi
+python3 -I -c "
+import sys; b = bytearray(open(sys.argv[1], 'rb').read()); b[0x12] ^= 1; open(sys.argv[2], 'wb').write(b)" \
+  "$W/t/grayscale.pja" "$W/hashbad.pja"
+check "x -n on a .pja whose hash does not match: rc 1, as x and t" bash -c "
+  ! '$PJA' x -n -o '$W/hb.jpg' '$W/hashbad.pja' 2> '$W/hb.txt' && grep -q 'does not verify' '$W/hb.txt' &&
+  ! '$PJA' t '$W/hashbad.pja' 2> /dev/null && [ ! -e '$W/hb.jpg' ]"
+check "-q --stats: each stats line under its file's name" bash -c "
+  o=\$('$PJA' t -q --stats '$W/t/grayscale.pja' '$W/t/color_plasma.pja') &&
+  [ \"\$(grep -A1 -x '$W/t/grayscale.pja:' <<< \"\$o\" | grep -c '^  stats: ')\" -eq 1 ] &&
+  [ \"\$(grep -A1 -x '$W/t/color_plasma.pja:' <<< \"\$o\" | grep -c '^  stats: ')\" -eq 1 ]"
+check "a near-lossless JPEG-LS is not said lossless" bash -c "
+  o=\$('$PJA' info '$W/in/color_sample_near2.jls') && grep -q '^  lossless: false' <<< \"\$o\" &&
+  grep -q 'near_lossless: true' <<< \"\$o\""
+check "MPF entries at their place in the file, as the embedded image" bash -c "
+  o=\$('$PJA' info '$W/in/stereo.mpo') && at=\$(sed -n 's/.*after the EOI, \\([0-9]*\\) B.*/\\1/p' <<< \"\$o\" | head -1) &&
+  pos=\$(sed -n 's/.* - at \\([0-9]*\\) after the EOI.*/\\1/p' <<< \"\$o\" | head -1) &&
+  grep -q \"B at \$pos (.* in the MPF index)\" <<< \"\$o\""
+mkdir -p "$W/-private_dir"; cp "$W/in/grayscale.jpg" "$W/-private_dir/x.jpg"
+check "report: a folder starting with a dash (after --) is not shown" bash -c "
+  cd '$W' && o=\$('$PJA' report -- -private_dir/x.jpg) && ! grep -q private_dir <<< \"\$o\" && grep -q '^file: x.jpg' <<< \"\$o\""
+cp "$W/in/grayscale.jpg" "$W/a.$(printf 'é%.0s' $(seq 110))"
+check "  a long UTF-8 name: the issue's title cut between characters" bash -c "
+  '$PJA' report '$W'/a.é* | grep '^https://' | python3 -I -c '
+import sys, urllib.parse as u
+q = u.urlparse(sys.stdin.read().strip()).query
+t = u.parse_qs(q, errors=\"strict\")[\"title\"][0]
+assert len(t.encode()) <= 200'"
+python3 -I -c "
+import sys, struct
+d = open(sys.argv[1], 'rb').read()
+com = b''.join(b'\xff\xfe' + struct.pack('>H', 10) + b'NOTE%04d' % i for i in range(200))
+open(sys.argv[2], 'wb').write(d[:2] + com + d[2:])" "$W/in/grayscale.jpg" "$W/many.jpg"
+check "a report too long for the link: says so, keeps the frame and PJA's verdict" bash -c "
+  o=\$('$PJA' report '$W/many.jpg') && grep -q 'room for part of it' <<< \"\$o\" &&
+  u=\$(grep '^https://' <<< \"\$o\") && [ \${#u} -le 6000 ] && grep -q 'frame%3A' <<< \"\$u\" &&
+  grep -q 'pja%3A%20takes%20it' <<< \"\$u\" && ! grep -q NOTE <<< \"\$u\""
+check "--json: original_size and pja_size in a, x, t, list; info's stream_version" bash -c "
+  '$PJA' a -f --json '$W/in/grayscale.jpg' -o '$W/jn/' | head -1 > '$W/jn.txt' &&
+  '$PJA' x -f --json '$W/jn/grayscale.pja' -o '$W/jn/' | head -1 >> '$W/jn.txt' &&
+  '$PJA' t --json '$W/jn/grayscale.pja' | head -1 >> '$W/jn.txt' &&
+  '$PJA' list --json '$W/jn/grayscale.pja' | head -1 >> '$W/jn.txt' &&
+  '$PJA' info --json '$W/in/grayscale.jpg' | head -1 >> '$W/jn.txt' &&
+  python3 -I -c '
+import json, sys
+o = [json.loads(l) for l in open(sys.argv[1])]
+for k in o[:4]: assert isinstance(k[\"original_size\"], int) and isinstance(k[\"pja_size\"], int), k
+assert o[4][\"pja\"][\"stream_version\"] == 7' '$W/jn.txt'"
 
 echo "--- usage"
 check "selftest with a file: rc 2" test "$(rc "$PJA" selftest "$W/bug.jpg")" -eq 2

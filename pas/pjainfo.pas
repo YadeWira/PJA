@@ -59,6 +59,12 @@ type
   { its structure into n }
   TInfoDescribe = procedure(const d: TBytes; n: TInfoNode);
 
+var
+  { the largest original a provider decodes anything of (x's --max-output;
+    DescribeFile sets it): a .pja that declares more is not decoded, as x
+    refuses it, however little it holds }
+  InfoMaxOutput: QWord = High(QWord);
+
 { A format's provider, tried in the order they were registered. }
 procedure RegisterInfoProvider(const name: string; probe: TInfoProbe; describe: TInfoDescribe);
 { The file's structure into n by its provider; n says format unknown when
@@ -346,6 +352,14 @@ begin
   end;
 end;
 
+{ the stream's version, 0 when it has none (stored as is) }
+function StreamVersionOf(const pja: TBytes): Integer;
+var p: TPja;
+begin
+  Result := 0;
+  if Open(pja, p).Ok and not p.stored and (Length(p.payload) > 0) then Result := p.payload[0];
+end;
+
 procedure DescribeAction(const d: TBytes; const ext: string; verify: Boolean; threads: Integer;
                          maxOutput: QWord; n: TInfoNode; out line: string);
 var pja, orig: TBytes; r: TPackResult; h: THash16; why: string;
@@ -375,6 +389,9 @@ begin
   end;
   n.Bool('takes', True);
   n.Str('stream', StreamWords(pja));
+  { the version as a number (0: stored as is, no stream), for scripts }
+  if (Length(pja) > 5) and (pja[5] and FLAG_STORED <> 0) then n.Num('stream_version', 0)
+  else n.Num('stream_version', StreamVersionOf(pja));
   n.Num('pja_size', Length(pja));
   if Length(d) > 0 then n.Fixed('ratio_percent', 100 * Length(pja) / Length(d));
   why := '';
@@ -397,6 +414,7 @@ var act: TInfoNode; summary, ext: string;
 begin
   Result := TInfoNode.Create(ikObject);
   Result.Str('file', name);
+  InfoMaxOutput := maxOutput;
   { a bug met here is what a report is for: it goes in the description,
     as internal_error, instead of ending the command }
   try

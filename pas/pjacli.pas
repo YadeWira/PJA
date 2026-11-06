@@ -169,6 +169,38 @@ begin
   Result := CurJob^.node;
 end;
 
+{ an exception about the file or the system (a read, a write, memory),
+  not a bug in PJA }
+function NotABug(e: Exception): Boolean;
+begin
+  Result := (e is EInOutError) or (e is EStreamError) or (e is EOSError) or (e is EOutOfMemory);
+end;
+
+{ What could not be written to the output (a full disk, a closed pipe):
+  said once, and what is still in the buffer dropped, or the RTL would
+  fail on it again at the end with a runtime error }
+procedure OutputFailed(const why: string);
+begin
+  TextRec(Output).BufPos := 0;
+  InOutRes := 0;
+  Writeln(StdErr, 'pja: could not write the output: ', why);
+end;
+
+{ The end: the output flushed first, so that a write that fails says so
+  and ends with 1 (not a bug, and not 0) }
+procedure Finish(code: Integer);
+begin
+  try
+    Flush(Output);
+  except
+    on e: Exception do begin
+      OutputFailed(e.Message);
+      if code = 0 then code := 1;
+    end;
+  end;
+  Halt(code);
+end;
+
 procedure Usage(code: Integer);
 begin
   Writeln('pja ', PJA_VERSION, ' - lossless recompression of JPEG and JPEG-LS files');
@@ -208,7 +240,7 @@ begin
   Writeln;
   Writeln('exit status: 0 all went through, 1 a file failed, 2 usage error, 3 a bug in PJA');
   Writeln('bugs: pja report FILE, then ', ISSUES_URL);
-  Halt(code);
+  Finish(code);
 end;
 
 procedure UsageError(const msg: string);
@@ -255,6 +287,13 @@ begin
                SupportedPaths);
 end;
 
+{ "--cpu avx2": the value goes after an equals sign (next: where it is) }
+procedure CpuSpaced(next: Integer);
+begin
+  if next <= ArgCount then UsageError('"--cpu ' + args[next] + '": write --cpu=' + args[next])
+  else UsageError('--cpu needs a path: --cpu=plain, --cpu=sse41 or --cpu=avx2');
+end;
+
 procedure ParseArgs;
 var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 
@@ -284,12 +323,13 @@ begin
     Inc(i);
   end;
   a := args[i];
+  if a = '--cpu' then CpuSpaced(i + 1);
   if (a = '-h') or (a = '--help') then Usage(0);
   if (a = '--version') or (a = '-V') then begin
     ApplyCpu;
     Writeln('pja ', PJA_VERSION);
     Write(SystemText(False));
-    Halt(0);
+    Finish(0);
   end;
   if a = 'a' then command := cmCompress
   else if a = 'x' then command := cmExtract
@@ -306,6 +346,7 @@ begin
     a := args[i];
     if onlyFiles or (a = '') or (a[1] <> '-') or (a = '-') then inputs.Add(a)
     else if a = '--' then onlyFiles := True
+    else if a = '--cpu' then CpuSpaced(i + 1)
     else if (a = '-h') or (a = '--help') then Usage(0)
     else if a = '-o' then outArg := NextValue
     else if Copy(a, 1, 13) = '--output-dir=' then outDir := Copy(a, 14, MaxInt)
@@ -353,6 +394,7 @@ begin
   if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
     UsageError('--json is for a, x, t, info and list');
   if withFile and (command <> cmReport) then UsageError('--with-file is for report');
+  if withFile and (inputs.Count = 0) then UsageError('--with-file copies the FILE of the report: give one');
   if runsGiven and (command <> cmBench) then UsageError('-r is for bench');
   if (command in [cmTest, cmInfo, cmReport, cmBench, cmSelftest]) and (force or dryRun or keepCorrupt) then
     UsageError('-f, -n and --keep-corrupt are for a and x');
@@ -540,7 +582,9 @@ begin
   if not stats then Exit;
   t := StageTimes;
   bands := 0;
-  if Open(pja, p).Ok and not p.stored then bands := StreamBands(p.payload, p.orig_size);
+  if Open(pja, p).Ok and not p.stored then begin
+    if p.orig_size <= maxOutput then bands := StreamBands(p.payload, p.orig_size);
+  end;
   o := JobNode.Obj('stats');
   line := '';
   total := 0;
@@ -554,6 +598,8 @@ begin
   o.Fixed('total_ms', total * 1000, 3);
   o.Num('threads', bandThreads);
   o.Num('bands', bands);
+  { with -q the file's own line is not there: the stats name it }
+  if not jsonOut and quiet then CurJob^.outText := CurJob^.outText + CurJob^.name + ':' + LineEnding;
   if not jsonOut then
     CurJob^.outText := CurJob^.outText + '  stats: ' + line + '; total ' + DotNumber(total * 1000, 2) + ' ms; ' +
                        IntToStr(bandThreads) + ' thread(s), ' + IntToStr(bands) + ' band(s)' + LineEnding;
@@ -571,8 +617,8 @@ begin
   if Save(path, pja, Blake3_128(pja)) then begin
     CurJob^.outBytes := Length(pja);
     JobNode.Str('output', path);
-    JobNode.Num('input_size', Length(d));
-    JobNode.Num('output_size', Length(pja));
+    JobNode.Num('original_size', Length(d));
+    JobNode.Num('pja_size', Length(pja));
     if Length(d) > 0 then JobNode.Fixed('ratio_percent', 100 * Length(pja) / Length(d));
     JobNode.Bool('stored', StoredNote(pja) <> '');
     if r.codec.asBytes then JobNode.Str('as_bytes', r.codec.jpeg.Text);
@@ -595,6 +641,9 @@ begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
   if not (r.Ok or (r.err = ukHashMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
+  { -n does everything but write: a hash that does not match fails it as
+    it fails x (Save, which -n stops before, is where x finds it) }
+  if dryRun and (r.err = ukHashMismatch) then begin Fail(f + ': does not verify (' + r.Text + ')'); Exit; end;
   { the original's own extension; a .pja without one (version 3) by the content }
   if r.ext <> '' then ext := '.' + r.ext
   else if IsJls(orig) then ext := '.jls'
@@ -607,6 +656,7 @@ begin
     CurJob^.outBytes := Length(orig);
     JobNode.Str('output', path);
     JobNode.Num('original_size', Length(orig));
+    JobNode.Num('pja_size', Length(d));
     if not quiet then Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
   end;
   StatsOf(d);
@@ -624,6 +674,7 @@ begin
   if not r.Ok then begin Fail(f + ': FAILED: ' + r.Text); Exit; end;
   CurJob^.outBytes := Length(orig);
   JobNode.Num('original_size', Length(orig));
+  JobNode.Num('pja_size', Length(d));
   if not quiet then Say(f + ': OK  ' + Human(Length(orig)) + ', size and BLAKE3-128 verified');
   StatsOf(d);
 end;
@@ -684,13 +735,8 @@ var
   printLock: TRTLCriticalSection;
   { the bytes every file read and wrote, for the summary }
   sumIn, sumOut: Int64;
-
-{ an exception about the file or the system (a read, a write, memory),
-  not a bug in PJA }
-function NotABug(e: Exception): Boolean;
-begin
-  Result := (e is EInOutError) or (e is EStreamError) or (e is EOSError) or (e is EOutOfMemory);
-end;
+  { what writing the output met, '' if nothing }
+  outputError: string;
 
 { PJA_TEST_CRASH=range or access: a bug on purpose (cli.sh checks how the
   command ends then) }
@@ -747,7 +793,18 @@ begin
       { Output and StdErr are per thread in FPC, each with its own buffer:
         flushed here, inside the lock, or a worker's lines would come out
         when it ends }
-      if jobs[nextPrint].outText <> '' then begin Write(jobs[nextPrint].outText); Flush(Output); end;
+      { the output that cannot be written (a full disk) is said once, at
+        the end, and the rest of the run goes on without it }
+      if (jobs[nextPrint].outText <> '') and (outputError = '') then
+        try
+          Write(jobs[nextPrint].outText); Flush(Output);
+        except
+          on e: Exception do begin
+            TextRec(Output).BufPos := 0;
+            InOutRes := 0;
+            outputError := e.Message;
+          end;
+        end;
       if jobs[nextPrint].errText <> '' then begin Write(StdErr, jobs[nextPrint].errText); Flush(StdErr); end;
       if jobs[nextPrint].failed then Inc(errors);
       if jobs[nextPrint].bug then begin
@@ -799,7 +856,7 @@ end;
 { pja report }
 function DoReport: Integer;
 var d: TBytes; f, title, text, url, copied, msg, dir: string; job: TFileJob; rest: array of string; i: Integer;
-    r: TFsResult; o: TOutcome; tb: TBytes;
+    r: TFsResult; o: TOutcome; tb: TBytes; cut: Boolean;
 begin
   Result := 0;
   f := '';
@@ -814,7 +871,7 @@ begin
   SetLength(rest, ArgCount);
   for i := 1 to ArgCount do rest[i - 1] := args[i];
   text := BuildReport(f, d, rest, threads, maxOutput, title);
-  url := IssueUrl(title, text);
+  url := IssueUrl(title, text, cut);
   if outArg = '' then Write(text)
   else begin
     tb := nil;
@@ -836,7 +893,10 @@ begin
                  ' (GitHub takes .jpg; zip a .jls, .mpo or .pja first)');
   end;
   Writeln;
-  Writeln('Open an issue with this report (the link holds it; check it and add the steps):');
+  if cut then
+    Writeln('Open an issue with this report (the link has room for part of it: paste the whole report ',
+            'in the issue, check it and add the steps):')
+  else Writeln('Open an issue with this report (the link holds it; check it and add the steps):');
   Writeln(url);
 end;
 
@@ -881,15 +941,16 @@ begin
     set): here, in the program, which is compiled every time }
   BuildCommit := {$I %PJA_COMMIT%};
   BuildDate := {$I %DATE%};
-  errors := 0; bugs := 0; bugFile := ''; sumIn := 0; sumOut := 0;
+  errors := 0; bugs := 0; bugFile := ''; sumIn := 0; sumOut := 0; outputError := '';
   try
   ParseArgs;
   ApplyCpu;
   StagesOn := stats;
   case command of
-    cmReport: Halt(DoReport);
-    cmBench: Halt(RunBench(inputs, runs, threads));
-    cmSelftest: Halt(RunSelftest(quiet));
+    cmReport: Finish(DoReport);
+    cmBench: Finish(RunBench(inputs, runs, threads));
+    { --cpu: that path alone }
+    cmSelftest: Finish(RunSelftest(quiet, cpuGiven, cpuWanted));
   end;
   started := Seconds;
   if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
@@ -939,15 +1000,26 @@ begin
   for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
   DoneCriticalSection(printLock);
   DoneCriticalSection(claimLock);
-  if stats or jsonOut then Summary(Seconds - started);
+  if (stats or jsonOut) and (outputError = '') then Summary(Seconds - started);
+  if outputError <> '' then begin
+    Writeln(StdErr, 'pja: could not write the output: ', outputError);
+    if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
+    Halt(1);
+  end;
   if errors > 0 then begin
     if inputs.Count > 1 then Writeln(StdErr, 'pja: ', errors, ' of ', inputs.Count, ' files failed');
     if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
     Halt(1);
   end;
+  Finish(0);
   except
     { anything not caught where a file is worked on: a bug }
     on e: Exception do begin
+      { a write or a read the system refused (a full disk): not a bug }
+      if NotABug(e) then begin
+        if e is EInOutError then OutputFailed(e.Message) else Writeln(StdErr, 'pja: ', e.Message);
+        Halt(1);
+      end;
       Writeln(StdErr, 'pja: internal error: ', e.ClassName, ': ', e.Message);
       if inputs <> nil then begin
         if inputs.Count > 0 then BugNote(inputs[0]) else BugNote('');

@@ -7,6 +7,13 @@ arithmetic-coded one with restarts, a near-lossless JPEG-LS), about 5.7 KB,
 and the .pja the given pja command makes of each. The formats are frozen
 (doc/STABILITY.md): those bytes never change, on any platform or SIMD path.
 
+And one more: the baseline JPEG as stream version 5 (the model of the .pja
+made before 0.1.0, and of the zpaq-std plugin's frozen codecs, whose SSE4.1
+kernels version 7 does not run). pja no longer writes version 5, so its
+.pja is pas/tests/selftest_v5.pja, made once with pjapack.Pack(v7=False);
+its stream is the one dump_streams writes for that file (the suite's
+stream hashes), and selftest checks the code still makes those bytes.
+
     tools/gen_selftest.py <pja binary>            write the include
     tools/gen_selftest.py --check <pja binary>    exit 1 if it is not current
 """
@@ -16,6 +23,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'pas', 'pjaselftest.inc')
 SAMPLES = ['jpg/baseline_color.jpg', 'jpg/prog_huffman.jpg', 'jpg/arith_restart.jpg',
            'jls/plasma17x13_sample_near1.jls']
+# (sample, its .pja) of stream version 5
+V5_SAMPLES = [('jpg/baseline_color.jpg', 'pas/tests/selftest_v5.pja')]
 
 
 def pas_bytes(name, b):
@@ -39,18 +48,28 @@ def generate(pja):
             packed = open(out, 'rb').read()
             lines += pas_bytes(f'SELFTEST_IN_{k}', data)
             lines += pas_bytes(f'SELFTEST_PJA_{k}', packed)
-            table.append((os.path.basename(rel), os.path.splitext(rel)[1][1:], k))
+            table.append((os.path.basename(rel), os.path.splitext(rel)[1][1:], k, True))
+        for rel, pja_rel in V5_SAMPLES:
+            k = len(table)
+            data = open(os.path.join(ROOT, 'tests', rel), 'rb').read()
+            packed = open(os.path.join(ROOT, pja_rel), 'rb').read()
+            lines += pas_bytes(f'SELFTEST_IN_{k}', data)
+            lines += pas_bytes(f'SELFTEST_PJA_{k}', packed)
+            table.append((os.path.basename(rel) + ' (version 5)', os.path.splitext(rel)[1][1:], k, False))
     lines.append(f'  SELFTEST_COUNT = {len(table)};')
     lines.append('  SELFTEST_NAMES: array[0..SELFTEST_COUNT - 1] of string = (' +
                  ', '.join(f"'{t[0]}'" for t in table) + ');')
     lines.append('  SELFTEST_EXTS: array[0..SELFTEST_COUNT - 1] of string = (' +
                  ', '.join(f"'{t[1]}'" for t in table) + ');')
+    lines.append('  { the stream version 7 model (what pja a writes); False: version 5 }')
+    lines.append('  SELFTEST_V7: array[0..SELFTEST_COUNT - 1] of Boolean = (' +
+                 ', '.join('True' if t[3] else 'False' for t in table) + ');')
     lines.append('')
     lines.append('procedure SelftestSample(k: Integer; out data, expect: TBytes);')
     lines.append('begin')
     lines.append('  data := nil; expect := nil;')
     lines.append('  case k of')
-    for (_, _, k) in table:
+    for (_, _, k, _) in table:
         lines.append(f'    {k}: begin')
         lines.append(f'      SetLength(data, Length(SELFTEST_IN_{k})); Move(SELFTEST_IN_{k}[0], data[0], Length(data));')
         lines.append(f'      SetLength(expect, Length(SELFTEST_PJA_{k})); Move(SELFTEST_PJA_{k}[0], expect[0], Length(expect));')

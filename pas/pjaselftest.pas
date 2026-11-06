@@ -1,6 +1,7 @@
 { pja selftest (doc/CLI.md): the samples inside the binary (pjaselftest.inc,
   written by tools/gen_selftest.py: a baseline JPEG, a progressive one, an
-  arithmetic-coded one, a JPEG-LS) compressed and extracted on every SIMD
+  arithmetic-coded one, a JPEG-LS, and the baseline one again as stream
+  version 5, the model of older .pja files) compressed and extracted on every SIMD
   path this machine and this build have (pjasysinfo), with one thread and
   with two (two decode the bands while they are encoded). Each .pja has to
   be the very bytes the include holds, on every path, and each has to come
@@ -13,13 +14,16 @@ unit pjaselftest;
 
 interface
 
+uses pjasysinfo;
+
 { Prints a line per path and a summary (only failures and the summary with
-  quiet). 0 when every check passed, 1 if not. }
-function RunSelftest(quiet: Boolean): Integer;
+  quiet). 0 when every check passed, 1 if not. onePath: only `only` (--cpu),
+  which the caller has checked this machine has. }
+function RunSelftest(quiet: Boolean; onePath: Boolean = False; only: TCpuPath = cpPlain): Integer;
 
 implementation
 
-uses SysUtils, pjablake3, pjapack, pjasysinfo, pjainfo;
+uses SysUtils, pjablake3, pjapack, pjainfo;
 
 {$I pjaselftest.inc}
 
@@ -28,7 +32,7 @@ begin
   Result := (Length(a) = Length(b)) and ((Length(a) = 0) or CompareMem(@a[0], @b[0], Length(a)));
 end;
 
-function RunSelftest(quiet: Boolean): Integer;
+function RunSelftest(quiet: Boolean; onePath: Boolean; only: TCpuPath): Integer;
 const THREAD_COUNTS: array[0..1] of Integer = (1, 2);
 var was, p: TCpuPath; k, t, checks, failed, pathFailed, paths: Integer; data, want, got, back: TBytes;
     r: TPackResult; h: THash16; why, names: string;
@@ -36,8 +40,12 @@ begin
   was := CurrentCpuPath;
   checks := 0; failed := 0; paths := 0; names := '';
   if not quiet then begin
-    Writeln('pja selftest: ', SELFTEST_COUNT, ' samples inside the binary, on every SIMD path here (',
-            SupportedPaths, '), with 1 and 2 threads');
+    if onePath then
+      Writeln('pja selftest: ', SELFTEST_COUNT, ' samples inside the binary, on the SIMD path ',
+              CPU_PATH_NAMES[only], ' (--cpu), with 1 and 2 threads')
+    else
+      Writeln('pja selftest: ', SELFTEST_COUNT, ' samples inside the binary, on every SIMD path here (',
+              SupportedPaths, '), with 1 and 2 threads');
     for k := 0 to SELFTEST_COUNT - 1 do begin
       SelftestSample(k, data, want);
       Writeln('  ', SELFTEST_NAMES[k], ': ', Length(data), ' B -> ', Length(want), ' B, .pja blake3-128 ',
@@ -46,7 +54,7 @@ begin
   end;
   try
     for p := Low(TCpuPath) to High(TCpuPath) do begin
-      if not CpuPathSupported(p) then Continue;
+      if not CpuPathSupported(p) or (onePath and (p <> only)) then Continue;
       Inc(paths);
       if names <> '' then names := names + ' ';
       names := names + CPU_PATH_NAMES[p];
@@ -57,7 +65,7 @@ begin
         for t := 0 to High(THREAD_COUNTS) do begin
           Inc(checks);
           why := '';
-          r := Pack(data, got, THREAD_COUNTS[t], False, True, SELFTEST_EXTS[k], True);
+          r := Pack(data, got, THREAD_COUNTS[t], False, True, SELFTEST_EXTS[k], SELFTEST_V7[k]);
           if not r.Ok then why := 'compress failed: ' + r.Text
           else if not SameBytes(got, want) then
             why := 'a different .pja: ' + IntToStr(Length(got)) + ' B, blake3-128 ' + HexBytes(Blake3_128(got))

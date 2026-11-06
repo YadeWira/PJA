@@ -33,8 +33,12 @@ var
   BuildDate: string = '';
 
 function ParseCpuPath(const s: string; out p: TCpuPath): Boolean;
-{ the processor has it, and this build has its code }
+{ the processor has it (the Pascal model has its code in every x86-64
+  build; the C model's copies are CSimdCopies) }
 function CpuPathSupported(p: TCpuPath): Boolean;
+{ the SIMD copies of version 7's C model in this build: "sse41 avx2", or
+  none (built with PJA_V7_PLAIN, or by a compiler without them) }
+function CSimdCopies: string;
 { the paths CpuPathSupported says yes to, by name: "plain sse41 avx2" }
 function SupportedPaths: string;
 function CurrentCpuPath: TCpuPath;
@@ -191,13 +195,28 @@ function CpuPathSupported(p: TCpuPath): Boolean;
 begin
   case p of
     cpPlain: Result := True;
-    { the Pascal model's SSE4.1 code is x86-64's; version 7's copies are
-      pjav7c.c's }
-    cpSse41: Result := {$ifdef CPUX86_64} HasSse41 and (V7Paths and 1 <> 0) {$else} False {$endif};
-    cpAvx2: Result := {$ifdef CPUX86_64} HasSse41 and HasAvx2 and (V7Paths and 3 = 3) {$else} False {$endif};
+    { the path is pjamodel's UseSse41 and UseAvx2, which the Pascal
+      model's SSE4.1 code (x86-64's) follows in every build; version 7's
+      copies (pjav7c.c) follow them where the C part has them, and run
+      plain where it was built without (CSimdCopies) }
+    cpSse41: Result := {$ifdef CPUX86_64} HasSse41 {$else} False {$endif};
+    cpAvx2: Result := {$ifdef CPUX86_64} HasSse41 and HasAvx2 {$else} False {$endif};
   else
     Result := False;
   end;
+end;
+
+function CSimdCopies: string;
+begin
+  { the path follows UseSse41 and UseAvx2, which are x86-64's alone }
+  {$ifndef CPUX86_64} Exit('none used (the plain path only)'); {$endif}
+  Result := '';
+  if V7Paths and 1 <> 0 then Result := 'sse41';
+  if V7Paths and 2 <> 0 then begin
+    if Result <> '' then Result := Result + ' ';
+    Result := Result + 'avx2';
+  end;
+  if Result = '' then Result := 'none (the C model runs plain on every path)';
 end;
 
 function SupportedPaths: string;
@@ -297,6 +316,7 @@ begin
   n.Str('cpu_features', CpuFeatures);
   n.Str('cpu_path', CPU_PATH_NAMES[CurrentCpuPath]);
   n.Str('cpu_paths_supported', SupportedPaths);
+  n.Str('c_simd_copies', CSimdCopies);
   n.Num('processors', CpuCount);
   n.Num('default_threads', DefaultThreads);
 end;
