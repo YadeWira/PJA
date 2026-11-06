@@ -1880,7 +1880,7 @@ const
   when mode 2's stream is below the least mode 1's could be, unless mode
   2's does not come back) for one decoding instead of two. }
 procedure J2kChoose(const data: TBytes; off, len: Int64; threads: Integer; out s: TBytes; out mode: Byte);
-var c1, c2: TBytes; floor1: Int64; tried1: Boolean; job: TMode1Job; t2: Integer; failed: Exception;
+var c1, c2: TBytes; floor1, t1: Int64; tried1: Boolean; job: TMode1Job; t2: Integer; failed: Exception;
 
   { mode m's stream gives the codestream back (--stats: the verify) }
   function Checked(m: Integer; const st: TBytes): Boolean;
@@ -1942,11 +1942,17 @@ begin
   s := nil; mode := J2K_RAW;
   floor1 := 0; c1 := nil; c2 := nil; tried1 := False; job := nil; t2 := threads;
   if Together then begin
-    { the threads shared: the streams are the same for any number }
+    { the threads shared (the streams are the same for any number): mode 1
+      as many as it may have slices (one a MiB, pjaj2kcs.J2K_SLICE_BYTES),
+      mode 2 the rest, one at least (its pixels are one arithmetic stream,
+      its tiles' wavelets go on the others) }
+    t1 := len shr 20;
+    if t1 > threads - 1 then t1 := threads - 1;
+    if t1 < 1 then t1 := 1;
     job := TMode1Job.Create(True);
-    job.data := data; job.off := off; job.len := len; job.threads := threads div 2;
+    job.data := data; job.off := off; job.len := len; job.threads := t1;
     job.FreeOnTerminate := False;
-    t2 := threads - threads div 2;
+    t2 := threads - t1;
     job.Start;
   end;
   try

@@ -57,7 +57,8 @@ var
   bugFile: string;
   maxOutput: QWord;
   errors: Integer;
-  { threads per file: what is left of -th once the files are shared out }
+  { threads per file when the files are not shared out by size (one
+    worker); each job's own are TFileJob.threads }
   bandThreads: Integer;
 
 type
@@ -74,6 +75,10 @@ type
     errors: string;
     { the bytes read and written (the summary of --stats and --json) }
     inBytes, outBytes: Int64;
+    { the input's size when the files were ordered (0: not looked at), and
+      the threads it was given for its bands (Work) }
+    size: Int64;
+    threads: Integer;
   end;
   PFileJob = ^TFileJob;
 
@@ -625,13 +630,13 @@ begin
       line := line + STAGE_NAMES[st] + ' ' + DotNumber(t[st] * 1000, 2) + ' ms';
     end;
   o.Fixed('total_ms', total * 1000, 3);
-  o.Num('threads', bandThreads);
+  o.Num('threads', CurJob^.threads);
   o.Num('bands', bands);
   { with -q the file's own line is not there: the stats name it }
   if not jsonOut and quiet then CurJob^.outText := CurJob^.outText + CurJob^.name + ':' + LineEnding;
   if not jsonOut then
     CurJob^.outText := CurJob^.outText + '  stats: ' + line + '; total ' + DotNumber(total * 1000, 2) + ' ms; ' +
-                       IntToStr(bandThreads) + ' thread(s), ' + IntToStr(bands) + ' band(s)' + LineEnding;
+                       IntToStr(CurJob^.threads) + ' thread(s), ' + IntToStr(bands) + ' band(s)' + LineEnding;
 end;
 
 procedure CompressOne(const f: string);
@@ -640,7 +645,7 @@ begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
   { the extension, as it is written, for x to give it back }
-  r := Pack(d, pja, bandThreads, False, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt), True);
+  r := Pack(d, pja, CurJob^.threads, False, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt), True);
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
   if Save(path, pja, Blake3_128(pja)) then begin
@@ -665,7 +670,7 @@ procedure ExtractOne(const f: string);
 var d, orig: TBytes; r: TPackResult; path, ext: string; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
-  r := Unpack(d, maxOutput, orig, h, bandThreads);
+  r := Unpack(d, maxOutput, orig, h, CurJob^.threads);
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
@@ -698,7 +703,7 @@ var d, orig: TBytes; r: TPackResult; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
   if not IsPja(d) then begin Fail(f + ': FAILED: not a .pja'); Exit; end;
-  r := Unpack(d, maxOutput, orig, h, bandThreads);
+  r := Unpack(d, maxOutput, orig, h, CurJob^.threads);
   StageEnter(stNone);
   if r.err = ukTooLarge then begin Fail(f + ': FAILED: the original is larger than --max-output'); Exit; end;
   if not r.Ok then begin Fail(f + ': FAILED: ' + r.Text); Exit; end;
@@ -714,8 +719,8 @@ procedure InfoOne(const f: string);
 var d: TBytes; n, bug: TInfoNode; sl: TStringList;
 begin
   if not ReadWhole(f, d) then Exit;
-  if estimate then n := DescribeFile(f, d, False, bandThreads, maxOutput, idEstimate)
-  else n := DescribeFile(f, d, False, bandThreads, maxOutput, idDefault);
+  if estimate then n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, idEstimate)
+  else n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, idDefault);
   bug := n.Find('internal_error');
   if bug <> nil then begin
     CurJob^.bug := True;
@@ -861,14 +866,72 @@ begin
   end;
 end;
 
-{ takes the next input until none is left }
-procedure Work;
-var k: LongInt;
+{ The -th threads as tokens: a worker holds one while it runs a file, and
+  a file may take more of those free when it starts, for its bands (a JPEG
+  2000 codestream's slices, a JPEG's bands, the two modes side by side): as
+  many as its share of the bytes not yet started is of -th, at least one.
+  The largest files go first (ScheduleJobs) and the last ones take what the
+  others left: a set whose largest file is a third of its bytes no longer
+  waits for it on one thread at the end (gap1's 46 MB codestream, -th 8).
+  Threads change no output. With one worker, the file takes every thread,
+  as before. }
+var
+  tokLock: TRTLCriticalSection;
+  tokFree: Integer;          { tokens no worker holds }
+  tokWake: PRTLEvent;        { set when tokens come back }
+  restBytes: Int64;          { the sizes of the files not yet started }
+
+{ one token for this worker, waiting for one if none is free }
+procedure TokenTake;
 begin
   repeat
-    k := InterlockedIncrement(nextJob) - 1;
-    if k >= Length(jobs) then Break;
+    EnterCriticalSection(tokLock);
+    if tokFree > 0 then begin
+      Dec(tokFree);
+      LeaveCriticalSection(tokLock);
+      Exit;
+    end;
+    LeaveCriticalSection(tokLock);
+    RTLEventWaitFor(tokWake, 50);
+  until False;
+end;
+
+procedure TokenGive(n: Integer);
+begin
+  EnterCriticalSection(tokLock);
+  Inc(tokFree, n);
+  LeaveCriticalSection(tokLock);
+  RTLEventSetEvent(tokWake);
+end;
+
+{ takes the next input until none is left }
+procedure Work;
+var k: LongInt; want, extra: Integer; sz, w64: Int64;
+begin
+  repeat
+    TokenTake;
+    EnterCriticalSection(tokLock);
+    k := nextJob;
+    if k < Length(jobs) then begin
+      Inc(nextJob);
+      sz := jobs[order[k]].size;
+      { its share of what is left, in threads, rounded up }
+      if (restBytes > 0) and (sz > 0) then begin
+        w64 := (Int64(threads) * sz + restBytes - 1) div restBytes;
+        if w64 > threads then w64 := threads;
+        want := Integer(w64);
+        restBytes := restBytes - sz;
+      end else want := bandThreads;
+      if want < 1 then want := 1;
+      extra := want - 1;
+      if extra > tokFree then extra := tokFree;
+      Dec(tokFree, extra);
+      jobs[order[k]].threads := 1 + extra;
+    end;
+    LeaveCriticalSection(tokLock);
+    if k >= Length(jobs) then begin TokenGive(1); Break; end;
     RunJob(order[k]);
+    TokenGive(jobs[order[k]].threads);
   until False;
 end;
 
@@ -884,11 +947,16 @@ var i, j, t: Integer; size: array of Int64; sr: TSearchRec;
 begin
   order := nil; size := nil;
   SetLength(order, Length(jobs)); SetLength(size, Length(jobs));
+  restBytes := 0;
   for i := 0 to High(jobs) do begin
     order[i] := i; size[i] := 0;
     if (workers > 1) and (FindFirst(jobs[i].name, faAnyFile, sr) = 0) then begin
       size[i] := sr.Size; FindClose(sr);
     end;
+    if size[i] < 0 then size[i] := 0;
+    jobs[i].size := size[i];
+    jobs[i].threads := bandThreads;
+    restBytes := restBytes + size[i];
   end;
   { stable insertion sort, largest first: the same order every run }
   for i := 1 to High(order) do begin
@@ -1057,6 +1125,9 @@ begin
   nextJob := 0; nextPrint := 0;
   ScheduleJobs(workers);
   InitCriticalSection(printLock);
+  InitCriticalSection(tokLock);
+  tokWake := RTLEventCreate;
+  tokFree := threads;
   pool := nil;
   SetLength(pool, workers - 1);
   { a thread the system refuses (a host at its limit) leaves the files to
