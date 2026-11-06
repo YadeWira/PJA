@@ -139,8 +139,11 @@ const
   { a slice's tables: 2^KM_HBMIN to 2^KM_HBMAX counters each (pjaj2kmc.c) }
   KM_HBMIN = 10; KM_HBMAX = 20;
   { the slices: one per J2K_SLICE_BYTES of codestream, at most one a tile
-    and J2K_MAX_SLICES }
-  J2K_SLICE_BYTES = 4 shl 20; J2K_MAX_SLICES = 64;
+    and J2K_MAX_SLICES. An encoder's choice, written in the stream (any
+    release reads any slicing): 4 MiB in 0.9.5, 1 MiB from 0.9.6 (more
+    threads for a tiled codestream of a few MB, 0.04 points of gap1's and
+    the rebuild files' savings; doc/CODEC.md, "JPEG 2000 faster") }
+  J2K_SLICE_BYTES = 1 shl 20; J2K_MAX_SLICES = 64;
 
 { The side information (the blob without the decisions) of a codestream of
   len bytes is at most this many bytes: the analysis refuses a codestream
