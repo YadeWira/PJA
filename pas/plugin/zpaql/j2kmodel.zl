@@ -225,8 +225,19 @@ def kabs(v):
 
 def kilog2(v):
     n = 0
-    while v > 1:
-        v = v >> 1
+    if v >= 65536:
+        v = v >> 16
+        n = 16
+    if v >= 256:
+        v = v >> 8
+        n += 8
+    if v >= 16:
+        v = v >> 4
+        n += 4
+    if v >= 4:
+        v = v >> 2
+        n += 2
+    if v >= 2:
         n += 1
     return n
 
@@ -326,10 +337,21 @@ def klearn(c, bit):
 
 
 def kapmupd(t, lo, fr, tg):
+    """a map's two bins toward tg: truncshr((tg - v) * w >> 6, 6 + KM_APMR)"""
     v = H[t + lo]
-    H[t + lo] = (v + tshr(sar((tg - v) * (4096 - fr), 6), 6 + KM_APMR)) & 65535
+    d = (tg - v) * (4096 - fr)
+    if slt(d, 0):
+        d = -((-sar(d, 6)) >> (6 + KM_APMR))
+    else:
+        d = d >> (12 + KM_APMR)
+    H[t + lo] = (v + d) & 65535
     v = H[t + lo + 1]
-    H[t + lo + 1] = (v + tshr(sar((tg - v) * fr, 6), 6 + KM_APMR)) & 65535
+    d = (tg - v) * fr
+    if slt(d, 0):
+        d = -((-sar(d, 6)) >> (6 + KM_APMR))
+    else:
+        d = d >> (12 + KM_APMR)
+    H[t + lo + 1] = (v + d) & 65535
 
 
 def kmix(sa, sb, sc, a0, a1, a2):
@@ -354,12 +376,42 @@ def kmix(sa, sb, sc, a0, a1, a2):
         da = da + s * H[wa + i]
         db = db + s * H[wb + i]
         dc = dc + s * H[wc + i]
-    dc = kclamp(tshr(dc, 16), -3071, 3071)
-    da = kclamp(tshr(da, 16), -3071, 3071)
-    db = kclamp(tshr(db, 16), -3071, 3071)
-    xx = tshr((da + db + dc) * 21846, 16)
+    if slt(da, 0):
+        da = -((-da) >> 16)
+        if slt(da, -3071):
+            da = -3071
+    else:
+        da = da >> 16
+        if da > 3071:
+            da = 3071
+    if slt(db, 0):
+        db = -((-db) >> 16)
+        if slt(db, -3071):
+            db = -3071
+    else:
+        db = db >> 16
+        if db > 3071:
+            db = 3071
+    if slt(dc, 0):
+        dc = -((-dc) >> 16)
+        if slt(dc, -3071):
+            dc = -3071
+    else:
+        dc = dc >> 16
+        if dc > 3071:
+            dc = 3071
+    xx = (da + db + dc) * 21846
+    if slt(xx, 0):
+        xx = -((-xx) >> 16)
+    else:
+        xx = xx >> 16
     pm = KSQ[xx + 3072]
-    pos = (kclamp(xx, -2047, 2047) + 2048) * 32
+    pos = xx
+    if slt(pos, -2047):
+        pos = -2047
+    elif sgt(pos, 2047):
+        pos = 2047
+    pos = (pos + 2048) * 32
     lo = pos >> 12
     fr = pos & 4095
     t0 = base(KAP0) + a0 * 33
@@ -380,9 +432,36 @@ def kmix(sa, sb, sc, a0, a1, a2):
         KCC[sc] += 1
     for i in range(16):
         s = KS16[i]
-        H[wa + i] = kclamp(H[wa + i] + tshr(s * ea, 16), -KWMAX, KWMAX)
-        H[wb + i] = kclamp(H[wb + i] + tshr(s * eb, 16), -KWMAX, KWMAX)
-        H[wc + i] = kclamp(H[wc + i] + tshr(s * ec, 16), -KWMAX, KWMAX)
+        t = s * ea
+        if slt(t, 0):
+            t = H[wa + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wa + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wa + i] = t
+        t = s * eb
+        if slt(t, 0):
+            t = H[wb + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wb + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wb + i] = t
+        t = s * ec
+        if slt(t, 0):
+            t = H[wc + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wc + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wc + i] = t
     tg = 0
     if bit:
         tg = 65535
@@ -411,33 +490,62 @@ def kevent(k, x, y, b, sd, rc):
     rur = H[i - rw + 1]
     rdl = H[i + rw - 1]
     rdr = H[i + rw + 1]
-    n4 = kabs(rl) + kabs(rr) + kabs(ru) + kabs(rd)
-    nd = kabs(rul) + kabs(rur) + kabs(rdl) + kabs(rdr)
-    n2 = kabs(H[i - 2]) + kabs(H[i + 2]) + kabs(H[i - 2 * rw]) + kabs(H[i + 2 * rw])
+    n4 = (rl if sge(rl, 0) else -rl) + (rr if sge(rr, 0) else -rr) + (ru if sge(ru, 0) else -ru) + \
+        (rd if sge(rd, 0) else -rd)
+    nd = (rul if sge(rul, 0) else -rul) + (rur if sge(rur, 0) else -rur) + (rdl if sge(rdl, 0) else -rdl) + \
+        (rdr if sge(rdr, 0) else -rdr)
+    v = H[i - 2]
+    n2 = v if sge(v, 0) else -v
+    v = H[i + 2]
+    n2 = n2 + (v if sge(v, 0) else -v)
+    v = H[i - 2 * rw]
+    n2 = n2 + (v if sge(v, 0) else -v)
+    v = H[i + 2 * rw]
+    n2 = n2 + (v if sge(v, 0) else -v)
     nsum = 2 * n4 + nd
     ln = -7
     if nsum:
-        ln = kclamp(kq2log(nsum) - 2 * b - 2, -6, 12)
+        ln = kq2log(nsum) - 2 * b - 2
+        if slt(ln, -6):
+            ln = -6
+        elif sgt(ln, 12):
+            ln = 12
     ln2 = -5
     if n2:
-        ln2 = kclamp(kq2log(n2) - 2 * b, -4, 8)
+        ln2 = kq2log(n2) - 2 * b
+        if slt(ln2, -4):
+            ln2 = -4
+        elif sgt(ln2, 8):
+            ln2 = 8
     lp = -9
     lps = 0
     lx = -9
     lxs = 0
-    depth = kclamp(kmbc - b, 0, 20)
+    depth = kmbc - b
+    if slt(depth, 0):
+        depth = 0
+    elif sgt(depth, 20):
+        depth = 20
     orl = korient * 16 + klvl
     ext = 0
     if khaveP:
         q = KPQ[pi]
         lps = KPS[pi]
         if sgt(q, -100):
-            lp = kclamp(q + kpqoff - 2 * b, -8, 8)
+            lp = q + kpqoff - 2 * b
+            if slt(lp, -8):
+                lp = -8
+            elif sgt(lp, 8):
+                lp = 8
     if khaveX:
         q = KXQ[pi]
         lxs = KXS[pi]
         if sgt(q, -100):
-            lx = kclamp(q + kxqoff - 2 * b, -8, 8)
+            lx = q + kxqoff - 2 * b
+            if slt(lx, -8):
+                lx = -8
+            elif sgt(lx, 8):
+                lx = 8
     lnI = ln + 7
     lpI = lp + 9
     lxI = lx + 9
@@ -489,7 +597,7 @@ def kevent(k, x, y, b, sd, rc):
     KV[7] = ((((lnI * KR_LP + lpI) * KR_LP + lxI) * 11 + (depth >> 1)) * KR_EXT + ext) * 4 + korient
     for j in range(8):
         KV[j] = KV[j] + k * KPK[j]
-    return kmix((k * 20 + lnI) * 24 + kclamp(depth, 0, 23), (k * 12 + sd) * 18 + kclamp(lpI, 0, 17),
+    return kmix((k * 20 + lnI) * 24 + depth, (k * 12 + sd) * 18 + lpI,
                 (k * 64 + orl) * 4 + kcomp, k * 20 + lnI, (k * 18 + lpI) * 18 + lxI, (k * 12 + sd) * 21 + depth)
 
 
@@ -498,15 +606,29 @@ def keventrun(x, y0, b, rl):
     rw = krw
     pi = y0 * kw + x
     sw = 0
+    a = i0 - 2 * rw - 2
     for k in range(8):
-        a = i0 + (k - 2) * rw
-        sw = sw + kabs(H[a - 2]) + kabs(H[a - 1]) + kabs(H[a]) + kabs(H[a + 1]) + kabs(H[a + 2])
+        for j in range(5):
+            v = H[a + j]
+            if slt(v, 0):
+                sw = sw - v
+            else:
+                sw = sw + v
+        a += rw
     lw = -7
     if sw:
-        lw = kclamp(kq2log(sw) - 2 * b - 2, -6, 12)
+        lw = kq2log(sw) - 2 * b - 2
+        if slt(lw, -6):
+            lw = -6
+        elif sgt(lw, 12):
+            lw = 12
     lp = -9
     lx = -9
-    depth = kclamp(kmbc - b, 0, 20)
+    depth = kmbc - b
+    if slt(depth, 0):
+        depth = 0
+    elif sgt(depth, 20):
+        depth = 20
     orl = korient * 16 + klvl
     for k in range(4):
         if khaveP and sgt(KPQ[pi + k * kw], -100):
@@ -531,7 +653,7 @@ def keventrun(x, y0, b, rl):
     KV[7] = ((((lwI * KR_LP + lpI) * KR_LP + lxI) * 11 + (depth >> 1)) * KR_EXT + rl) * 4 + korient
     for j in range(8):
         KV[j] = KV[j] + K_RUN * KPK[j]
-    return kmix((K_RUN * 20 + lwI) * 24 + kclamp(depth, 0, 23), (K_RUN * 12 + rl) * 18 + kclamp(lpI, 0, 17),
+    return kmix((K_RUN * 20 + lwI) * 24 + depth, (K_RUN * 12 + rl) * 18 + lpI,
                 (K_RUN * 64 + orl) * 4 + kcomp, K_RUN * 20 + lwI, (K_RUN * 18 + lpI) * 18 + lxI,
                 (K_RUN * 12 + rl) * 21 + depth)
 
