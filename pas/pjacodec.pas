@@ -107,13 +107,17 @@ type
     the codestream data[off..off + len)'s stream, decoded and compared
     already; Dec the codestream (len bytes) back. }
   TJ2kMode1Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+  { mode 2's: a stream shorter than the codestream, and the least mode 1's
+    could be (pjaj2kpx.J2kMode2Encode) }
+  TJ2kMode2Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+    out mode1Floor: Int64): Boolean;
   TJ2kMode1Dec = function(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
 
 var
   J2kMode1Enc: TJ2kMode1Enc = nil;
   J2kMode1Dec: TJ2kMode1Dec = nil;
   { mode 2 (the codestream as its pixels), the same way, set by pjaj2kpx }
-  J2kMode2Enc: TJ2kMode1Enc = nil;
+  J2kMode2Enc: TJ2kMode2Enc = nil;
   J2kMode2Dec: TJ2kMode1Dec = nil;
 
 { JPEG -> stream. With verify (the default), the stream is decompressed and
@@ -1576,13 +1580,15 @@ end;
   or mode 2, whichever of them this program has (J2kMode1Enc,
   J2kMode2Enc) gives the smaller stream, when that is smaller than the
   codestream, else in mode 0; the rest of the file through the raw bytes'
-  model. Mode 2 is tried first, and mode 1 only when mode 2 does not take
-  the codestream to half its bytes or less (mode 1 saves a fifth on the
-  codestreams it does best: a bitonal page is not tried twice). ceJpeg (NotJpeg) for a file that is not one or that is too large
+  model. Mode 2 is tried first, and mode 1 unless mode 2's stream is
+  already no longer than mode 1's could be at the least: the side
+  information (the same in both) and half the coded bytes it does not keep
+  (mode 1 saves a fifth on the codestreams it does best: a bitonal page is
+  not tried twice). ceJpeg (NotJpeg) for a file that is not one or that is too large
   for the stream's 32-bit places. }
 function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
 var cs: TJ2kCodestreams; cd: TCoder; body, host, back, m2: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, total: Int64; md: array of Byte;
+  ms, known: TKnown; cut, total, floor1: Int64; md: array of Byte;
 begin
   stream := nil;
   if (Length(data) >= High(Cardinal)) or not J2kCodestreams(data, cs) then begin
@@ -1592,12 +1598,13 @@ begin
   cut := 0;
   for i := 0 to High(cs) do begin
     ms[i] := nil; known[i] := nil; md[i] := J2K_RAW;
-    if Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, m2) and
+    floor1 := 0;
+    if Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, m2, floor1) and
        (Length(m2) < cs[i].len) then begin
       ms[i] := m2; md[i] := J2K_PIXELS;
     end;
     m2 := nil;
-    if Assigned(J2kMode1Enc) and ((md[i] = J2K_RAW) or (2 * Int64(Length(ms[i])) > cs[i].len)) and
+    if Assigned(J2kMode1Enc) and ((md[i] = J2K_RAW) or (Length(ms[i]) > floor1)) and
        J2kMode1Enc(data, cs[i].off, cs[i].len, threads, m2) and (Length(m2) < cs[i].len) and
        ((md[i] = J2K_RAW) or (Length(m2) < Length(ms[i]))) then begin
       ms[i] := m2; md[i] := J2K_MODEL;

@@ -50,7 +50,8 @@
   side checked). }
 program test_j2kcs;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaj2k, pjaj2kcs, pjaj2km, pjaj2kpx;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaarith, pjamodel, pjaj2k, pjaj2kcs, pjaj2km,
+  pjaj2kpx;
 
 var
   quiet: Boolean;
@@ -61,7 +62,7 @@ var
   mode1, mode2: Boolean;
   m2Fuzz: Integer;
   m2Digest: QWord;
-  m2Cs, m2Bytes, m2Side, m2Fail, m2Ref, m2FzRuns, m2FzOk, m2FzCs, m2FzCsOk: Int64; tM2e, tM2d: Double;
+  m2Cs, m2Bytes, m2Side, m2Fail, m2Ref, m2FzRuns, m2FzOk, m2FzCs, m2FzCsOk, m2Caps: Int64; tM2e, tM2d: Double;
   m2Reasons: TStringList;
   { the choice: per codestream, the smallest of the codestream, mode 1's and mode 2's streams }
   chCs, chBytes, chM0, chM1, chM2, chM1Bytes, chBestCs: Int64;
@@ -312,14 +313,70 @@ begin
   end;
 end;
 
+{ a mode 2 stream whose side information's SIZ says planes past the caps
+  (2^21 samples wide; 1,024 x max(2^17, len + 1) samples, more than 1,024
+  a codestream's byte; on each component's grid): refused before a plane
+  is made, at once (doc/CODEC.md, stage D, "Memory") }
+procedure Mode2Caps(const m: TBytes; len: Int64; const f: string; ci: Integer);
+var cd: TCoder; blob, raw, b2, side, ns, back: TBytes; sl, p, mdx, mdy, w, h: Int64; i: SizeInt; k: Integer;
+  r: TMode2Result; why: string;
+  t0: TDateTime;
+  procedure Put32(var b: TBytes; q: Int64; v: Cardinal);
+  begin
+    b[q] := v shr 24; b[q + 1] := (v shr 16) and $FF; b[q + 2] := (v shr 8) and $FF; b[q + 3] := v and $FF;
+  end;
+  function Get32(const b: TBytes; q: Int64): Cardinal;
+  begin
+    Result := (Cardinal(b[q]) shl 24) or (Cardinal(b[q + 1]) shl 16) or (Cardinal(b[q + 2]) shl 8) or b[q + 3];
+  end;
+begin
+  sl := Int64(m[5]) or (Int64(m[6]) shl 8) or (Int64(m[7]) shl 16) or (Int64(m[8]) shl 24);
+  cd.InitDecoder(Copy(m, 9, sl), 0);
+  if not CodeRaw(cd, blob, 1 shl 30) or not J2kBlobSiz(blob, raw) then begin
+    Inc(m2Fail); Writeln('MODE2 CAPS FAIL ', f, ' #', ci, ': no SIZ'); Exit;
+  end;
+  p := -1;
+  for i := 0 to Length(blob) - Length(raw) do
+    if CompareMem(@blob[i], @raw[0], Length(raw)) then begin p := i; Break; end;
+  if p < 0 then begin Inc(m2Fail); Writeln('MODE2 CAPS FAIL ', f, ' #', ci, ': SIZ not found'); Exit; end;
+  mdx := 1; mdy := 1;
+  for i := 0 to (Length(raw) - 40) div 3 - 1 do begin
+    mdx := Max(mdx, raw[41 + 3 * i]); mdy := Max(mdy, raw[42 + 3 * i]);
+  end;
+  for k := 0 to 1 do begin
+    b2 := Copy(blob);
+    { Xsiz, Ysiz from XOsiz, YOsiz }
+    { on each component's grid, whatever its sampling }
+    if k = 0 then begin w := mdx shl 21; h := Get32(raw, 10) - Get32(raw, 18); end
+    else begin w := mdx * 1024; h := mdy * Max(1 shl 17, len + 1); end;
+    Put32(b2, p + 6, Min(Int64(Get32(raw, 14)) + w, High(Cardinal)));
+    Put32(b2, p + 10, Min(Int64(Get32(raw, 18)) + h, High(Cardinal)));
+    cd.InitEncoder; CodeRaw(cd, b2, MaxInt); side := cd.enc.Finish;
+    SetLength(ns, 9 + Length(side));
+    Move(m[0], ns[0], 9);
+    ns[5] := Length(side) and $FF; ns[6] := (Length(side) shr 8) and $FF; ns[7] := (Length(side) shr 16) and $FF;
+    ns[8] := Length(side) shr 24;
+    if Length(side) > 0 then Move(side[0], ns[9], Length(side));
+    ns := Concat(ns, Copy(m, 9 + sl, Length(m)));
+    t0 := Now;
+    r := J2kMode2DecodeWhy(ns, len, m1Threads, back, why);
+    if (r <> m2Bad) or ((why <> 'too wide') and (why <> 'too many samples') and
+       (why <> 'too many samples for its bytes')) or (MilliSecondsBetween(Now, t0) > 2000) then begin
+      Inc(m2Fail); Writeln('MODE2 CAPS FAIL ', f, ' #', ci, ' variant ', k, ': ', Ord(r), ' ', why, ' in ',
+        MilliSecondsBetween(Now, t0), ' ms');
+    end else Inc(m2Caps);
+  end;
+end;
+
 { -mode2: the codestream as stream version 8's mode 2 (pjaj2kpx), decoded
   again and compared; and with -mode1, the choice }
 procedure Mode2One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
-var m, back: TBytes; why: string; t0: TDateTime; r: TMode2Result; side, best: Int64; te, td: Double;
+var m, back: TBytes; why: string; t0: TDateTime; r: TMode2Result; side, best, floor1: Int64; te, td: Double;
   chosen: Integer;
 begin
   t0 := Now;
-  r := J2kMode2Encode(d, off, len, m1Threads, m, why);
+  { every stream mode 2 makes, shorter than the codestream or not }
+  r := J2kMode2Encode(d, off, len, m1Threads, High(Int64), m, why, floor1);
   te := MilliSecondsBetween(Now, t0) / 1000;
   if r <> m2Ok then begin
     if (Pos('verify', why) = 1) or (Pos('exception', why) = 1) or (Pos('internal', why) = 1) then begin
@@ -343,13 +400,14 @@ begin
     tM2e := tM2e + te; tM2d := tM2d + td;
     Writeln('MODE2 ', ExtractFileName(f), ' #', ci, ' ', len, ' ', Length(m), ' ', side, ' ',
       FormatFloat('0.000', te), ' ', FormatFloat('0.000', td));
+    Mode2Caps(m, len, f, ci);
     if m2Fuzz > 0 then Mode2Fuzz(m, len, f, ci, d, off);
   end;
   if mode1 then begin
     { the choice, as pjacodec.CompressJ2k makes it }
     best := len; chosen := 0;
     if (m <> nil) and (Length(m) < best) then begin best := Length(m); chosen := 2; end;
-    if (lastM1 >= 0) and (lastM1 < best) and ((chosen = 0) or (2 * best > len)) then begin
+    if (lastM1 >= 0) and (lastM1 < best) and ((chosen = 0) or (best > floor1)) then begin
       best := lastM1; chosen := 1;
     end;
     chCs := chCs + len; chBytes := chBytes + best;
@@ -496,6 +554,7 @@ begin
       FormatFloat('0.000', 100.0 * m2Side / m2Cs), '%; ', FormatFloat('0.000', m2Cs / 1048576 / Max(tM2e, 0.001)),
       ' MB/s encoding (with its check), ', FormatFloat('0.000', m2Cs / 1048576 / Max(tM2d, 0.001)), ' MB/s decoding)');
     Writeln('; refused ', m2Ref, ', failed ', m2Fail, '; streams digest ', IntToHex(m2Digest, 16));
+    Writeln('mode 2 caps: ', m2Caps, ' streams past the caps refused at once');
     for i := 0 to m2Reasons.Count - 1 do Writeln('  mode 2 refused: ', PtrInt(m2Reasons.Objects[i]), ' x ', m2Reasons[i]);
     if m2Fuzz > 0 then Writeln('mode 2 fuzz: ', m2FzRuns, ' damaged streams (', m2FzOk, ' gave the codestream), ',
       m2FzCs, ' damaged codestreams (', m2FzCsOk, ' taken and given back)');

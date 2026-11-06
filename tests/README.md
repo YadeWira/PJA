@@ -106,3 +106,12 @@ is smaller than mode 1's):
 |---|---|
 | `bitonal.j2k` | `color_plasma.jpg` decoded with `djpeg -pnm`, to gray and thresholded at 50% (ImageMagick, `convert -colorspace Gray -threshold 50%`), one byte 0 or 1 a pixel (a `.raw`) → `opj_compress -F 320,240,1,1,u`: a 1-bit codestream (Ssiz 0), lossless (the PBM and PGM readers of `opj_compress` make 8-bit ones) |
 | `rgb_tiles53.j2k` | `baseline_color.jpg` (64x64, `djpeg -pnm`) → `opj_compress -b 8,8 -t 40,36 -d 5,3 -n 3`: lossless RGB with the reversible colour transform, four tiles on an image offset by (5, 3), so that the wavelet's signals start at odd places |
+
+And one where mode 2 takes the codestream to under half its bytes and
+mode 1 is still smaller (a large COM, the same in both, makes the
+codestream large and its coded bytes few): the choice must try mode 1
+too.
+
+| file | made with |
+|---|---|
+| `lossless_com.j2k` | `grayscale.jpg` (64x64, `djpeg -pnm`) → `opj_compress -C "<text>"`: `lossless53.j2k` with a COM of 9,939 bytes of text, the text `PJA test comment line N: a long compressible COM marker segment.` for N = 0 to 149, joined by spaces |

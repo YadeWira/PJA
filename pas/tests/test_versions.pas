@@ -78,7 +78,7 @@ end;
 var
   files: TStringList; sr: TSearchRec; i, d, b, k, p, e: Integer; data, st, pja, m, back: TBytes;
   r: TCodecResult; pr: TPackResult; h: THash16; seen: array[0..8] of Integer; patch, v8, inparts: Integer;
-  mode1, mode2: Integer; enc1: TJ2kMode1Enc; dec1: TJ2kMode1Dec;
+  mode1, mode2: Integer; enc1: TJ2kMode1Enc; enc2: TJ2kMode2Enc; dec1: TJ2kMode1Dec;
   raised: Boolean; name: string; pjas: Integer;
 begin
   files := TStringList.Create; files.Sorted := True;
@@ -135,10 +135,10 @@ begin
           if st[6 + J2K_ENTRY * e + 12] = 2 then begin
             { mode 2: its stream's layout byte, and a program without mode 2 }
             Sweep(st, p, name + ' (mode 2 layout)', 1);
-            enc1 := J2kMode2Enc; dec1 := J2kMode2Dec;
+            enc2 := J2kMode2Enc; dec1 := J2kMode2Dec;
             J2kMode2Enc := nil; J2kMode2Dec := nil;
             Check(Verdict(st, raised) = ceFutureVersion, name + ': mode 2 without pjaj2kpx is not FutureVersion');
-            J2kMode2Enc := enc1; J2kMode2Dec := dec1;
+            J2kMode2Enc := enc2; J2kMode2Dec := dec1;
             Inc(mode2);
           end;
           if st[6 + J2K_ENTRY * e + 12] = 1 then begin

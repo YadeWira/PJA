@@ -46,6 +46,7 @@ typedef struct {
   const uint8_t *in; int64_t n;       /* coefficients from decisions: the decisions */
   uint8_t *out; int64_t cap;          /* decisions from coefficients: where they go */
   int64_t ns;
+  int64_t nsig;                       /* the coefficients made significant */
   uint32_t *mag;                      /* the magnitudes, w a row */
   int32_t w;
   int err;
@@ -53,10 +54,12 @@ typedef struct {
 
 int64_t pjaj2kp_t1_size(void) { return (int64_t)sizeof(pxt1_t); }
 
-/* one decision of context ctx: written (mode 1, bit b) or read (mode 0) */
+/* one decision of context ctx: written (mode 1, bit b), only counted (mode
+   2, bit b) or read (mode 0) */
 PX_INLINE int px_dec(pxs_t *s, int ctx, int b, const int mode)
 {
   int c = s->raw ? 19 : ctx;
+  if (mode == 2) { s->ns++; return b; }
   if (mode) {
     if (s->ns >= s->cap) { s->err = 1; return 0; }
     s->out[s->ns++] = (uint8_t)((c << 1) | b);
@@ -76,6 +79,7 @@ PX_INLINE void px_sign(pxs_t *s, uint8_t *st, uint8_t *nb, int i, int stride, in
   if (mode) { neg = (s->mag[ci] & MSIGN) != 0; b = s->raw ? neg : neg ^ xr; } else b = 0;
   b = px_dec(s, cx, b, mode);
   if (!mode) neg = s->raw ? b : b ^ xr;
+  s->nsig++;
   make_sig(st, nb, i, stride, neg);
 }
 
@@ -213,7 +217,7 @@ int32_t pjaj2kp_cb_coef(void *tmem, int32_t w, int32_t h, int32_t orient, int32_
   m = (int64_t)(w + 2) * (h + 2);
   for (i = 0; i < 2 * m; i++) t->st[i] = 0;
   for (i = 0; i < (int64_t)w * h; i++) t->mag[i] = 0;
-  s.raw = 0; s.in = sym; s.n = n; s.out = 0; s.cap = 0; s.ns = 0; s.mag = t->mag; s.w = w; s.err = 0;
+  s.raw = 0; s.in = sym; s.n = n; s.out = 0; s.cap = 0; s.ns = 0; s.nsig = 0; s.mag = t->mag; s.w = w; s.err = 0;
   if (px_passes(&s, t, w, h, orient, sty, npasses, P, (int32_t *)passend, 0) != n) return -1;
   for (y = 0; y < h; y++)
     for (x = 0; x < w; x++) {
@@ -239,9 +243,46 @@ int64_t pjaj2kp_cb_sym(void *tmem, int32_t w, int32_t h, int32_t orient, int32_t
       if (a >> P) return -1;
       t->mag[y * w + x] = a | (v < 0 ? MSIGN : 0);
     }
-  s.raw = 0; s.in = 0; s.n = 0; s.out = sym; s.cap = cap; s.ns = 0; s.mag = t->mag; s.w = w; s.err = 0;
+  s.raw = 0; s.in = 0; s.n = 0; s.out = sym; s.cap = cap; s.ns = 0; s.nsig = 0; s.mag = t->mag; s.w = w; s.err = 0;
   r = px_passes(&s, t, w, h, orient, sty, npasses, P, passend, 1);
   return r < 0 ? -1 : r;
+}
+
+/* how many of a code-block's passes change its coefficients coef[y *
+   cstride + x] (P bit-planes): all 3 P - 2 of them less the trailing ones
+   that change nothing (no coefficient made significant, none refined), as
+   Kakadu leaves them out; -1 for a coefficient of more than P bit-planes.
+   A code-block whose passes are fewer than this lost some (rate-truncated):
+   mode 2 does not take it */
+int32_t pjaj2kp_cb_full(void *tmem, int32_t w, int32_t h, int32_t orient, int32_t sty, int32_t P,
+  const int32_t *coef, int64_t cstride)
+{
+  pxt1_t *t = tmem; pxs_t s; int64_t i, m; int x, y, k, full = 3 * P - 2, last = 0, causal = (sty & 8) != 0;
+  uint8_t *st, *nb; const uint8_t *zc;
+  if (!px_args(w, h, orient, 0, P)) return -1;
+  m = (int64_t)(w + 2) * (h + 2);
+  st = t->st; nb = t->st + m; zc = ZC[orient];
+  for (i = 0; i < 2 * m; i++) t->st[i] = 0;
+  for (y = 0; y < h; y++)
+    for (x = 0; x < w; x++) {
+      int32_t v = coef[y * cstride + x]; uint32_t a = ab32(v);
+      if (a >> P) return -1;
+      t->mag[y * w + x] = a | (v < 0 ? MSIGN : 0);
+    }
+  /* pass by pass: what each makes significant, and its decisions (all of a
+     refinement pass's are refinements); counted, not written */
+  s.raw = 0; s.in = 0; s.n = 0; s.out = 0; s.cap = 0; s.ns = 0; s.nsig = 0; s.mag = t->mag; s.w = w; s.err = 0;
+  for (k = 0; k < full; k++) {
+    int type = k == 0 ? 2 : (k - 1) % 3, p = P - 1 - (k + 2) / 3;
+    int64_t sg = s.nsig, ns = s.ns;
+    s.raw = (sty & 1) && k >= 10 && type < 2;
+    if (type == 0) px_spp(&s, st, nb, w, h, zc, causal, p, 2);
+    else if (type == 1) px_mrp(&s, st, nb, w, h, causal, p, 2);
+    else px_cup(&s, st, nb, w, h, zc, causal, 0, p, 2);
+    if (s.err) return -1;
+    if (type == 1 ? s.ns > ns : s.nsig > sg) last = k + 1;
+  }
+  return last;
 }
 
 /* ================================================================== 5/3 and RCT */
@@ -437,18 +478,20 @@ PX_INLINE void learn(ctr_t *c, int bit)
 /* a mixer of N stretched probabilities, a set of weights chosen by sel; an
    adaptive probability map of 33 bins chosen by a; the final probability
    (mixer + map) / 2 */
-#define NIN 10
+#define NIN 14
 typedef struct { int32_t w[NIN]; uint16_t cnt, pad; } wset_t;
 
 typedef struct {
   ac_t ac;
   int32_t lr[1024];
+  int32_t blr[1024];                   /* the bitonal mixer's rates */
   int32_t lms[8];                      /* the adaptive predictor's weights, 2^-12 */
   int64_t hsize;                       /* the bitonal model's large tables, in counters */
   int32_t hbits;
   /* bitonal */
   ctr_t b1[1 << 10], b2[1 << 16];
   ctr_t *b3, *b4;
+  ctr_t *bx[3];                        /* the far templates: 2^(hb - 2) counters each */
   wset_t bw[1 << 8];
   uint16_t bapm[1 << 10][33];
   /* 2 to 16 bits */
@@ -464,12 +507,13 @@ typedef struct {
 int64_t pjaj2kp_model_size(int32_t hb)
 {
   if (hb < PX_HBMIN || hb > PX_HBMAX) return -1;
-  return (int64_t)sizeof(pxm_t) + 64 + 2 * ((int64_t)1 << hb) * (int64_t)sizeof(ctr_t);
+  return (int64_t)sizeof(pxm_t) + 64 + (2 * ((int64_t)1 << hb) + 3 * ((int64_t)1 << (hb - 2))) * (int64_t)sizeof(ctr_t);
 }
 
 /* p (16 bits) of the mix of n inputs s[] with the set ws, and the map t
    (at the stretched x); coded; then everything learns */
-PX_INLINE int mix_code(pxm_t *m, const int dec, int bit, ctr_t **c, int n, wset_t *ws, uint16_t *t)
+PX_INLINE int mix_code(pxm_t *m, const int dec, int bit, ctr_t **c, int n, wset_t *ws, uint16_t *t,
+  const int32_t *lrt)
 {
   int32_t s[NIN], dot = 0, x, pm, pa, pf, pos, lo, fr, e, lr; int i;
   for (i = 0; i < n; i++) { s[2 * i] = J2KM_ST[CP(c[i]->p) >> 4]; s[2 * i + 1] = J2KM_ST[CP(c[i]->f) >> 4]; }
@@ -481,7 +525,7 @@ PX_INLINE int mix_code(pxm_t *m, const int dec, int bit, ctr_t **c, int n, wset_
   pf = (pm + pa) >> 1;
   bit = ac_code(&m->ac, (uint32_t)pf, bit, dec);
   e = ((bit << 16) - pm) >> 4;
-  lr = m->lr[ws->cnt >> 6]; ws->cnt += ws->cnt < 65535;
+  lr = lrt[ws->cnt >> 6]; ws->cnt += ws->cnt < 65535;
   e *= lr;
   for (i = 0; i < 2 * n; i++) ws->w[i] = clampi(ws->w[i] + truncshr(s[i] * e, 16), -WMAX, WMAX);
   {
@@ -497,13 +541,15 @@ static void px_init(pxm_t *m, int hb)
 {
   int i, j, k; uint8_t *p = (uint8_t *)m; int64_t z;
   for (z = 0; z < (int64_t)sizeof(pxm_t); z++) p[z] = 0;
-  for (i = 0; i < 1024; i++) m->lr[i] = 6 + 31457 / (1024 + 64 * i);
+  for (i = 0; i < 1024; i++) { m->lr[i] = 6 + 31457 / (1024 + 64 * i); m->blr[i] = m->lr[i] * 3 / 2; }
   m->hbits = hb; m->hsize = (int64_t)1 << hb;
   m->b3 = (ctr_t *)(p + sizeof(pxm_t) + 64 - ((uintptr_t)(p + sizeof(pxm_t)) & 63));
   m->b4 = m->b3 + m->hsize;
-  { uint8_t *q = (uint8_t *)m->b3; for (z = 0; z < 2 * m->hsize * (int64_t)sizeof(ctr_t); z++) q[z] = 0; }
+  m->bx[0] = m->b4 + m->hsize; m->bx[1] = m->bx[0] + (m->hsize >> 2); m->bx[2] = m->bx[1] + (m->hsize >> 2);
+  { uint8_t *q = (uint8_t *)m->b3;
+    for (z = 0; z < (2 * m->hsize + 3 * (m->hsize >> 2)) * (int64_t)sizeof(ctr_t); z++) q[z] = 0; }
   /* the weights start at 1/N of each input, the maps at the identity */
-  for (i = 0; i < (1 << 8); i++) for (j = 0; j < 8; j++) m->bw[i].w[j] = 65536 / 4;
+  for (i = 0; i < (1 << 8); i++) for (j = 0; j < 14; j++) m->bw[i].w[j] = 65536 / 7;
   for (k = 0; k < 3; k++) for (i = 0; i < 512; i++) for (j = 0; j < NIN; j++) m->mw[k][i].w[j] = 65536 / 5;
   for (j = 0; j < 33; j++) {
     int32_t v = J2KM_SQ[clampi((j - 16) * 128, -3071, 3071) + 3072];
@@ -514,38 +560,77 @@ static void px_init(pxm_t *m, int hb)
 }
 
 /* ------------------------------------------------------------------ 1 bit */
-/* a 1-bit plane, row by row: four templates of the rows y - 2 to y (10, 16,
-   22 and 30 pixels; the two large ones in tables of 2^hb counters, hashed
-   when they do not fit), mixed and mapped */
+/* the pixel of row r (0: above the plane) at x; 0 outside the row */
+#define PXB(r, x) ((r) && (x) >= 0 && (x) < w ? (uint32_t)((r)[x] & 1) : 0u)
+
+/* a 1-bit plane, row by row: seven templates, mixed and mapped. Four of
+   the rows y - 2 to y (10, 16, 22 and 30 pixels; the two large ones in
+   tables of 2^hb counters, hashed when they do not fit) and three farther
+   ones, hashed into tables of 2^(hb - 2): rows y - 4 and y - 3 with the
+   22-pixel one; rows y - 1 and y, 16 pixels each way, with three of row y
+   - 2; and the 10-pixel one with sparse pixels of rows y - 12, y - 8, y -
+   6, y - 1 and y (a text line's period and the far left and right) */
 static int code_bitonal(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_t h)
 {
-  int64_t x, y; uint32_t hmask = (uint32_t)m->hsize - 1; int sh = 32 - m->hbits;
+  int64_t x, y; uint32_t hmask = (uint32_t)m->hsize - 1; int sh = 32 - m->hbits, xs = 64 - (m->hbits - 2);
   for (y = 0; y < h; y++) {
     uint16_t *r0 = pl + y * w; const uint16_t *r1 = y >= 1 ? r0 - w : 0, *r2 = y >= 2 ? r0 - 2 * w : 0;
-    /* windows: row y - 2 at x - 4 .. x + 4 (x + 4 at bit 0), row y - 1 at
-       x - 6 .. x + 6, row y at x - 8 .. x - 1 (x - 1 at bit 0) */
-    uint32_t w2 = 0, w1 = 0, w0 = 0;
-    for (x = -4; x <= 4; x++) w2 = (w2 << 1) | (r2 && x >= 0 && x < w ? r2[x] & 1 : 0);
-    for (x = -6; x <= 6; x++) w1 = (w1 << 1) | (r1 && x >= 0 && x < w ? r1[x] & 1 : 0);
+    const uint16_t *r3 = y >= 3 ? r0 - 3 * w : 0, *r4 = y >= 4 ? r0 - 4 * w : 0, *r6 = y >= 6 ? r0 - 6 * w : 0;
+    const uint16_t *r8 = y >= 8 ? r0 - 8 * w : 0, *r12 = y >= 12 ? r0 - 12 * w : 0;
+    /* windows (the rightmost pixel at bit 0): row y - 2 at x - 4 .. x + 4,
+       row y - 1 at x - 6 .. x + 6 and x - 24 .. x + 24, row y at x - 32 ..
+       x - 1; rows y - 3 and y - 4 at x - 8 .. x + 8, rows y - 6, y - 8 and
+       y - 12 at x - 4 .. x + 4 */
+    uint32_t w2 = 0, w1 = 0, w3 = 0, w4 = 0, w6 = 0, w8 = 0, wc = 0; uint64_t wl = 0, w0 = 0;
+    for (x = -4; x <= 4; x++) {
+      w2 = (w2 << 1) | PXB(r2, x); w6 = (w6 << 1) | PXB(r6, x); w8 = (w8 << 1) | PXB(r8, x);
+      wc = (wc << 1) | PXB(r12, x);
+    }
+    for (x = -6; x <= 6; x++) w1 = (w1 << 1) | PXB(r1, x);
+    for (x = -8; x <= 8; x++) { w3 = (w3 << 1) | PXB(r3, x); w4 = (w4 << 1) | PXB(r4, x); }
+    for (x = -24; x <= 24; x++) wl = (wl << 1) | PXB(r1, x);
     for (x = 0; x < w; x++) {
-      uint32_t t1, t2, t3, t4, h3, h4; ctr_t *c[4]; int bit;
-      t1 = ((w2 >> 3) & 7) << 7 | ((w1 >> 4) & 0x1F) << 2 | (w0 & 3);
-      t2 = ((w2 >> 2) & 0x1F) << 11 | ((w1 >> 3) & 0x7F) << 4 | (w0 & 0xF);
-      t3 = ((w2 >> 1) & 0x7F) << 15 | ((w1 >> 2) & 0x1FF) << 6 | (w0 & 0x3F);
-      t4 = (w2 & 0x1FF) << 21 | (w1 & 0x1FFF) << 8 | (w0 & 0xFF);
+      uint32_t t1, t2, t3, t4, h3, h4, sel; uint64_t k; ctr_t *c[7]; int bit;
+      t1 = ((w2 >> 3) & 7) << 7 | ((w1 >> 4) & 0x1F) << 2 | (uint32_t)(w0 & 3);
+      t2 = ((w2 >> 2) & 0x1F) << 11 | ((w1 >> 3) & 0x7F) << 4 | (uint32_t)(w0 & 0xF);
+      t3 = ((w2 >> 1) & 0x7F) << 15 | ((w1 >> 2) & 0x1FF) << 6 | (uint32_t)(w0 & 0x3F);
+      t4 = (w2 & 0x1FF) << 21 | (w1 & 0x1FFF) << 8 | (uint32_t)(w0 & 0xFF);
       h3 = m->hbits >= 22 ? t3 : ((t3 + 1) * 0x9E3779B1u) >> sh;
       h4 = ((t4 + 1) * 0x9E3779B1u + 0x632BE5ABu) >> sh;
       c[0] = &m->b1[t1]; c[1] = &m->b2[t2]; c[2] = &m->b3[h3 & hmask]; c[3] = &m->b4[h4 & hmask];
+      /* rows y - 4 (x - 4 .. x + 4) and y - 3 (x - 8 .. x + 8) with t3 */
+      k = (uint64_t)((w4 >> 4) & 0x1FF) << 40 ^ (uint64_t)w3 << 22 ^ t3;
+      c[4] = &m->bx[0][(k * 0x9E3779B97F4A7C15ull) >> xs];
+      /* row y - 1 at x - 16 .. x + 16, row y at x - 16 .. x - 1, row y - 2 at x - 2 .. x + 2 */
+      k = ((wl >> 8) & 0x1FFFFFFFFull) << 16 ^ (w0 & 0xFFFF) ^ (uint64_t)((w2 >> 2) & 0x1F) << 50;
+      c[5] = &m->bx[1][((k + 7) * 0xD6E8FEB86659FD93ull) >> xs];
+      /* t1, rows y - 6, y - 8 and y - 12 at x - 4, x and x + 4, row y - 1 at
+         x - 20, x - 12, x + 12 and x + 20, row y at x - 12 and x - 20 */
+      k = t1;
+      k = k << 3 | ((w6 >> 8) & 1) << 2 | ((w6 >> 4) & 1) << 1 | (w6 & 1);
+      k = k << 3 | ((w8 >> 8) & 1) << 2 | ((w8 >> 4) & 1) << 1 | (w8 & 1);
+      k = k << 3 | ((wc >> 8) & 1) << 2 | ((wc >> 4) & 1) << 1 | (wc & 1);
+      k = k << 4 | ((wl >> 44) & 1) << 3 | ((wl >> 36) & 1) << 2 | ((wl >> 12) & 1) << 1 | ((wl >> 4) & 1);
+      k = k << 2 | ((w0 >> 11) & 1) << 1 | ((w0 >> 19) & 1);
+      c[6] = &m->bx[2][((k + 3) * 0x9E3779B97F4A7C15ull) >> xs];
+      sel = ((w2 >> 3) & 7) << 5 | ((w1 >> 5) & 7) << 2 | (uint32_t)(w0 & 3);
       bit = dec ? 0 : r0[x] & 1;
-      bit = mix_code(m, dec, bit, c, 4, &m->bw[((w2 >> 3) & 7) << 5 | ((w1 >> 5) & 7) << 2 | (w0 & 3)], m->bapm[t1]);
+      bit = mix_code(m, dec, bit, c, 7, &m->bw[sel], m->bapm[t1], m->blr);
       if (dec) r0[x] = (uint16_t)bit;
-      w2 = ((w2 << 1) | (r2 && x + 5 < w ? r2[x + 5] & 1 : 0)) & 0x1FF;
-      w1 = ((w1 << 1) | (r1 && x + 7 < w ? r1[x + 7] & 1 : 0)) & 0x1FFF;
-      w0 = ((w0 << 1) | (uint32_t)bit) & 0xFF;
+      w2 = ((w2 << 1) | PXB(r2, x + 5)) & 0x1FF;
+      w1 = ((w1 << 1) | PXB(r1, x + 7)) & 0x1FFF;
+      w0 = ((w0 << 1) | (uint32_t)bit) & 0xFFFFFFFFull;
+      w3 = ((w3 << 1) | PXB(r3, x + 9)) & 0x1FFFF;
+      w4 = ((w4 << 1) | PXB(r4, x + 9)) & 0x1FFFF;
+      w6 = ((w6 << 1) | PXB(r6, x + 5)) & 0x1FF;
+      w8 = ((w8 << 1) | PXB(r8, x + 5)) & 0x1FF;
+      wc = ((wc << 1) | PXB(r12, x + 5)) & 0x1FF;
+      wl = ((wl << 1) | PXB(r1, x + 25)) & 0x1FFFFFFFFFFFFull;
     }
   }
   return 0;
 }
+#undef PXB
 
 /* ------------------------------------------------------------------ 2 to 16 bits */
 static inline int med(int a, int b, int c)
@@ -677,7 +762,7 @@ static int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_
       cc[2] = &m->z[2][(cls * 32 + nbb) * 32 + act];
       cc[3] = &m->z[3][(oth * 32 + act) * 2 + cls];
       cc[4] = &m->z[4][(cls * 40 + lmin) * 32 + spr];
-      bit = mix_code(m, dec, e != 0, cc, 5, &m->mw[0][cls * 256 + (lmin >> 2) * 16 + (spr >> 1)], m->mapm[0][(cls * 32 + act) * 16 + (nbb >> 1)]);
+      bit = mix_code(m, dec, e != 0, cc, 5, &m->mw[0][cls * 256 + (lmin >> 2) * 16 + (spr >> 1)], m->mapm[0][(cls * 32 + act) * 16 + (nbb >> 1)], m->lr);
       if (bit) {
         uint32_t av = ab32(e);
         ex = dec ? 0 : ilog2_32(av) + 1;
@@ -692,7 +777,7 @@ static int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_
           cc[3] = &m->xe[3][((oth * 32 + act) * 18 + ci) * 2 + cls];
           cc[4] = &m->xe[4][(lmin * 32 + spr) * 18 + ci];
           g = mix_code(m, dec, ex > k, cc, 5, &m->mw[1][(cls * 16 + clampi(ci, 0, 15)) * 16 + (act >> 1)],
-            m->mapm[1][((cls * 18 + ci) * 32 + act) & 1023]);
+            m->mapm[1][((cls * 18 + ci) * 32 + act) & 1023], m->lr);
           if (!g) break;
           k++;
         }
@@ -706,7 +791,7 @@ static int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_
             cc[1] = &m->mm[1][((((cls * 18 + ex) * 2 + top) * 2 + (top ? pb : 0)) * 32 + act) & 4095];
             cc[2] = &m->mm[2][((((cls * 18 + ex) * 2 + top) * 2 + (top ? pb : 0)) * 32 + nbb) & 4095];
             mb = mix_code(m, dec, dec ? 0 : (int)((av >> ci) & 1), cc, 3, &m->mw[2][(cls * 18 + ex) * 2 + top],
-              m->mapm[2][((cls * 18 + ex) * 2 + top) * 8 + (act >> 2)]);
+              m->mapm[2][((cls * 18 + ex) * 2 + top) * 8 + (act >> 2)], m->lr);
           } else {
             ctr_t *c1 = &m->mm[0][2048 + ((cls * 18 + ex) * 18 + ci) % 2048];
             mb = ac_code(&m->ac, CP(c1->p), dec ? 0 : (int)((av >> ci) & 1), dec);

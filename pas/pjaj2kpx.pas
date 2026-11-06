@@ -9,8 +9,8 @@
                     mode 1's: without the decisions, with its slice table)
                     through the raw bytes' model (pjamodel.CodeRaw): at most
                     J2kSideBound(codestream's length) bytes, on both sides
-    byte            hb, the bitonal model's large tables (2^hb counters):
-                    PX_HBMIN to PX_HBMAX
+    byte            hb, the bitonal model's large tables (2^hb counters,
+                    the far ones 2^(hb - 2)): PX_HBMIN to PX_HBMAX
     byte            the colour: 0, or 1 when planes 0 to 2 (the same size
                     and depth, 15 bits at most) go to the models as the
                     reversible colour transform makes them (Y, then Db and
@@ -33,11 +33,14 @@
 
   Taken (else the codestream goes in mode 1 or 0): every tile-component
   reversible (the 5/3 wavelet, no quantization), no RGN, a precision of 1
-  to 16 bits, every code-block decoded, every sample in its range, and the
-  stream decoded and compared. Bounded: the planes PX_MAXSAMPLES samples
-  in all (2 bytes each), a tile's coefficients PX_TILECAP (4 bytes each,
-  on each worker), so that a codestream of more is not taken and a stream
-  that says more is refused before anything is decoded.
+  to 16 bits, every code-block decoded with all its passes (but trailing
+  ones that change nothing: not rate-truncated), every sample in its
+  range, and the stream decoded and compared. Bounded: the planes
+  PX_MAXSAMPLES samples in all (2 bytes each) and max(PX_FREE, PX_PERBYTE
+  x the codestream's bytes), a plane of 2 bits or more PX_MAXWIDTH wide, a
+  tile's coefficients PX_TILECAP (4 bytes each, on each worker), so that a
+  codestream of more is not taken and a stream that says more is refused
+  before anything is decoded.
 
   This unit links C (pjaj2kcs's tier-1 and pjaj2kpm.c): a program without
   it reads mode 2 as FutureVersion (pjacodec's hooks, set here). }
@@ -58,14 +61,28 @@ const
   { the workers' coefficients in all: fewer workers for larger tiles }
   PX_WORKBYTES = 1 shl 28;
   PX_HBMIN = 12; PX_HBMAX = 22;
+  { a plane of 2 to 16 bits (as the model takes it: the colour transform
+    makes a 1-bit plane 2-bit) at most so many samples wide: the model keeps
+    PX_RESW (18) int32 a column of the widest }
+  PX_MAXWIDTH = 1 shl 20;
+  { the planes' samples at most max(PX_FREE, PX_PERBYTE x the codestream's
+    bytes): time and memory follow the bytes, not what a few of them
+    declare }
+  PX_FREE = 1 shl 20; PX_PERBYTE = 1024;
 
 type
   TMode2Result = (m2Ok, m2Refused, m2Bad, m2Future, m2TooLarge);
 
 { The codestream data[off..off + len) as mode 2's stream, decoded and
-  compared before it is given; m2Refused (and why) when it is not taken. }
+  compared before it is given; m2Refused (and why) when it is not taken,
+  or when the stream is not shorter than limit (then not decoded).
+  mode1Floor: what mode 1's stream would be at the least, if it coded the
+  codestream's coded bytes (those the side information does not keep) to
+  half (it saves a fifth at best); 0 when not taken. }
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode1Floor: Int64): TMode2Result; overload;
 function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string): TMode2Result;
+  out why: string): TMode2Result; overload;
 { A mode 2 stream back to its codestream, which must be len bytes. }
 function J2kMode2Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode2Result;
 function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
@@ -98,6 +115,8 @@ function pjaj2kp_code(mem: Pointer; size: Int64; hb, encoding: LongInt; put: TPx
   data: PByte; len: Int64; n: LongInt; w, h, depth: PLongInt; planes: PPWord; res: PLongInt;
   rescap: Int64): LongInt; cdecl; external;
 function pjaj2kp_res_width: LongInt; cdecl; external;
+function pjaj2kp_cb_full(tmem: Pointer; w, h, orient, sty, P: LongInt; coef: PLongInt; cstride: Int64): LongInt;
+  cdecl; external;
 function pjaj2kp_planes_rct(p0, p1, p2: PWord; n: Int64; depth, fwd: LongInt): LongInt; cdecl; external;
 
 const
@@ -134,6 +153,7 @@ type
     planes: array of array of Word;
     workers: array of TPxWorker;
     noMct: LongInt;                    { encoding: the tiles without the colour transform }
+    truncated: Boolean;                { encoding: a code-block without all its passes }
     constructor Create(enc: Boolean);
     destructor Destroy; override;
     procedure SetWorkers(n: Integer);
@@ -230,6 +250,7 @@ begin
     if z.depth[c] > 16 then Exit('more than 16 bits');
     z.ox[c] := CeilDiv(z.ix0, z.dx[c]); z.oy[c] := CeilDiv(z.iy0, z.dy[c]);
     z.pw[c] := CeilDiv(z.ix1, z.dx[c]) - z.ox[c]; z.ph[c] := CeilDiv(z.iy1, z.dy[c]) - z.oy[c];
+    if (z.depth[c] > 1) and (z.pw[c] > PX_MAXWIDTH) then Exit('too wide');
     z.total := z.total + z.pw[c] * z.ph[c];
     if z.total > PX_MAXSAMPLES then Exit('too many samples');
     { a tile-component at most (its first and last tiles may start or end
@@ -239,6 +260,12 @@ begin
     z.tileMax := z.tileMax + t;
   end;
   if z.tileMax > PX_TILECAP then z.tileMax := PX_TILECAP;
+end;
+
+{ the planes within what a codestream of len bytes may ask }
+function SamplesFit(const z: TSiz; len: Int64): Boolean;
+begin
+  Result := (z.total <= PX_FREE) or (z.total <= PX_PERBYTE * len);
 end;
 
 function TPx.Tile(km: Pointer; const t: TJ2kPixTile): string;
@@ -336,6 +363,12 @@ begin
     if Length(wk.pe2) < npass + 1 then SetLength(wk.pe2, npass + 16);
     if (pjaj2kp_cb_sym(wk.t1, w, h, wk.tile.bands[band].orient, sty, npass, P, at, wk.cw[c], @wk.sym2[0],
       Length(wk.sym2), @wk.pe2[0]) <> n) or ((n > 0) and not CompareMem(@wk.sym2[0], sym, n)) then Exit;
+    { all its passes, but the trailing ones that change nothing (Kakadu
+      leaves those out): else a rate-truncated, lossy code-block, whose
+      pixels are not the image's }
+    if npass < pjaj2kp_cb_full(wk.t1, w, h, wk.tile.bands[band].orient, sty, P, at, wk.cw[c]) then begin
+      truncated := True; Exit;
+    end;
     Result := n;
   end else
     Result := pjaj2kp_cb_sym(wk.t1, w, h, wk.tile.bands[band].orient, sty, npass, P, at, wk.cw[c], sym, cap, passend);
@@ -430,13 +463,17 @@ begin
   for c := 0 to px.siz.n - 1 do begin
     w[c] := px.siz.pw[c]; h[c] := px.siz.ph[c]; dp[c] := px.siz.depth[c];
     if Length(px.planes[c]) > 0 then pp[c] := @px.planes[c][0] else pp[c] := nil;
-    if px.siz.pw[c] > maxw then maxw := px.siz.pw[c];
   end;
   if colour then begin
     if not ColourOk(px.siz) then Exit(False);
     dp[1] := dp[0] + 1; dp[2] := dp[0] + 1;
-    if encoding and (pjaj2kp_planes_rct(pp[0], pp[1], pp[2], w[0] * h[0], px.siz.depth[0], 1) <> 0) then Exit(False);
   end;
+  { the multi-bit model's rows: the widest plane of 2 bits or more }
+  for c := 0 to px.siz.n - 1 do
+    if (dp[c] > 1) and (px.siz.pw[c] > maxw) then maxw := px.siz.pw[c];
+  if maxw > PX_MAXWIDTH then Exit(False);
+  if colour and encoding and (pjaj2kp_planes_rct(pp[0], pp[1], pp[2], w[0] * h[0], px.siz.depth[0], 1) <> 0) then
+    Exit(False);
   SetLength(res, pjaj2kp_res_width * maxw);
   mem := GetMem(size);
   try
@@ -495,6 +532,7 @@ begin
   try
     why := ParseSiz(raw, px.siz);
     if why <> '' then Exit(m2Bad);
+    if not SamplesFit(px.siz, len) then begin why := 'too many samples for its bytes'; Exit(m2Bad); end;
     SetLength(px.planes, px.siz.n);
     for c := 0 to px.siz.n - 1 do SetLength(px.planes[c], px.siz.pw[c] * px.siz.ph[c]);
     o := Default(TOut);
@@ -559,12 +597,12 @@ begin
 end;
 {$endif}
 
-function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string): TMode2Result;
+function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode1Floor: Int64): TMode2Result;
 var px: TPx; raw, blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; o: TOut; c, hb, nw: Integer;
   p: SizeInt; total: Int64; why2: string; colour: Boolean;
 begin
-  stream := nil; why := '';
+  stream := nil; why := ''; mode1Floor := 0;
   if (off < 0) or (len < 46) or (off + len > Length(data)) then begin why := 'no SIZ'; Exit(m2Refused); end;
   if (data[off] <> $FF) or (data[off + 1] <> $4F) or (data[off + 2] <> $FF) or (data[off + 3] <> $51) or
      (Be16(data, off + 4) + 2 > len - 2) then begin why := 'no SIZ'; Exit(m2Refused); end;
@@ -573,23 +611,31 @@ begin
   try
     why := ParseSiz(raw, px.siz);
     if why <> '' then Exit(m2Refused);
+    if not SamplesFit(px.siz, len) then begin why := 'too many samples for its bytes'; Exit(m2Refused); end;
     SetLength(px.planes, px.siz.n);
     for c := 0 to px.siz.n - 1 do SetLength(px.planes[c], px.siz.pw[c] * px.siz.ph[c]);
     nw := WorkerCount(threads, px.siz.tileMax);
     px.SetWorkers(nw);
     st := Default(TJ2kStats);
-    if not J2kAnalyzeWith(data, off, len, Link(px, kmPixEncode, nw), blob, why, st) then Exit(m2Refused);
+    if not J2kAnalyzeWith(data, off, len, Link(px, kmPixEncode, nw), blob, why, st) then begin
+      if px.truncated then why := 'rate-truncated: a code-block without all its passes';
+      Exit(m2Refused);
+    end;
     if Length(blob) > J2kSideBound(len) then begin why := 'side information too large'; Exit(m2Refused); end;
     {$ifdef PJA_PX_DUMP}DumpPlanes(px);{$endif}
     cd.InitEncoder;
     CodeRaw(cd, blob, MaxInt);
     side := cd.enc.Finish;
     hb := HbFor(px.siz);
-    colour := (px.noMct = 0) and ColourOk(px.siz);
+    { a 1-bit image made 2-bit by the colour transform: within the width }
+    colour := (px.noMct = 0) and ColourOk(px.siz) and ((px.siz.depth[0] > 1) or (px.siz.pw[0] <= PX_MAXWIDTH));
     o := Default(TOut);
     if not CodePlanes(px, hb, colour, True, o, nil, 0, 0) then begin why := 'internal: pixels'; Exit(m2Refused); end;
     total := 11 + Int64(Length(side)) + o.n;
     if total >= High(LongInt) then begin why := 'too large'; Exit(m2Refused); end;
+    { not kept: not decoded either }
+    if total >= limit then begin why := 'not smaller'; Exit(m2Refused); end;
+    mode1Floor := Length(side) + (len - Length(blob)) div 2;
     SetLength(stream, total);
     stream[0] := LAYOUT;
     p := 1; PutU32(stream, p, Check(data, off, len));
@@ -610,21 +656,32 @@ begin
   Result := m2Ok;
 end;
 
-function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string): TMode2Result;
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode1Floor: Int64): TMode2Result;
 begin
+  mode1Floor := 0;
   try
-    Result := EncodeIn(data, off, len, threads, stream, why);
+    Result := EncodeIn(data, off, len, threads, limit, stream, why, mode1Floor);
   except
     on E: EOutOfMemory do begin stream := nil; why := 'memory'; Result := m2Refused; end;
     on E: Exception do begin stream := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Refused; end;
   end;
+  if Result <> m2Ok then mode1Floor := 0;
 end;
 
-function Mode2Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string): TMode2Result;
+var f: Int64;
+begin
+  Result := J2kMode2Encode(data, off, len, threads, High(Int64), stream, why, f);
+end;
+
+{ pjacodec's hook: only a stream shorter than the codestream }
+function Mode2Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out mode1Floor: Int64): Boolean;
 var why: string;
 begin
-  Result := J2kMode2Encode(data, off, len, threads, stream, why) = m2Ok;
+  Result := J2kMode2Encode(data, off, len, threads, len, stream, why, mode1Floor) = m2Ok;
 end;
 
 function Mode2Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
