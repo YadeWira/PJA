@@ -3503,3 +3503,6 @@ the command says of mode 2:
   being the same either way). `tests/j2k/cprl_poc.j2k`'s .pja (1206 B ->
   1230 B) holds a 1190 B stream: stored it would be 1246 B. A file whose
   stream is no smaller (`plasma_cs.j2k`, 612 B) is stored (652 B).
+- **`pja selftest`** carries a mode 2 sample too, `tests/j2k/bitonal.j2k`
+  (1448 B -> 783 B), whose `.pja` has to be the same bytes on every SIMD
+  path and word size.

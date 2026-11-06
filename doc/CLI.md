@@ -190,10 +190,10 @@ temporary folder and is deleted: nothing is written beside the inputs. A
 
 ### `pja selftest`
 
-The binary carries six small samples (a baseline JPEG in 4:2:0, a
+The binary carries seven small samples (a baseline JPEG in 4:2:0, a
 progressive one, an arithmetic-coded one with restarts, a near-lossless
 JPEG-LS, a JPEG 2000 codestream (RPCL, SOP and EPH) that goes as stream version 8's mode 1,
-and the baseline one again as stream version 5, the model of the
+a bitonal lossless one that goes as its mode 2 (the pixels), and the baseline one again as stream version 5, the model of the
 `.pja` made before 0.1.0 and of the zpaq-std plugin's frozen codecs, with
 SSE4.1 code of its own: `pas/pjaselftest.inc`, written by
 `tools/gen_selftest.py` from `tests/` and `pas/tests/selftest_v5.pja`),
