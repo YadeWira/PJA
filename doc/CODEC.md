@@ -2199,7 +2199,9 @@ pjaarith's Decode and Encode; the encoder's bytes go out through the 4 KB
 buffer), err = ((bit shl 12) - pr) * MIX_LR and each weight's step
 clamped to ±2^17, the counters by learn() (TAdaptiveBit.Update at limit
 255). The lanes 4..7 of the Pascal mixer hold zeros and never move, so
-they are left out. RawReset is folded in at the end. `pjav7.pas` installs
+they are left out. RawReset's walk is folded in at the end (below 64 KB
+of raw bytes; from there on the caller refills the tables whole, as the
+section before says). `pjav7.pas` installs
 it at start-up (`pjamodel.RawCode`); `PJA_NOASM=1`, the zpaq-std plugin
 and a `PJA_COSTS` run keep the Pascal. It is compiled a second time for
 SSE4.1 (the four weights in pmulld), taken by cpuid like the coefficient
@@ -2352,3 +2354,127 @@ Not done: the host's bands could also be encoded while the two header
 streams are coded (they are the same bands with or without the parts),
 and the verify's `DecodeHead` (`SameAfter`, a whole `Decompress`) is
 still serial, 15.7% of 0056's instructions.
+
+## Speed for 0.9.5 (05/11/2026)
+
+The six changes above, together on one branch, every stream the same as
+0.9.0's. What each one is, in short:
+
+- **The largest files first**: `-th N` workers take the inputs by size,
+  largest first; the output and what is printed keep the inputs' order.
+- **JPEG-LS's symbols model without managed locals**: no reference counts
+  and no implicit try/finally per sample in the fast build.
+- **The raw model's reset**: from 64 KB of raw bytes on, the raw tables
+  are refilled whole instead of walked back.
+- **The raw bytes' model in C**: `pjav7_raw_d` / `pjav7_raw_e`, bit for
+  bit the Pascal loop (kept for `PJA_NOASM=1`, the zpaq-std plugin and
+  `PJA_COSTS`).
+- **JPEG-LS, both models at once**: the symbol stream is checked as it is
+  written, and the samples model codes on a thread of its own.
+- **A large file's header streams on threads**: the file's own header
+  stream next to the host's when a JPEG carries parts.
+
+One thing had to be joined by hand: the C loop walked its counters back
+at the end of every call, so with it installed the whole refill never
+ran. The C now walks them only below `RAW_RESET_WHOLE` and
+`CodeRawBytes` refills the tables after it from there on. On 0056.jpg
+(1.55 MB raw), `-th 1`, best of 3 alternated: compress 4.37 -> 3.82 s
+(-12.7%), extract 1.94 -> 1.77 s (-8.4%) against the same branch without
+that join.
+
+Checked on the combined tree: `pas/run_tests.sh` (with `gen_pjadec.py
+--check`: the ZPAQL decoders are as they were), `pas/run_codec_tests.sh`
+with corpus-jpg (reference = fast = fast without asm = 4 threads),
+`.github/test.sh` native and 32-bit (FPC i386, `gcc -m32`), both giving
+"74 streams, SHA-256 of their list: 3387e58d...". Every timing run below
+compared the `.pja` of both sides (the same, file for file) and the
+extracted files with the inputs (the same).
+
+Wall time, cores 0-7 of a shared machine, the shipped build (`-O3
+-dPJA_FAST`, clang for the C) of main (A, 0.9.0 plus docs) and of this
+(B), A and B alternated with the first side swapped each round, compress
+with verify (`pja a`) then extract (`pja x`) of what it made. Best of 3;
+`-th 1` pinned to one core, `-th 8` to the eight. The load was 3 to 14:
+
+| set | `-th` | compress A -> B | extract A -> B |
+|---|---|---|---|
+| 24 b151 photos | 8 | 1.570 -> 1.291 s (-18%) | 0.870 -> 0.652 s (-25%) |
+| corpus-jpg, 78 files | 8 | 7.908 -> 4.206 s (-47%) | 3.562 -> 1.970 s (-45%) |
+| arith, 244 files | 8 | 1.630 -> 1.643 s (same) | 0.771 -> 0.773 s (same) |
+| jlsphoto, 16 JPEG-LS | 8 | 7.892 -> 5.614 s (-29%) | 3.067 -> 2.177 s (-29%) |
+| 0056.jpg alone | 8 | 3.631 -> 1.670 s (-54%) | 1.319 -> 0.786 s (-40%) |
+| photo7.jls alone | 8 | 5.860 -> 3.284 s (-44%) | 2.384 -> 2.051 s (-14%) |
+| 24 b151 photos | 1 | 9.340 -> 9.034 s (noise) | 6.084 -> 4.513 s (noise) |
+| corpus-jpg, 78 files | 1 | 32.374 -> 28.919 s (-11%) | 14.667 -> 13.548 s (-8%) |
+| arith, 244 files | 1 | 11.417 -> 11.567 s (same) | 4.858 -> 4.929 s (same) |
+| jlsphoto, 16 JPEG-LS | 1 | 28.527 -> 24.534 s (-14%) | 10.663 -> 9.213 s (-14%) |
+| 0056.jpg alone | 1 | 5.509 -> 3.894 s (-29%) | 2.274 -> 1.828 s (-20%) |
+| photo7.jls alone | 1 | 6.222 -> 5.504 s (-12%) | 2.392 -> 2.099 s (-12%) |
+
+All runs, compress / extract in seconds, A then B:
+
+- photos `-th 8`: A 1.714/0.870, 1.642/0.918, 1.570/0.935; B 1.331/0.652,
+  1.291/0.680, 1.318/0.688. An earlier series at load 20: A 1.708/0.930,
+  1.632/0.870, 1.675/0.898; B 1.542/0.781, 1.465/0.898, 1.564/0.785.
+- corpus `-th 8`: A 8.323/3.663, 8.046/3.581, 7.908/3.562; B 4.213/1.987,
+  4.206/1.970, 4.275/2.058. Earlier: A 8.714/3.773, 8.067/3.857,
+  8.187/3.609; B 5.450/2.562, 5.458/2.583, 5.463/2.116.
+- arith `-th 8`: A 1.630/0.771, 1.640/0.777, 1.662/0.775; B 1.648/0.778,
+  1.652/0.773, 1.643/0.774.
+- jlsphoto `-th 8`: A 8.133/3.280, 8.138/3.222, 7.892/3.067; B 5.696/2.177,
+  5.614/2.267, 5.770/2.240. Earlier: A 11.532/4.543, 11.105/4.500,
+  11.402/4.618; B 7.824/2.951, 8.004/3.042, 8.029/3.012.
+- 0056 `-th 8`: A 3.933/1.319, 3.631/1.413, 3.669/1.339; B 1.841/0.792,
+  1.737/0.906, 1.670/0.786.
+- photo7 `-th 8`: A 5.860/2.400, 5.909/2.488, 6.007/2.384; B 3.357/2.100,
+  3.284/2.079, 3.334/2.051.
+- photos `-th 1`: A 9.340/6.650, 14.093/6.084, 12.578/6.295; B
+  13.665/6.669, 13.592/6.748, 9.034/4.513 (the core was shared with
+  something else: these swing by half, and none of the changes is on a
+  photo's path beyond about 2% of instructions).
+- corpus `-th 1`: A 40.267/17.439, 32.809/14.667, 32.374/15.373; B
+  30.180/13.548, 28.946/13.722, 28.919/13.613.
+- arith `-th 1`: A 11.417/4.858, 11.900/4.973, 11.765/4.915; B
+  11.567/5.051, 11.732/5.017, 11.730/4.929.
+- jlsphoto `-th 1`: A 28.527/10.663, 41.525/17.502, 50.134/20.336; B
+  25.146/9.213, 24.534/9.303, 29.051/9.941. Another series: A
+  37.997/14.485, 35.315/10.083, 26.849/10.152; B 23.950/8.681,
+  23.374/8.566, 23.436/8.598.
+- 0056 `-th 1`: A 5.509/2.274, 6.115/2.613, 6.195/2.597; B 3.894/1.828,
+  4.017/1.894, 4.168/1.912.
+- photo7 `-th 1`: A 6.464/2.430, 6.561/2.744, 6.222/2.392; B 5.504/2.180,
+  5.673/2.099, 6.046/2.136.
+
+Where it comes from: on a set at `-th 8`, the largest-first order (the
+tail no longer waits for one big file) and, inside each big file, the
+raw model in C and its refill; on one file, the header streams on
+threads (JPEG) or the two JPEG-LS models at once. Photos and the
+arithmetic set do not change at `-th 1` and gain only from the order at
+`-th 8`: their raw parts are small and their bands were already spread.
+
+What was tried and did not help (all measured, see the sections above):
+
+- **The C raw loop with the coder's state in locals** for the whole call:
+  +2.4% instructions encoding, +2.5% decoding (more spills than the
+  memory state cost); and **the counter as one 32-bit word** on top of
+  that, about +6%, as version 7's loop had found.
+- **The raw reset's threshold at its break-even, 16 KB**: between 16 and
+  64 KB the gain is a few ms a file, which a 20-file mid-raw set (13-53
+  KB raw) could not show above the noise; 64 KB stays, which also keeps a
+  short walk from writing 16 MB through a shared cache.
+- **The two JPEG-LS models side by side at two threads** without the live
+  check: photo6 4.36 / 4.30 / 4.41 s against 3.58 / 3.66 / 3.60 s with
+  it, so two threads check live and code the samples afterwards.
+- **`CompressLive`'s encoders started before the header stream**: no gain
+  on a 557 KB-ICC photo without a thumbnail (2.14 / 2.33 s at `-th 2`,
+  1.71 / 1.68 s at `-th 4`, noise); it stays because it is free and the
+  mutants still catch every failure.
+- **The largest-first order** gives nothing when the files far outnumber
+  the threads (151 photos at `-th 4`: 33.74 / 33.82 s) or are all small
+  (the arithmetic set).
+
+Left open: JPEG-LS's `fpc_dynarray_rangecheck` in `pjajls` ($R+ is kept
+there on purpose; 4% of compressing photo3, 6% of extracting it); the
+host's bands could be encoded while the two header streams are coded;
+the verify's `DecodeHead` (`SameAfter`) is still serial, 15.7% of
+0056's instructions.
