@@ -94,8 +94,9 @@ type
     repaired: Boolean;
     { Compress: a file of the JPEG 2000 family (stream version 8) }
     j2k: Boolean;
-    { and how many of its bytes are in codestreams of mode 1 (modelled) }
-    j2kModelled: Int64;
+    { and how many of its bytes are in codestreams of mode 1 or 2
+      (modelled), and of those how many in mode 2 (pixels) }
+    j2kModelled, j2kPixels: Int64;
     function Ok: Boolean;
     function Text: string;
   end;
@@ -1816,7 +1817,7 @@ end;
   for the stream's 32-bit places. }
 function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
 var cs: TJ2kCodestreams; cd: TCoder; body, host, back, m2: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, total, floor1: Int64; md: array of Byte; was: TStage;
+  ms, known: TKnown; cut, pixels, total, floor1: Int64; md: array of Byte; was: TStage;
 begin
   stream := nil;
   { --stats (pjastage): the box tree walked is the parse; each codestream
@@ -1828,7 +1829,7 @@ begin
   end;
   StageEnter(stEncode);
   SetLength(ms, Length(cs)); SetLength(known, Length(cs)); SetLength(md, Length(cs));
-  cut := 0;
+  cut := 0; pixels := 0;
   for i := 0 to High(cs) do begin
     ms[i] := nil; known[i] := nil; md[i] := J2K_RAW;
     floor1 := 0;
@@ -1846,9 +1847,10 @@ begin
     if md[i] <> J2K_RAW then begin
       known[i] := Copy(data, cs[i].off, cs[i].len);
       cut := cut + cs[i].len;
+      if md[i] = J2K_PIXELS then pixels := pixels + cs[i].len;
     end;
   end;
-  { the host: the file without the codestreams of mode 1 }
+  { the host: the file without the codestreams of mode 1 or 2 }
   if cut = 0 then host := data
   else begin
     SetLength(host, Length(data) - cut);
@@ -1880,6 +1882,7 @@ begin
   Result := CodecFail(ceOk);
   Result.j2k := True;
   Result.j2kModelled := cut;
+  Result.j2kPixels := pixels;
   { checked: the stream gives the file back; each mode 1 or 2 stream was
     decoded and compared when it was made, so its codestream is taken as
     known }

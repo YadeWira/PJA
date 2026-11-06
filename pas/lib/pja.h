@@ -2,8 +2,9 @@
 
    PJA recompresses JPEG and JPEG-LS files losslessly: the original comes
    back byte for byte. pja_compress also takes the JPEG 2000 family (JP2,
-   JPX, JPM, Motion JPEG 2000, raw codestreams), for now through the raw
-   bytes' model; the filter leaves those as they are. The library is one shared object (pja.so, pja.dll,
+   JPX, JPM, Motion JPEG 2000, raw codestreams: stream version 8, each
+   codestream modelled or as its pixels); the filter leaves those as they
+   are. The library is one shared object (pja.so, pja.dll,
    pja.dylib) with a C interface; every function may be called from several
    threads at once.
 

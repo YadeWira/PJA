@@ -112,7 +112,8 @@ begin
 end;
 
 { version 8: the slices of its codestreams of mode 1, the bands' kin (each
-  its own model, on a thread of its own) }
+  its own model, on a thread of its own), and one for each codestream of
+  mode 2 (its planes one arithmetic stream) }
 function J2kStreamSlices(const s: TBytes): Int64;
 var k, i, p, sp, slen: Int64;
 begin
@@ -125,7 +126,8 @@ begin
   while i < k do begin
     p := 6 + J2K_ENTRY * i;
     slen := GetU32(s, p + 8);
-    if s[p + 12] = 1 then Result := Result + J2kSlices(s, sp, slen);
+    if s[p + 12] = 1 then Result := Result + J2kSlices(s, sp, slen)
+    else if s[p + 12] = 2 then Result := Result + 1;
     sp := sp + slen;
     Inc(i);
   end;
@@ -148,7 +150,7 @@ end;
 { version 8 (doc/CODEC.md): its codestreams, each with its place, mode and
   stream, then the host (the file's other bytes, the raw bytes' model) }
 procedure DescribeJ2kStream(const s: TBytes; n: TInfoNode);
-var k, i, p, sp, slen, modelled, slices: Int64; mode: Integer; list, it: TInfoNode;
+var k, i, p, sp, slen, modelled, pixels, slices: Int64; mode: Integer; list, it: TInfoNode;
 begin
   n.Str('kind', 'JPEG 2000 family (codestreams, each with a mode; the rest as bytes)');
   if Length(s) < 6 then begin n.Str('problem', 'cut short'); Exit; end;
@@ -158,7 +160,7 @@ begin
   if 6 + J2K_ENTRY * k > Length(s) then begin n.Str('problem', 'codestream entries past the end'); Exit; end;
   list := n.List('codestream_list');
   sp := 6 + J2K_ENTRY * k;
-  modelled := 0; slices := 0;
+  modelled := 0; pixels := 0; slices := 0;
   i := 0;
   while i < k do begin
     p := 6 + J2K_ENTRY * i;
@@ -167,6 +169,9 @@ begin
     if mode = 1 then begin
       modelled := modelled + 1;
       slices := slices + J2kSlices(s, sp, slen);
+    end else if mode = 2 then begin
+      pixels := pixels + 1;
+      slices := slices + 1;
     end;
     if i < J2K_LISTED then begin
       it := list.Obj;
@@ -182,6 +187,7 @@ begin
              it.line := it.line + ' (modelled), stream ' + IntToStr(slen) + ' B in ' +
                         IntToStr(J2kSlices(s, sp, slen)) + ' slice(s)';
            end;
+        2: it.line := it.line + ' (pixels), stream ' + IntToStr(slen) + ' B';
         else it.line := it.line + ' (a later release''s)';
       end;
     end;
@@ -190,6 +196,7 @@ begin
   end;
   if k > J2K_LISTED then n.Num('codestreams_not_listed', k - J2K_LISTED);
   n.Num('modelled', modelled);
+  n.Num('pixels', pixels);
   { the slices: the bands of JPEG 2000 (--stats counts them as bands) }
   n.Num('bands', slices);
   if sp <= Length(s) then n.Num('host_stream_bytes', Length(s) - sp)

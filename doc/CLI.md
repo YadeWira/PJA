@@ -30,6 +30,7 @@ pja --version, pja -V       the build, the compilers, the system and the SIMD pa
 | `--json` | `a`, `x`, `t`, `info`, `list`: one JSON object a line for each file, in the order of the inputs, then `{"summary": ...}`; errors still go to stderr as well |
 | `--cpu=PATH` | the models' SIMD path: `plain`, `sse41` or `avx2`, before or after the command (`--cpu avx2`, with a space, is refused naming `--cpu=avx2`). A path this processor or this build lacks is refused (exit 2) naming those it has. Every path writes and reads the same bytes: only the speed changes (`selftest` proves it; `selftest --cpu=PATH` checks that path alone) |
 | `-o REPORT` | `report`: the file the report goes to (never over an existing one) |
+| `--estimate` | `info`: code a JPEG 2000 file's codestreams as `a` does, for their real sizes (by default only a verdict from the headers: the coding takes minutes on a large MJ2). JPEG and JPEG-LS get `a`'s dry run either way; `report` always estimates, up to 64 MB |
 | `--with-file` | `report`: also copy the file beside the report as `pja-report-NAME`, to attach if you choose to (without FILE it is refused: exit 2) |
 | `-r N` | `bench`: runs of each measure, the best one counts (3 by default) |
 | `--` | everything after it is a file, even if it starts with a dash |
@@ -60,7 +61,7 @@ What `x` does, without writing: the format, the declared size against
 each that does not (exit 1). Takes `-th`, `-q`, `--max-output`, `--stats`
 and `--json`; `-o`, `-f`, `-n` and `--keep-corrupt` are refused (exit 2).
 
-### `pja info FILE...`
+### `pja info FILE... [--estimate]`
 
 Any file: what it is and what PJA does with it. Each format has a provider
 (`pas/pjainfo.pas`; a new format is one more unit):
@@ -90,11 +91,25 @@ Any file: what it is and what PJA does with it. Each format has a provider
   quantization; CAP and `ht` (HTJ2K: CAP's Part 15 bit or the HT
   code-block style); its tile-parts (tile, part, place, length, header);
   every marker met with how many; what is after the EOC; and what PJA does
-  with it: `mode 1 (modelled): 612 B -> 586 B, 4.25% less`, or `mode 0 (as
+  with it. By default that is a verdict from the headers alone, without
+  coding anything (`not estimated (pja info --estimate codes it): mode 2:
+  eligible by its headers ...; mode 1: analysable by its headers`):
+  whether mode 2 (the pixels) may take it, or why not (`not reversible`:
+  the 9/7 wavelet or a quantization; `RGN`; `HTJ2K`; `Part 2`; `more than
+  16 bits`; its caps: `too wide`, `too many samples`, `too many samples
+  for its bytes`), whether mode 1 (the model) may analyse it (or HTJ2K,
+  Part 2), and `complete` (every tile there, an EOC, no problem met).
+  Whether each code-block has all its passes (a rate-truncated codestream
+  is lossy: mode 2 does not take it) only the coding tells. With
+  `--estimate` each codestream is coded as `a` does it (mode 2 first, then
+  mode 1 unless mode 2's stream is already below what mode 1 could reach,
+  on `-th`'s threads), which takes about what `a` takes (minutes on a
+  large MJ2): `mode 2 (pixels): 74911 B -> 22038 B, 70.58% less; mode 1:
+  62175 B`, `mode 1 (modelled): 612 B -> 586 B, 4.25% less; mode 2:
+  rate-truncated: a code-block without all its passes`, or `mode 0 (as
   bytes): HTJ2K` with the analysis's reason (HTJ2K, Part 2, a limit, a
   marker that does not parse...) or that its stream would not be smaller.
-  That is mode 1's own work (as `a` does it, on `-th`'s threads), so a
-  large JPEG 2000 file takes `info` about what it takes `a`. Past 300
+  Past 300
   boxes and main-header markers, 100 problems, 64 tile-parts and 64
   components a codestream, and 32 codestreams, they are counted, not
   listed (nor analysed). The XML, UUID, label, URL and IPR boxes, an ICC
@@ -108,17 +123,23 @@ Any file: what it is and what PJA does with it. Each format has a provider
   never the bands); for version 6, as bytes, PATCH (the edits, then the
   repaired file's stream) or parts (each JPEG inside, then the host's).
   For version 8 (JPEG 2000), each codestream's place, mode and stream (mode
-  1: its slices, which count as its bands), and the host's stream.
+  1: its slices, which count as its bands; mode 2, the pixels: one band),
+  and the host's stream.
   A `.pja` that declares an original larger than `--max-output` is not
   decoded (`not_decoded`), as `x` refuses it.
 
 Then `pja: ...`: for a `.pja`, whether it extracts and verifies; for
-anything else, what `a --no-verify` would do: `takes it: stream version 7,
+a JPEG 2000 file without `--estimate`, that `a` takes it as stream
+version 8 (`estimated: false`, no sizes: they are `a`'s whole work); for
+anything else, and for JPEG 2000 with `--estimate`, what `a --no-verify`
+would do: `takes it: stream version 7,
 1748 B -> 1431 B (81.86%)`, `takes it ..., as bytes: BadRst@1670` (PJA did
 not take it as a JPEG and why: the reason and the byte where it was found),
 `..., repaired: BadRst@...`, for JPEG 2000 `takes it: stream version 8
 (JPEG 2000), 3230 B -> 3084 B (95.48%), 3025 B of codestreams modelled
-(mode 1)` (`j2k_modelled_bytes` in `--json`), or `refuses it:
+(mode 1)` (and `..., 74911 B of codestreams as pixels (mode 2)`;
+`j2k_modelled_bytes`, modes 1 and 2, and `j2k_pixels_bytes` in
+`--json`), or `refuses it:
 Codec(Jpeg(NotJpeg@0))`.
 Exit 1 only for a file that cannot be read. `--json` gives the same tree.
 
@@ -135,7 +156,10 @@ A plain-text bug report, to stdout or to `-o`'s file:
 - the command line, each path cut to its name (an option's value too:
   `--output-dir=NAME`; a path after `--` that starts with a dash as well);
 - for FILE: its size, BLAKE3-128, what PJA does with it and its structure,
-  as `info` gives them (with `a`'s verification).
+  as `info --estimate` gives them (with `a`'s verification): a report
+  needs the facts. Above 64 MB there is no dry run (`not estimated: the
+  file is larger than 64 MB`), only the structure and the headers'
+  verdict: a large MJ2's would take minutes.
 
 **What is not in it**: no pixel and no coefficient, no metadata contents
 (EXIF, XMP, ICC, comments, JPEG 2000's XML, UUID and label boxes: only how many bytes), no folder names. A
@@ -231,11 +255,13 @@ time is `encode`'s); `decode` (`x`, `t`); `hash` BLAKE3; `write` the
 output, verified, flushed to the disk (unless `--no-sync`) and renamed;
 `other` what falls between. `threads` are the file's own (what `-th`
 leaves each file), `bands` the stream's. For a JPEG 2000 file, `parse` is
-the walk of its boxes, `encode` each codestream taken apart and its
-decisions through the model (stream version 8's mode 1), `verify` both
-mode 1's own check of each codestream's stream and the whole stream read
-back; its `bands` are the slices of its codestreams of mode 1 (each with
-its own model, decoded on a thread of its own). The largest files go first
+the walk of its boxes, `encode` each codestream taken apart, its pixels
+through the pixel models (mode 2) and its decisions through the model
+(mode 1), `verify` the own check of each mode's stream (each is decoded
+and compared before it is kept) and the whole stream read back; its
+`bands` are the slices of its codestreams of mode 1 (each with its own
+model, decoded on a thread of its own) and one for each codestream of
+mode 2. The largest files go first
 and the threads are shared out the same way as for JPEG files.
 
 ### `--json`

@@ -108,7 +108,11 @@ begin
       sl.Add('');
       sl.Add('== The file');
       sl.Add('blake3_128: ' + HexBytes(Blake3_128(data)));
-      n := DescribeFile(name, data, True, threads, maxOutput);
+      { the facts: the dry run, but not above REPORT_ESTIMATE_MAX (a large
+        MJ2's takes minutes), with a note }
+      if Length(data) <= REPORT_ESTIMATE_MAX then
+        n := DescribeFile(name, data, True, threads, maxOutput, idEstimate)
+      else n := DescribeFile(name, data, True, threads, maxOutput, idStructure);
       try
         act := n.Find('pja');
         if act <> nil then title := title + act.line + ' (' + ExtractFileExt(name) + ')';

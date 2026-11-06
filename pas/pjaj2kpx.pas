@@ -83,6 +83,12 @@ function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; l
   out why: string; out mode1Floor: Int64): TMode2Result; overload;
 function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
   out why: string): TMode2Result; overload;
+{ What the codestream's SIZ alone says of mode 2 (pjainfoj2k, without
+  coding): '' when its planes are within mode 2's bounds for a codestream
+  of len bytes, else why not ('more than 16 bits', 'too wide', 'too many
+  samples', 'too many samples for its bytes', 'SIZ'). siz: the SIZ marker
+  segment, from its marker. }
+function J2kMode2SizWhy(const siz: TBytes; len: Int64): string;
 { A mode 2 stream back to its codestream, which must be len bytes. }
 function J2kMode2Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode2Result;
 function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
@@ -90,7 +96,7 @@ function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; o
 
 implementation
 
-uses pjacodec;
+uses pjacodec, pjastage;
 
 {$L pjaj2kpm.o}
 
@@ -266,6 +272,13 @@ end;
 function SamplesFit(const z: TSiz; len: Int64): Boolean;
 begin
   Result := (z.total <= PX_FREE) or (z.total <= PX_PERBYTE * len);
+end;
+
+function J2kMode2SizWhy(const siz: TBytes; len: Int64): string;
+var z: TSiz;
+begin
+  Result := ParseSiz(siz, z);
+  if (Result = '') and not SamplesFit(z, len) then Result := 'too many samples for its bytes';
 end;
 
 function TPx.Tile(km: Pointer; const t: TJ2kPixTile): string;
@@ -600,7 +613,7 @@ end;
 function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
   out why: string; out mode1Floor: Int64): TMode2Result;
 var px: TPx; raw, blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; o: TOut; c, hb, nw: Integer;
-  p: SizeInt; total: Int64; why2: string; colour: Boolean;
+  p: SizeInt; total: Int64; why2: string; colour: Boolean; was: TStage;
 begin
   stream := nil; why := ''; mode1Floor := 0;
   if (off < 0) or (len < 46) or (off + len > Length(data)) then begin why := 'no SIZ'; Exit(m2Refused); end;
@@ -647,12 +660,16 @@ begin
   finally
     px.Free;
   end;
-  { checked: the stream alone gives the codestream back }
+  { checked: the stream alone gives the codestream back (--stats: the
+    verify, pjastage) }
+  was := StageEnter(stVerify);
   if (J2kMode2DecodeWhy(stream, len, threads, back, why2) <> m2Ok) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
+    StageEnter(was);
     stream := nil; why := 'verify: ' + why2;
     Exit(m2Refused);
   end;
+  StageEnter(was);
   Result := m2Ok;
 end;
 

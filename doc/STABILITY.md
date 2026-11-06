@@ -40,11 +40,11 @@ Versions 0 to 4 are never written; 9 and up are left for later kinds of
 file, and a release refuses one it does not know as `FutureVersion`
 (`pas/tests/test_versions.pas`).
 
-Stream version 8 is fixed from 0.9.5, with its codestream modes 0 and 1:
-its layout (flags, the table of codestreams, their streams, the host),
-flag value 0, codestream mode 0 (raw: the codestream's bytes stay in the
-host, coded with the other bytes) and codestream mode 1 keep their
-meaning forever, and every release from 0.9.5 on reads what 0.9.5 writes.
+Stream version 8 is fixed from 0.9.5, with its codestream modes 0, 1
+and 2: its layout (flags, the table of codestreams, their streams, the
+host), flag value 0, codestream mode 0 (raw: the codestream's bytes stay
+in the host, coded with the other bytes), codestream mode 1 (modelled)
+and codestream mode 2 (its pixels) keep their meaning forever, and every release from 0.9.5 on reads what 0.9.5 writes.
 It is a whole file, as BYTES is: never a part of a version 6 stream nor
 the repaired file inside a PATCH stream (a reader refuses it there as
 `BadStream`). For mode 1 (the codestream taken apart and its code-blocks'
@@ -55,9 +55,9 @@ n + n / 4 + 65,536 bytes for a codestream of n, each slice's
 decisions), the side information's blob (version 2, its ten streams and
 its slice table), the rules that rebuild a codestream from it, and the
 model's contexts, counters, mixer, maps and constants, bit for bit.
-Codestream mode 2 (a reversible codestream kept as its pixels and what
-rebuilds it from them, `doc/CODEC.md`, "JPEG 2000, stage D") joins them
-when 0.9.5 ships too: its stream's layout (layout byte 0, the check, the
+For codestream mode 2 (a reversible codestream kept as its pixels and
+what rebuilds it from them, `doc/CODEC.md`, "JPEG 2000, stage D"), fixed
+in the same release: its stream's layout (layout byte 0, the check, the
 side information as mode 1's, the bitonal tables' size byte, the colour
 byte, the planes' arithmetic stream), the planes as the SIZ gives them,
 the integer 5/3 wavelet, the reversible colour transform and the level

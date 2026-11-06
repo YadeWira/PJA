@@ -9,8 +9,13 @@
   bits), CAP (HTJ2K), COD (levels, layers, progression, code-block size
   and style, the wavelet: 5/3 reversible or 9/7 irreversible, SOP and
   EPH), QCD, the markers of its headers counted, its tile-parts, and what
-  PJA does with it: mode 1 with the bytes its stream takes, or mode 0 and
-  why (the analysis's own reason, pjaj2km).
+  PJA does with it. By default (pjainfo.InfoDepth idDefault) a verdict
+  from the headers alone, nothing coded: mode 2 eligible or why not (not
+  reversible, RGN, HTJ2K, Part 2, its SIZ's caps, pjaj2kpx), mode 1
+  analysable or why not, the codestream complete or not. With --estimate
+  (idEstimate) each codestream coded as a's CompressJ2k does it: mode 2,
+  then mode 1 unless mode 2 is already below mode 1's floor, the smaller
+  kept; mode 0 and why (the analysis's own reason, pjaj2km).
 
   Privacy: no metadata is printed, only its size. The XML, UUID, label,
   URL and IPR boxes, an ICC profile and a COM marker's text are counted
@@ -34,7 +39,7 @@ procedure DescribeJ2k(const d: TBytes; n: TInfoNode);
 
 implementation
 
-uses pjaj2k, pjaj2km;
+uses pjaj2k, pjaj2km, pjaj2kpx;
 
 const
   { boxes listed one by one, and markers of a codestream's main header;
@@ -46,7 +51,8 @@ const
   MAX_TILE_PARTS = 64;
   { components listed a codestream }
   MAX_COMPONENTS = 64;
-  { codestreams described (and analysed: each costs what a's mode 1 costs) }
+  { codestreams described (and with --estimate coded: each costs what a's
+    modes 1 and 2 cost) }
   MAX_CODESTREAMS = 32;
 
 type
@@ -276,13 +282,49 @@ end;
 
 { ---------- a codestream ---------- }
 
+type
+  { what the headers say of modes 1 and 2 }
+  TVerdict = record
+    notRev, part2: string;
+    rgn, ht: Boolean;
+  end;
+
+{ a marker segment of a main or tile-part header (its contents [q, q +
+  L - 2)), for the verdict; csiz: the SIZ's components (COC and QCC give a
+  component in 1 byte below 257, else 2) }
+procedure Judge(const d: TBytes; m: Integer; q, L: Int64; csiz: Integer; var vd: TVerdict);
+var c: Int64;
+begin
+  if csiz < 257 then c := 1 else c := 2;
+  case m of
+    $52: if L >= 12 then begin
+      if (d[q] and $F8 <> 0) and (vd.part2 = '') then vd.part2 := 'Part 2: COD style';
+      if d[q + 8] and $40 <> 0 then vd.ht := True;
+      if (d[q + 9] <> 1) and (vd.notRev = '') then vd.notRev := 'not reversible: the 9/7 wavelet';
+    end;
+    $53: if L >= 2 + c + 6 then begin
+      if (d[q + c] and $FE <> 0) and (vd.part2 = '') then vd.part2 := 'Part 2: COC style';
+      if d[q + c + 4] and $40 <> 0 then vd.ht := True;
+      if (d[q + c + 5] <> 1) and (vd.notRev = '') then vd.notRev := 'not reversible: the 9/7 wavelet';
+    end;
+    $5C: if (L >= 3) and (d[q] and $1F <> 0) and (vd.notRev = '') then vd.notRev := 'not reversible: quantized';
+    $5D: if (L >= 2 + c + 1) and (d[q + c] and $1F <> 0) and (vd.notRev = '') then
+           vd.notRev := 'not reversible: quantized';
+    $5E: vd.rgn := True;
+    $72, $73: if vd.part2 = '' then vd.part2 := 'Part 2 decomposition';
+  end;
+end;
+
 procedure DescribeCodestream(const d: TBytes; off, len: Int64; n: TInfoNode; var sums: TSums);
 var p, e, L, q, psot, hdrEnd, tiles, tx, ty, xsiz, ysiz, xo, yo, xt, yt, xto, yto, sp: Int64; i: Integer;
     m, k, v, nl, prog, csiz: Integer; segs: Int64; it, siz, cod, comps, c, parts, hdr, sum: TInfoNode;
     counts: array[0..255] of Int64; seen: array of Boolean; tp, tpListed, tilesSeen: Int64;
-    words: string; eoc, ht, capSeen: Boolean; stream: TBytes; why: string; r: TMode1Result;
-    listed: Integer;
+    words: string; eoc, ht, capSeen: Boolean; stream, s2, sizRaw: TBytes; why, why2, m1, m2: string;
+    r: TMode1Result; r2: TMode2Result; floor1: Int64; tried1, complete: Boolean;
+    listed, problems0: Integer; vd: TVerdict; ok2, ok1: Boolean;
 begin
+  vd := Default(TVerdict); sizRaw := nil; csiz := 0;
+  problems0 := sums.problems;
   n.Num('offset', off);
   n.Num('length', len);
   for k := 0 to 255 do counts[k] := 0;
@@ -310,6 +352,8 @@ begin
     Inc(counts[m]);
     Inc(segs);
     q := p + 4;                          { its contents: [q, p + 2 + L) }
+    if m = $51 then sizRaw := Copy(d, p, L + 2)
+    else Judge(d, m, q, L, csiz, vd);
     it := nil;
     if listed < MAX_LISTED then begin
       Inc(listed);
@@ -454,6 +498,7 @@ begin
         Problem(n, sums, MarkerName(m) + ' at ' + IntToStr(q) + ' cut short'); Break;
       end;
       Inc(counts[m]);
+      Judge(d, m, q + 4, Be16(d, q + 2), csiz, vd);
       if m = $64 then begin
         Inc(sums.comments);
         if Be16(d, q + 2) > 4 then Inc(sums.commentBytes, Be16(d, q + 2) - 4);
@@ -494,27 +539,94 @@ begin
     end;
   sum.line := words;
   { what PJA does with it: what stream version 8 decides (pjacodec's
-    CompressJ2k): mode 1 when the analysis takes it and its stream is
-    smaller, mode 0 otherwise }
+    CompressJ2k), with --estimate; else what the headers say of it }
   it := n.Obj('pja');
+  if ht then vd.ht := True;
+  complete := (sums.problems = problems0) and eoc and ((seen = nil) or (tilesSeen = tiles));
+  if InfoDepth <> idEstimate then begin
+    it.Bool('estimated', False);
+    it.Bool('complete', complete);
+    { mode 2: the headers' reasons, in the order the encoder meets them }
+    if sizRaw = nil then m2 := 'no SIZ'
+    else m2 := J2kMode2SizWhy(sizRaw, len);
+    if m2 = '' then begin
+      if vd.ht then m2 := 'HTJ2K'
+      else if vd.part2 <> '' then m2 := vd.part2
+      else if vd.notRev <> '' then m2 := vd.notRev
+      else if vd.rgn then m2 := 'RGN';
+    end;
+    if m2 = '' then begin
+      it.Str('mode2', 'eligible');
+      words := 'mode 2: eligible by its headers (whether every code-block has all its passes only --estimate tells)';
+    end else begin
+      it.Str('mode2', 'not eligible');
+      it.Str('mode2_reason', m2);
+      words := 'mode 2: not eligible: ' + m2;
+    end;
+    m1 := '';
+    if vd.ht then m1 := 'HTJ2K' else if vd.part2 <> '' then m1 := vd.part2;
+    if m1 = '' then begin
+      it.Str('mode1', 'analysable');
+      words := words + '; mode 1: analysable by its headers';
+    end else begin
+      it.Str('mode1', 'not analysable');
+      it.Str('mode1_reason', m1);
+      words := words + '; mode 1: not analysable: ' + m1;
+    end;
+    if not complete then words := words + '; not complete (see its problems)';
+    it.line := 'not estimated (pja info --estimate codes it): ' + words;
+    Exit;
+  end;
+  it.Bool('estimated', True);
   if QWord(len) > InfoMaxOutput then begin
     it.Str('mode', 'not analysed');
     it.line := 'not analysed: larger than --max-output';
     Exit;
   end;
-  r := J2kMode1Encode(d, off, len, InfoThreads, stream, why);
-  if (r = m1Ok) and (Length(stream) < len) then begin
+  { as CompressJ2k: mode 2 first (its stream kept only when shorter than
+    the codestream), then mode 1 unless mode 2's is no longer than mode 1's
+    could be at the least; the smaller }
+  floor1 := 0;
+  r2 := J2kMode2Encode(d, off, len, InfoThreads, len, s2, why2, floor1);
+  ok2 := r2 = m2Ok;
+  if ok2 then it.Num('mode2_stream_bytes', Length(s2))
+  else begin
+    if why2 = '' then why2 := 'refused';
+    it.Str('mode2_reason', why2);
+  end;
+  tried1 := not ok2 or (Length(s2) > floor1);
+  ok1 := False; r := m1Refused; why := ''; stream := nil;
+  if tried1 then begin
+    r := J2kMode1Encode(d, off, len, InfoThreads, stream, why);
+    ok1 := (r = m1Ok) and (Length(stream) < len);
+    if r = m1Ok then it.Num('mode1_stream_bytes', Length(stream))
+    else begin
+      if why = '' then why := 'refused';
+      it.Str('mode1_reason', why);
+    end;
+  end else it.Str('mode1_reason', 'not tried: mode 2''s stream is below what mode 1 could reach');
+  if ok2 and (not ok1 or (Length(s2) <= Length(stream))) then begin
+    it.Num('mode', 2);
+    it.Num('stream_bytes', Length(s2));
+    it.Fixed('saving_percent', 100 * (len - Length(s2)) / len);
+    it.line := 'mode 2 (pixels): ' + IntToStr(len) + ' B -> ' + IntToStr(Length(s2)) + ' B, ' +
+               DotNumber(100 * (len - Length(s2)) / len, 2) + '% less; mode 1: ';
+    if not tried1 then it.line := it.line + 'not tried (mode 2 is below what it could reach)'
+    else if r = m1Ok then it.line := it.line + IntToStr(Length(stream)) + ' B'
+    else it.line := it.line + why;
+  end else if ok1 then begin
     it.Num('mode', 1);
     it.Num('stream_bytes', Length(stream));
     it.Fixed('saving_percent', 100 * (len - Length(stream)) / len);
     it.line := 'mode 1 (modelled): ' + IntToStr(len) + ' B -> ' + IntToStr(Length(stream)) + ' B, ' +
-               DotNumber(100 * (len - Length(stream)) / len, 2) + '% less';
+               DotNumber(100 * (len - Length(stream)) / len, 2) + '% less; mode 2: ';
+    if ok2 then it.line := it.line + IntToStr(Length(s2)) + ' B' else it.line := it.line + why2;
   end else begin
     it.Num('mode', 0);
-    if r = m1Ok then why := 'its stream would not be smaller (' + IntToStr(Length(stream)) + ' B)'
-    else if why = '' then why := 'refused';
+    if r = m1Ok then why := 'its stream would not be smaller (' + IntToStr(Length(stream)) + ' B)';
     it.Str('reason', why);
     it.line := 'mode 0 (as bytes): ' + why;
+    if why2 <> why then it.line := it.line + '; mode 2: ' + why2;
   end;
 end;
 

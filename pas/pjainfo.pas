@@ -60,6 +60,20 @@ type
   { its structure into n }
   TInfoDescribe = procedure(const d: TBytes; n: TInfoNode);
 
+  { how much work info and report do for what PJA does with a file:
+    idDefault (info): what is cheap (a JPEG's or JPEG-LS's dry run, which
+    takes about what a takes); a JPEG 2000 file's structure and a verdict
+    from its headers, without coding (its dry run can take minutes on a
+    large MJ2). idEstimate (info --estimate, report): the dry run of every
+    format, and for JPEG 2000 each codestream coded in mode 2 and mode 1.
+    idStructure (report on a file above REPORT_ESTIMATE_MAX): no dry run
+    at all, with a note }
+  TInfoDepth = (idDefault, idEstimate, idStructure);
+
+const
+  { report: above this, no dry run (idStructure) }
+  REPORT_ESTIMATE_MAX = 64 * 1024 * 1024;
+
 var
   { the largest original a provider decodes anything of (x's --max-output;
     DescribeFile sets it): a .pja that declares more is not decoded, as x
@@ -68,6 +82,8 @@ var
   { the threads a provider may use for work it does (pjainfoj2k's analysis
     of each codestream; DescribeFile sets it) }
   InfoThreads: Integer = 1;
+  { the depth of this description (DescribeFile sets it) }
+  InfoDepth: TInfoDepth = idDefault;
 
 { A format's provider, tried in the order they were registered. }
 procedure RegisterInfoProvider(const name: string; probe: TInfoProbe; describe: TInfoDescribe);
@@ -79,12 +95,12 @@ function DescribeData(const d: TBytes; n: TInfoNode): string;
   takes it, with which stream and what size, or as bytes and why, or why
   not. verify: as `a` without --no-verify. One line of text in `line`. }
 procedure DescribeAction(const d: TBytes; const ext: string; verify: Boolean; threads: Integer;
-                         maxOutput: QWord; n: TInfoNode; out line: string);
+                         maxOutput: QWord; depth: TInfoDepth; n: TInfoNode; out line: string);
 { A file for `pja info` and `pja report`: its name, then its structure
   (DescribeData), then what PJA does with it, as "pja" (DescribeAction).
   The caller frees it. }
 function DescribeFile(const name: string; const d: TBytes; verify: Boolean; threads: Integer;
-                      maxOutput: QWord): TInfoNode;
+                      maxOutput: QWord; depth: TInfoDepth): TInfoNode;
 { a string for JSON, quoted; bytes that are not UTF-8 go as \u00XX }
 function JsonString(const s: string): string;
 { 128 bits as 32 hex digits }
@@ -96,7 +112,7 @@ function DotNumber(v: Double; digits: Integer): string;
 
 implementation
 
-uses pjablake3, pjaformat, pjapack, pjacodec;
+uses pjablake3, pjaformat, pjapack, pjacodec, pjaj2k;
 
 type
   TProvider = record
@@ -366,8 +382,8 @@ begin
 end;
 
 procedure DescribeAction(const d: TBytes; const ext: string; verify: Boolean; threads: Integer;
-                         maxOutput: QWord; n: TInfoNode; out line: string);
-var pja, orig: TBytes; r: TPackResult; h: THash16; why: string;
+                         maxOutput: QWord; depth: TInfoDepth; n: TInfoNode; out line: string);
+var pja, orig: TBytes; r: TPackResult; h: THash16; why: string; cs: TJ2kCodestreams;
 begin
   if IsPjaData(d) then begin
     n.Str('command', 'x');
@@ -384,6 +400,24 @@ begin
     Exit;
   end;
   n.Str('command', 'a');
+  if depth = idStructure then begin
+    n.Bool('estimated', False);
+    line := 'not estimated: the file is larger than ' + IntToStr(REPORT_ESTIMATE_MAX div (1024 * 1024)) +
+            ' MB (pja info --estimate does the dry run)';
+    Exit;
+  end;
+  { a JPEG 2000 file whose codestreams version 8 takes: what a does, as
+    a's CompressJ2k decides it (the sizes only with --estimate) }
+  if (depth = idDefault) and (J2kKind(d) <> jkNone) and (Length(d) < High(Cardinal)) and J2kCodestreams(d, cs) then begin
+    n.Bool('estimated', False);
+    n.Bool('takes', True);
+    n.Str('stream', 'version 8 (JPEG 2000)');
+    n.Num('stream_version', 8);
+    line := 'takes it: stream version 8 (JPEG 2000), or stored as is if that is no smaller; ' +
+            'sizes not computed (pja info --estimate codes it)';
+    Exit;
+  end;
+  n.Bool('estimated', True);
   r := Pack(d, pja, threads, False, verify, ext, True);
   n.Bool('ok', r.Ok);
   if not r.Ok then begin
@@ -407,11 +441,15 @@ begin
     n.Str('repaired', r.codec.jpeg.Text);
     why := ', repaired: ' + r.codec.jpeg.Text;
   end else if r.codec.j2k then begin
-    { the bytes in codestreams of mode 1 (modelled); the rest as bytes }
+    { the bytes in codestreams of mode 1 (modelled) and of mode 2
+      (pixels); the rest as bytes }
     n.Num('j2k_modelled_bytes', r.codec.j2kModelled);
-    if r.codec.j2kModelled > 0 then
-      why := ', ' + IntToStr(r.codec.j2kModelled) + ' B of codestreams modelled (mode 1)'
-    else why := ', no codestream modelled: all as bytes (mode 0)';
+    n.Num('j2k_pixels_bytes', r.codec.j2kPixels);
+    if r.codec.j2kModelled - r.codec.j2kPixels > 0 then
+      why := ', ' + IntToStr(r.codec.j2kModelled - r.codec.j2kPixels) + ' B of codestreams modelled (mode 1)';
+    if r.codec.j2kPixels > 0 then
+      why := why + ', ' + IntToStr(r.codec.j2kPixels) + ' B of codestreams as pixels (mode 2)';
+    if r.codec.j2kModelled = 0 then why := ', no codestream modelled: all as bytes (mode 0)';
   end;
   line := 'takes it: stream ' + StreamWords(pja) + ', ' + IntToStr(Length(d)) + ' B -> ' +
           IntToStr(Length(pja)) + ' B';
@@ -420,13 +458,14 @@ begin
 end;
 
 function DescribeFile(const name: string; const d: TBytes; verify: Boolean; threads: Integer;
-                      maxOutput: QWord): TInfoNode;
+                      maxOutput: QWord; depth: TInfoDepth): TInfoNode;
 var act: TInfoNode; summary, ext: string;
 begin
   Result := TInfoNode.Create(ikObject);
   Result.Str('file', name);
   InfoMaxOutput := maxOutput;
   InfoThreads := threads;
+  InfoDepth := depth;
   { a bug met here is what a report is for: it goes in the description,
     as internal_error, instead of ending the command }
   try
@@ -438,7 +477,7 @@ begin
   ext := ExtractFileExt(name);
   if ext <> '' then Delete(ext, 1, 1);
   try
-    DescribeAction(d, ext, verify, threads, maxOutput, act, summary);
+    DescribeAction(d, ext, verify, threads, maxOutput, depth, act, summary);
   except
     on e: Exception do begin
       summary := 'internal error: ' + e.ClassName + ': ' + e.Message;

@@ -3465,3 +3465,41 @@ what the 1-bit one makes of it; the pixel models run on one thread; a
 codestream within the bounds whose tiles are mostly missing (a damaged
 SIZ) still costs the planes its SIZ declares (a tighter bound would count
 only the tiles that have tile-parts).
+
+## Mode 2 in the 0.9.5 command (06/11/2026)
+
+Stage D merged into the 0.9.5 branch. Nothing in a stream changed; what
+the command says of mode 2:
+
+- **`--stats` and `bench`**: mode 2's `encode` is the codestream taken
+  apart and its pixels through the pixel models; its own check (the
+  stream decoded and compared before it is kept, as mode 1's) is
+  `verify`, with the whole stream read back. A codestream of mode 2 is
+  one band (its planes are one arithmetic stream); mode 1's slices are
+  bands as before.
+- **`pja info`** on a JPEG 2000 file no longer codes it by default (the
+  modes' work took minutes on a large MJ2): each codestream gets a
+  verdict from its headers alone, mode 2 eligible or why not (`not
+  reversible: the 9/7 wavelet`, `not reversible: quantized`, `RGN`,
+  `HTJ2K`, `Part 2`, the SIZ's caps: `more than 16 bits`, `too wide`,
+  `too many samples`, `too many samples for its bytes`, from
+  `pjaj2kpx.J2kMode2SizWhy`, the encoder's own check), mode 1 analysable
+  or why not, and whether the codestream is complete. Whether every
+  code-block has all its passes (rate truncation) only the coding tells.
+  `info --estimate` codes each codestream as `CompressJ2k` does (mode 2,
+  then mode 1 unless mode 2 is below mode 1's floor) and shows the chosen
+  mode with its saving and the other mode's size or reason; `pja: takes
+  it ...` then splits the bytes into `modelled (mode 1)` and `as pixels
+  (mode 2)` (`j2k_pixels_bytes`, from the codec's new
+  `TCodecResult.j2kPixels`). On gap1's 113 real codestreams the
+  headers say 82 not eligible (62 the 9/7 wavelet, 11 quantized, 9 the
+  caps) and 31 eligible, of which `--estimate` keeps 19 in mode 2; never
+  "not eligible" where the coding takes mode 2. The largest (45.8 MB)
+  takes 0.04 s by default, minutes with `--estimate`.
+  `pja report` does the dry run, as it must, up to 64 MB; above, a note.
+- **Stored as is**: a JPEG 2000 file goes in the stream when the stream
+  is smaller than the file, and stored as is otherwise, exactly as a JPEG
+  (`pjapack.Pack`: the payload against the original, the 40-byte header
+  being the same either way). `tests/j2k/cprl_poc.j2k`'s .pja (1206 B ->
+  1230 B) holds a 1190 B stream: stored it would be 1246 B. A file whose
+  stream is no smaller (`plasma_cs.j2k`, 612 B) is stored (652 B).

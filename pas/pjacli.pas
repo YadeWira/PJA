@@ -43,8 +43,8 @@ var
   outDir: string;          { --output-dir }
   force, keepCorrupt, dryRun, quiet, fastModel, noVerify, cleanTemps: Boolean;
   threads: Integer;
-  { --stats, --json; report's --with-file; bench's -r }
-  stats, jsonOut, withFile: Boolean;
+  { --stats, --json; report's --with-file; info's --estimate; bench's -r }
+  stats, jsonOut, withFile, estimate: Boolean;
   runs: Integer;
   runsGiven: Boolean;
   { -th or --threads given }
@@ -209,7 +209,9 @@ begin
   Writeln('       pja x [options] FILE...     extract from .pja');
   Writeln('       pja list FILE...            show what each .pja holds');
   Writeln('       pja t FILE...               test each .pja: extract and verify, write nothing');
-  Writeln('       pja info FILE...            the structure of each file, and what PJA does with it');
+  Writeln('       pja info FILE... [--estimate]');
+  Writeln('                                   the structure of each file, and what PJA does with it');
+  Writeln('                                   (--estimate: JPEG 2000 coded for its real sizes)');
   Writeln('       pja report [FILE] [-o REPORT.txt] [--with-file]');
   Writeln('                                   a bug report (no pixels, no metadata contents) and');
   Writeln('                                   a link to open an issue with it');
@@ -312,7 +314,7 @@ begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
   fastModel := False; noVerify := False; cleanTemps := False;
-  stats := False; jsonOut := False; withFile := False; runs := 3; runsGiven := False; thGiven := False;
+  stats := False; jsonOut := False; withFile := False; estimate := False; runs := 3; runsGiven := False; thGiven := False;
   cpuGiven := False;
   threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
@@ -365,6 +367,7 @@ begin
     else if a = '--stats' then stats := True
     else if a = '--json' then jsonOut := True
     else if a = '--with-file' then withFile := True
+    else if a = '--estimate' then estimate := True
     else if Copy(a, 1, 6) = '--cpu=' then begin
       if not ParseCpuPath(Copy(a, 7, MaxInt), cpuWanted) then
         UsageError('--cpu: plain, sse41 or avx2, not "' + Copy(a, 7, MaxInt) + '"');
@@ -400,6 +403,7 @@ begin
   if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
     UsageError('--json is for a, x, t, info and list');
   if withFile and (command <> cmReport) then UsageError('--with-file is for report');
+  if estimate and (command <> cmInfo) then UsageError('--estimate is for info (report estimates by itself)');
   if withFile and (inputs.Count = 0) then UsageError('--with-file copies the FILE of the report: give one');
   if runsGiven and (command <> cmBench) then UsageError('-r is for bench');
   if (command in [cmTest, cmInfo, cmReport, cmBench, cmSelftest]) and (force or dryRun or keepCorrupt) then
@@ -710,7 +714,8 @@ procedure InfoOne(const f: string);
 var d: TBytes; n, bug: TInfoNode; sl: TStringList;
 begin
   if not ReadWhole(f, d) then Exit;
-  n := DescribeFile(f, d, False, bandThreads, maxOutput);
+  if estimate then n := DescribeFile(f, d, False, bandThreads, maxOutput, idEstimate)
+  else n := DescribeFile(f, d, False, bandThreads, maxOutput, idDefault);
   bug := n.Find('internal_error');
   if bug <> nil then begin
     CurJob^.bug := True;

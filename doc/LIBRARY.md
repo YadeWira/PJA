@@ -161,7 +161,7 @@ and no exception or signal leaves the library: errors are return codes.
 | function | does |
 |---|---|
 | `pja_version()` | `"pja 0.9.0"` |
-| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG, JPEG-LS or (0.9.5, through the raw bytes' model for now) JPEG 2000 file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
+| `pja_compress(in, size, &out, &out_size, threads)` | a JPEG, JPEG-LS or (0.9.5: stream version 8, its codestreams modelled or as their pixels) JPEG 2000 file → a `.pja` (the command's format: size and BLAKE3 hash inside); `PJA_E_NOT_TAKEN` for a file PJA does not take |
 | `pja_decompress(in, size, &out, &out_size, max_size, threads)` | a `.pja` → the original, checked against its size and hash; `PJA_E_VERSION` for one a newer PJA wrote |
 | `pja_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
 | `pja_filter_decode(read, ctx, write, ctx, threads)` | its stream → the bytes |

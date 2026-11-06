@@ -147,6 +147,19 @@ if [ -e "$W/in/plasma.jp2" ]; then
   check "a JPEG 2000 file cut in half: taken, back byte for byte" bash -c "
     head -c 1800 '$W/in/plasma.jp2' > '$W/j2k/half.jp2' && '$PJA' a -q -f '$W/j2k/half.jp2' &&
     '$PJA' x -q '$W/j2k/half.pja' -o '$W/j2k/hx/' && cmp -s '$W/j2k/half.jp2' '$W/j2k/hx/half.jp2'"
+  # the .pja's header is 40 B with the extension: a stream no smaller than
+  # the file goes stored as is (612 B + 40), one smaller is kept even when
+  # the .pja comes out larger than the file (cprl_poc: 1206 B in a stream
+  # of 1190 B, 1230 B in all, where stored it would be 1246)
+  check "a JPEG 2000 file whose stream is no smaller: stored as is; one a little smaller: the stream" bash -c "
+    '$PJA' a -f '$W/in/plasma_cs.j2k' -o '$W/j2k/st.pja' | grep -q 'stored as is' &&
+    [ \$(wc -c < '$W/j2k/st.pja') -eq \$((\$(wc -c < '$W/in/plasma_cs.j2k') + 40)) ] &&
+    '$PJA' info '$W/j2k/st.pja' | grep -q 'stored: true' &&
+    '$PJA' a -f '$W/in/cprl_poc.j2k' -o '$W/j2k/sk.pja' > '$W/j2k/sk.txt' && ! grep -q 'stored as is' '$W/j2k/sk.txt' &&
+    [ \$(wc -c < '$W/j2k/sk.pja') -lt \$((\$(wc -c < '$W/in/cprl_poc.j2k') + 40)) ] &&
+    '$PJA' info '$W/j2k/sk.pja' | grep -q 'stored: false' &&
+    '$PJA' x -q '$W/j2k/st.pja' -o '$W/j2k/stx/' && cmp -s '$W/in/plasma_cs.j2k' '$W/j2k/stx/st.j2k' &&
+    '$PJA' x -q '$W/j2k/sk.pja' -o '$W/j2k/skx/' && cmp -s '$W/in/cprl_poc.j2k' '$W/j2k/skx/sk.j2k'"
   python3 -I -c "
 import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) // 2] ^= 8; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/bad.pja"
   check "one bit in a version 8 stream: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bad.pja' 2>/dev/null && [ ! -e '$W/j2k/bad.jp2' ]"
@@ -440,8 +453,8 @@ check "info on something else: PJA refuses it, rc 0" bash -c "'$PJA' info '$W/te
 check "info on a missing file: rc 1" test "$(rc "$PJA" info "$W/missing.jpg")" -eq 1
 if [ -e "$W/in/two_codestreams.jpx" ]; then
   mkdir -p "$W/j2ki"
-  check "info on a JPX: its boxes, two codestreams with SIZ and COD, each in mode 1, and that PJA takes it" bash -c "
-    o=\$('$PJA' info '$W/in/two_codestreams.jpx') && grep -q 'format: JPX' <<< \"\$o\" && grep -q 'ftyp at 12, 24 B: brand jpx' <<< \"\$o\" &&
+  check "info --estimate on a JPX: its boxes, two codestreams with SIZ and COD, each in mode 1, and that PJA takes it" bash -c "
+    o=\$('$PJA' info --estimate '$W/in/two_codestreams.jpx') && grep -q 'format: JPX' <<< \"\$o\" && grep -q 'ftyp at 12, 24 B: brand jpx' <<< \"\$o\" &&
     grep -q '  ihdr at 44, 22 B: 64x64, 3 component(s), 8 bits' <<< \"\$o\" && grep -q 'jp2c at 809, 2421 B: codestream 1' <<< \"\$o\" &&
     grep -q 'codestream_count: 2' <<< \"\$o\" && grep -q 'SIZ at 199, 47 B: 64x64, 3 component(s) of 8 8 8 bits' <<< \"\$o\" &&
     grep -q 'COD at .*5 level(s), 1 layer(s), LRCP, code-blocks 64x64 (none), 5/3 reversible' <<< \"\$o\" &&
@@ -455,9 +468,54 @@ if [ -e "$W/in/two_codestreams.jpx" ]; then
   # the code-block style's HT bit set in the COD (byte 63): HTJ2K, which PJA keeps as bytes
   python3 -I -c "
 import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[63] = 0x40; open(sys.argv[2], 'wb').write(d)" "$W/in/plasma_cs.j2k" "$W/j2ki/ht.j2k"
-  check "info on an HTJ2K codestream: ht true, mode 0 and the analysis's reason" bash -c "
-    o=\$('$PJA' info '$W/j2ki/ht.j2k') && grep -q 'code-blocks 64x64 (HT)' <<< \"\$o\" && grep -q '  ht: true' <<< \"\$o\" &&
+  check "info --estimate on an HTJ2K codestream: ht true, mode 0 and the analysis's reason" bash -c "
+    o=\$('$PJA' info --estimate '$W/j2ki/ht.j2k') && grep -q 'code-blocks 64x64 (HT)' <<< \"\$o\" && grep -q '  ht: true' <<< \"\$o\" &&
     grep -q 'pja: mode 0 (as bytes): HTJ2K' <<< \"\$o\" && grep -q 'no codestream modelled: all as bytes (mode 0)' <<< \"\$o\""
+  check "info on it (no --estimate): the headers' verdict, HTJ2K for both modes, nothing coded" bash -c "
+    o=\$('$PJA' info '$W/j2ki/ht.j2k') &&
+    grep -q 'pja: not estimated (pja info --estimate codes it): mode 2: not eligible: HTJ2K; mode 1: not analysable: HTJ2K' <<< \"\$o\" &&
+    grep -q 'pja: takes it: stream version 8 (JPEG 2000), or stored as is if that is no smaller; sizes not computed' <<< \"\$o\""
+  # the COD's wavelet byte (64) set to 9/7, and the QCD's style (byte 69) to scalar expounded: not reversible
+  python3 -I -c "
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[64] = 0; open(sys.argv[2], 'wb').write(d)
+d = bytearray(open(sys.argv[1], 'rb').read()); d[69] = (d[69] & 0xE0) | 2; open(sys.argv[3], 'wb').write(d)" \
+    "$W/in/plasma_cs.j2k" "$W/j2ki/w97.j2k" "$W/j2ki/quant.j2k"
+  check "info: mode 2 not eligible for the 9/7 wavelet or a quantization, mode 1 analysable, complete" bash -c "
+    o=\$('$PJA' info '$W/j2ki/w97.j2k') && grep -q '9/7 irreversible' <<< \"\$o\" &&
+    grep -q 'mode 2: not eligible: not reversible: the 9/7 wavelet; mode 1: analysable by its headers' <<< \"\$o\" &&
+    '$PJA' info '$W/j2ki/quant.j2k' | grep -q 'mode 2: not eligible: not reversible: quantized; mode 1: analysable' &&
+    '$PJA' info --json '$W/j2ki/w97.j2k' | head -1 | python3 -I -c '
+import json, sys; c = json.load(sys.stdin)[\"codestreams\"][0][\"pja\"]
+assert c[\"estimated\"] is False and c[\"complete\"] is True and c[\"mode2\"] == \"not eligible\" and c[\"mode1\"] == \"analysable\"
+assert \"stream_bytes\" not in c'"
+  check "info: a lossless codestream eligible by its headers; --estimate: mode 2 with its saving, mode 1's size" bash -c "
+    '$PJA' info '$W/in/bitonal.j2k' | grep -q 'mode 2: eligible by its headers (whether every code-block has all its passes only --estimate tells); mode 1: analysable by its headers' &&
+    o=\$('$PJA' info --estimate '$W/in/bitonal.j2k') &&
+    grep -q 'pja: mode 2 (pixels): 1448 B -> [0-9]* B, [0-9.]*% less; mode 1: [0-9]* B' <<< \"\$o\" &&
+    grep -q 'B of codestreams as pixels (mode 2)' <<< \"\$o\" &&
+    '$PJA' info --estimate --json '$W/in/bitonal.j2k' | head -1 | python3 -I -c '
+import json, sys; o = json.load(sys.stdin); c = o[\"codestreams\"][0][\"pja\"]
+assert c[\"mode\"] == 2 and c[\"stream_bytes\"] == c[\"mode2_stream_bytes\"] < c[\"mode1_stream_bytes\"]
+assert o[\"pja\"][\"j2k_pixels_bytes\"] == 1448 and o[\"pja\"][\"estimated\"] is True'"
+  check "info --estimate on a rate-truncated codestream: mode 1, and mode 2's reason" bash -c "
+    '$PJA' info --estimate '$W/in/cprl_poc.j2k' |
+    grep -q 'pja: mode 1 (modelled): 1206 B -> [0-9]* B, [0-9.]*% less; mode 2: rate-truncated: a code-block without all its passes'"
+  check "--estimate is for info: a and report refuse it, rc 2" bash -c "
+    [ \$('$PJA' a --estimate '$W/in/bitonal.j2k' -o '$W/j2ki/e.pja' > /dev/null 2>&1; echo \$?) -eq 2 ] &&
+    [ \$('$PJA' report --estimate '$W/in/bitonal.j2k' > /dev/null 2>&1; echo \$?) -eq 2 ] && [ ! -e '$W/j2ki/e.pja' ]"
+  check "info on a JPEG: --estimate changes nothing (its dry run is the default)" bash -c "
+    [ \"\$('$PJA' info '$W/in/prog_huffman.jpg')\" = \"\$('$PJA' info --estimate '$W/in/prog_huffman.jpg')\" ]"
+  check "report: the dry run of a JPEG 2000 file (each codestream's mode and size)" bash -c "
+    o=\$('$PJA' report '$W/in/bitonal.j2k') && grep -q 'pja: mode 2 (pixels): 1448 B -> ' <<< \"\$o\" &&
+    grep -q 'pja: takes it: stream version 8 (JPEG 2000), 1448 B -> ' <<< \"\$o\""
+  # past 64 MB a report does no dry run: the codestream and 64 MB of zeros after it
+  cp "$W/in/plasma_cs.j2k" "$W/j2ki/big.j2k"
+  truncate -s 65M "$W/j2ki/big.j2k"
+  check "report on a file above 64 MB: no dry run, a note, the headers' verdict" bash -c "
+    o=\$(timeout 60 '$PJA' report '$W/j2ki/big.j2k') &&
+    grep -q 'pja: not estimated: the file is larger than 64 MB (pja info --estimate does the dry run)' <<< \"\$o\" &&
+    grep -q 'pja: not estimated (pja info --estimate codes it): mode 2' <<< \"\$o\""
+  rm -f "$W/j2ki/big.j2k"
   check "  privacy: no XML, label or COM text, in info, --json and report, only their sizes" bash -c "
     for c in info 'info --json' report; do
       o=\$('$PJA' \$c '$W/in/two_codestreams.jpx') || exit 1
@@ -471,7 +529,7 @@ import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[63] = 0x40; open(sy
 assert all(x[\"format\"] != \"unknown\" and len(x[\"codestreams\"]) >= 1 for x in o[:-1])' &&
     '$PJA' info --json '$W/in/two_frames.mj2' | head -1 | python3 -I -c '
 import json, sys; o = json.load(sys.stdin); assert o[\"format\"] == \"Motion JPEG 2000\" and o[\"codestream_count\"] == 2
-assert all(c[\"pja\"][\"mode\"] in (0, 1) and c[\"siz\"][\"components\"] >= 1 for c in o[\"codestreams\"])
+assert all(c[\"pja\"][\"estimated\"] is False and c[\"siz\"][\"components\"] >= 1 for c in o[\"codestreams\"])
 assert o[\"pja\"][\"stream_version\"] == 8'"
   check "info on a JPEG 2000 file cut short and damaged: its problems, rc 0, no internal error" bash -c "
     head -c 1500 '$W/in/pcrl_tiles_plt_tlm.j2k' > '$W/j2ki/cut.j2k' && o=\$('$PJA' info '$W/j2ki/cut.j2k') &&
@@ -484,6 +542,11 @@ assert o[\"pja\"][\"stream_version\"] == 8'"
     '$PJA' a -f --stats -th 1 '$W/in/two_codestreams.jpx' -o '$W/j2ki/s.pja' |
     grep -q 'stats: read .*parse .*encode .*verify .*write .*; 1 thread(s), 2 band(s)' &&
     '$PJA' bench -r 1 '$W/in/two_codestreams.jpx' | grep -q '^  a .* MB/s  (.*encode .*verify'"
+  check "mode 2 in --stats (its own check is the verify) and in info on its .pja: pixels, one band" bash -c "
+    '$PJA' a -f --stats -th 1 '$W/in/bitonal.j2k' -o '$W/j2ki/b2.pja' |
+    grep -q 'stats: read .*parse .*encode .*verify .*write .*; 1 thread(s), 1 band(s)' &&
+    o=\$('$PJA' info '$W/j2ki/b2.pja') && grep -q 'at 0, 1448 B, mode 2 (pixels), stream [0-9]* B' <<< \"\$o\" &&
+    grep -q 'pixels: 1' <<< \"\$o\" && grep -q 'bands: 1' <<< \"\$o\" && grep -q 'pja: extracts it' <<< \"\$o\""
 fi
 
 echo "--- report"
