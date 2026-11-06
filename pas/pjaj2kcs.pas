@@ -190,6 +190,8 @@ function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
 
 implementation
 
+uses pjamodel;
+
 {$L pjaj2kt1.o}
 {$L pjaj2kmc.o}
 
@@ -216,6 +218,7 @@ type
 function pjaj2km_size(hb: LongInt): Int64; cdecl; external;
 function pjaj2km_init(mem: Pointer; size: Int64; hb, encoding: LongInt; put: TKmPut; pctx: Pointer;
   data: PByte; len: Int64): LongInt; cdecl; external;
+procedure pjaj2km_path(mem: Pointer; path: LongInt); cdecl; external;
 procedure pjaj2km_finish(mem: Pointer); cdecl; external;
 function pjaj2km_used(mem: Pointer): Int64; cdecl; external;
 procedure pjaj2km_tile(mem: Pointer; bands: Pointer; nb: LongInt; maps: PByte; mapsize: Int64); cdecl; external;
@@ -229,8 +232,13 @@ end;
 
 function KmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
   data: PByte; len: Int64): Boolean;
+var sse41, avx2: Boolean;
 begin
   Result := pjaj2km_init(mem, size, hb, Ord(encoding), put, pctx, data, len) = 0;
+  { the SIMD copy of the passes pjamodel's cpuid allows (the same bits) }
+  GetSimd(sse41, avx2);
+  if Result then
+    if avx2 then pjaj2km_path(mem, 2) else if sse41 then pjaj2km_path(mem, 1);
 end;
 
 procedure KmFinish(mem: Pointer);

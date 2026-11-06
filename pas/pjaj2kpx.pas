@@ -81,6 +81,10 @@ type
   half (it saves a fifth at best); 0 when not taken. }
 function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
   out why: string; out mode1Floor: Int64): TMode2Result; overload;
+{ the same, the stream decoded and compared only when decodeIt (pjacodec's
+  CompressJ2k checks the one it keeps) }
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; decodeIt: Boolean;
+  out stream: TBytes; out why: string; out mode1Floor: Int64): TMode2Result; overload;
 function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
   out why: string): TMode2Result; overload;
 { What the codestream's SIZ alone says of mode 2 (pjainfoj2k, without
@@ -119,7 +123,7 @@ function pjaj2kp_get(a: PLongInt; astride: Int64; W, H, depth: LongInt; p: PWord
 function pjaj2kp_model_size(hb: LongInt): Int64; cdecl; external;
 function pjaj2kp_code(mem: Pointer; size: Int64; hb, encoding: LongInt; put: TPxPut; pctx: Pointer;
   data: PByte; len: Int64; n: LongInt; w, h, depth: PLongInt; planes: PPWord; res: PLongInt;
-  rescap: Int64): LongInt; cdecl; external;
+  rescap: Int64; path: LongInt): LongInt; cdecl; external;
 function pjaj2kp_res_width: LongInt; cdecl; external;
 function pjaj2kp_cb_full(tmem: Pointer; w, h, orient, sty, P: LongInt; coef: PLongInt; cstride: Int64): LongInt;
   cdecl; external;
@@ -467,7 +471,7 @@ end;
 function CodePlanes(px: TPx; hb: Integer; colour: Boolean; encoding: Boolean; var o: TOut; const src: TBytes;
   srcOff, srcLen: Int64): Boolean;
 var mem: Pointer; size, maxw: Int64; w, h, dp: array of LongInt; pp: array of PWord; res: array of LongInt;
-  c: Integer;
+  c: Integer; sse41, avx2: Boolean; path: LongInt;
 begin
   size := pjaj2kp_model_size(hb);
   if size < 0 then Exit(False);
@@ -488,14 +492,17 @@ begin
   if colour and encoding and (pjaj2kp_planes_rct(pp[0], pp[1], pp[2], w[0] * h[0], px.siz.depth[0], 1) <> 0) then
     Exit(False);
   SetLength(res, pjaj2kp_res_width * maxw);
+  { the SIMD copy of the models pjamodel's cpuid allows (the same bits) }
+  GetSimd(sse41, avx2);
+  if avx2 then path := 2 else if sse41 then path := 1 else path := 0;
   mem := GetMem(size);
   try
     if encoding then
       Result := pjaj2kp_code(mem, size, hb, 1, @PutBytes, @o, nil, 0, px.siz.n, @w[0], @h[0], @dp[0], @pp[0],
-        @res[0], Length(res)) = 0
+        @res[0], Length(res), path) = 0
     else
       Result := pjaj2kp_code(mem, size, hb, 0, nil, nil, PByte(src) + srcOff, srcLen, px.siz.n, @w[0], @h[0],
-        @dp[0], @pp[0], @res[0], Length(res)) = 0;
+        @dp[0], @pp[0], @res[0], Length(res), path) = 0;
   finally
     FreeMem(mem);
   end;
@@ -610,8 +617,8 @@ begin
 end;
 {$endif}
 
-function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
-  out why: string; out mode1Floor: Int64): TMode2Result;
+function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; decodeIt: Boolean;
+  out stream: TBytes; out why: string; out mode1Floor: Int64): TMode2Result;
 var px: TPx; raw, blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; o: TOut; c, hb, nw: Integer;
   p: SizeInt; total: Int64; why2: string; colour: Boolean; was: TStage;
 begin
@@ -662,6 +669,7 @@ begin
   end;
   { checked: the stream alone gives the codestream back (--stats: the
     verify, pjastage) }
+  if not decodeIt then Exit(m2Ok);
   was := StageEnter(stVerify);
   if (J2kMode2DecodeWhy(stream, len, threads, back, why2) <> m2Ok) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
@@ -673,17 +681,23 @@ begin
   Result := m2Ok;
 end;
 
-function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
-  out why: string; out mode1Floor: Int64): TMode2Result;
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; decodeIt: Boolean;
+  out stream: TBytes; out why: string; out mode1Floor: Int64): TMode2Result;
 begin
   mode1Floor := 0;
   try
-    Result := EncodeIn(data, off, len, threads, limit, stream, why, mode1Floor);
+    Result := EncodeIn(data, off, len, threads, limit, decodeIt, stream, why, mode1Floor);
   except
     on E: EOutOfMemory do begin stream := nil; why := 'memory'; Result := m2Refused; end;
     on E: Exception do begin stream := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Refused; end;
   end;
   if Result <> m2Ok then mode1Floor := 0;
+end;
+
+function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode1Floor: Int64): TMode2Result;
+begin
+  Result := J2kMode2Encode(data, off, len, threads, limit, True, stream, why, mode1Floor);
 end;
 
 function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
@@ -694,11 +708,11 @@ begin
 end;
 
 { pjacodec's hook: only a stream shorter than the codestream }
-function Mode2Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+function Mode2Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
   out mode1Floor: Int64): Boolean;
 var why: string;
 begin
-  Result := J2kMode2Encode(data, off, len, threads, len, stream, why, mode1Floor) = m2Ok;
+  Result := J2kMode2Encode(data, off, len, threads, len, decodeIt, stream, why, mode1Floor) = m2Ok;
 end;
 
 function Mode2Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;

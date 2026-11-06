@@ -106,12 +106,14 @@ type
     set by pjaj2km's initialization: a program without it (the zpaq-std
     plugin) writes mode 0 only and reads mode 1 as FutureVersion. Enc gives
     the codestream data[off..off + len)'s stream, decoded and compared
-    already; Dec the codestream (len bytes) back. }
-  TJ2kMode1Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+    already when check (else the caller decodes it: CompressJ2k checks only
+    the stream it keeps); Dec the codestream (len bytes) back. }
+  TJ2kMode1Enc = function(const data: TBytes; off, len: Int64; threads: Integer; check: Boolean;
+    out stream: TBytes): Boolean;
   { mode 2's: a stream shorter than the codestream, and the least mode 1's
     could be (pjaj2kpx.J2kMode2Encode) }
-  TJ2kMode2Enc = function(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-    out mode1Floor: Int64): Boolean;
+  TJ2kMode2Enc = function(const data: TBytes; off, len: Int64; threads: Integer; check: Boolean;
+    out stream: TBytes; out mode1Floor: Int64): Boolean;
   TJ2kMode1Dec = function(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
 
 var
@@ -1816,8 +1818,36 @@ end;
   not tried twice). ceJpeg (NotJpeg) for a file that is not one or that is too large
   for the stream's 32-bit places. }
 function CompressJ2k(const data: TBytes; out stream: TBytes; verify: Boolean; threads: Integer): TCodecResult;
-var cs: TJ2kCodestreams; cd: TCoder; body, host, back, m2: TBytes; i: Integer; p, hp, op, n: SizeInt;
-  ms, known: TKnown; cut, pixels, total, floor1: Int64; md: array of Byte; was: TStage;
+var cs: TJ2kCodestreams; cd: TCoder; body, host, back, c1, c2: TBytes; i: Integer; p, hp, op, n: SizeInt;
+  ms, known: TKnown; cut, pixels, total, floor1: Int64; md: array of Byte; was: TStage; tried1: Boolean;
+
+  { mode m's stream s gives codestream i back (--stats: the verify) }
+  function Checked(m: Integer; const s: TBytes): Boolean;
+  var e: TCodecError; w: TStage;
+  begin
+    w := StageEnter(stVerify);
+    try
+      if m = J2K_PIXELS then e := J2kMode2Dec(s, cs[i].len, threads, back)
+      else e := J2kMode1Dec(s, cs[i].len, threads, back);
+      Result := (e = ceOk) and (Length(back) = cs[i].len) and
+        ((cs[i].len = 0) or CompareMem(@back[0], @data[cs[i].off], cs[i].len));
+    except
+      { as when the encoders decoded their own streams (mode 2's caught
+        everything, out of memory too): the stream is not kept }
+      on Exception do Result := False;
+    end;
+    back := nil;
+    StageEnter(w);
+  end;
+
+  { mode 1's stream, when it is shorter than the codestream }
+  procedure Try1;
+  begin
+    tried1 := True;
+    if not (Assigned(J2kMode1Enc) and J2kMode1Enc(data, cs[i].off, cs[i].len, threads, False, c1) and
+            (Length(c1) < cs[i].len)) then c1 := nil;
+  end;
+
 begin
   stream := nil;
   { --stats (pjastage): the box tree walked is the parse; each codestream
@@ -1832,18 +1862,26 @@ begin
   cut := 0; pixels := 0;
   for i := 0 to High(cs) do begin
     ms[i] := nil; known[i] := nil; md[i] := J2K_RAW;
-    floor1 := 0;
-    if Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, m2, floor1) and
-       (Length(m2) < cs[i].len) then begin
-      ms[i] := m2; md[i] := J2K_PIXELS;
+    { both modes coded first, and a stream decoded and compared only when it
+      is the one kept: the same choice as checking both (the smaller of
+      those that come back, mode 2 on a tie; mode 1 not coded when mode 2's
+      stream is below the least mode 1's could be, unless mode 2's does not
+      come back) for one decoding instead of two }
+    floor1 := 0; c1 := nil; c2 := nil; tried1 := False;
+    if not (Assigned(J2kMode2Enc) and J2kMode2Enc(data, cs[i].off, cs[i].len, threads, False, c2, floor1) and
+            (Length(c2) < cs[i].len)) then begin c2 := nil; floor1 := 0; end;
+    if (c2 = nil) or (Length(c2) > floor1) then Try1;
+    if (c1 <> nil) and ((c2 = nil) or (Length(c1) < Length(c2))) then begin
+      if Checked(J2K_MODEL, c1) then begin ms[i] := c1; md[i] := J2K_MODEL; end
+      else if (c2 <> nil) and Checked(J2K_PIXELS, c2) then begin ms[i] := c2; md[i] := J2K_PIXELS; end;
+    end else if c2 <> nil then begin
+      if Checked(J2K_PIXELS, c2) then begin ms[i] := c2; md[i] := J2K_PIXELS; end
+      else begin
+        if not tried1 then Try1;
+        if (c1 <> nil) and Checked(J2K_MODEL, c1) then begin ms[i] := c1; md[i] := J2K_MODEL; end;
+      end;
     end;
-    m2 := nil;
-    if Assigned(J2kMode1Enc) and ((md[i] = J2K_RAW) or (Length(ms[i]) > floor1)) and
-       J2kMode1Enc(data, cs[i].off, cs[i].len, threads, m2) and (Length(m2) < cs[i].len) and
-       ((md[i] = J2K_RAW) or (Length(m2) < Length(ms[i]))) then begin
-      ms[i] := m2; md[i] := J2K_MODEL;
-    end;
-    m2 := nil;
+    c1 := nil; c2 := nil;
     if md[i] <> J2K_RAW then begin
       known[i] := Copy(data, cs[i].off, cs[i].len);
       cut := cut + cs[i].len;

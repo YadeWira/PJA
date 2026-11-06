@@ -43,7 +43,11 @@ type
 { The codestream data[off..off + len) as mode 1's stream, decoded and
   compared before it is given. m1Refused (and why) when it is not taken. }
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string): TMode1Result;
+  out why: string): TMode1Result; overload;
+{ The same, the stream decoded and compared only when decodeIt (pjacodec's
+  CompressJ2k checks the one it keeps) }
+function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
+  out why: string): TMode1Result; overload;
 { A mode 1 stream back to its codestream, which must be len bytes. }
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
 
@@ -194,7 +198,7 @@ begin
   end;
 end;
 
-function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
   out why: string): TMode1Result;
 var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; k, s: Integer;
   p: SizeInt; total: Int64; was: TStage;
@@ -234,6 +238,7 @@ begin
   end;
   { checked: the stream alone gives the codestream back (--stats: the
     verify, pjastage) }
+  if not decodeIt then Exit(m1Ok);
   was := StageEnter(stVerify);
   if (J2kMode1Decode(stream, len, threads, back) <> m1Ok) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
@@ -245,10 +250,16 @@ begin
   Result := m1Ok;
 end;
 
-function Mode1Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string): TMode1Result;
+begin
+  Result := J2kMode1Encode(data, off, len, threads, True, stream, why);
+end;
+
+function Mode1Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes): Boolean;
 var why: string;
 begin
-  Result := J2kMode1Encode(data, off, len, threads, stream, why) = m1Ok;
+  Result := J2kMode1Encode(data, off, len, threads, decodeIt, stream, why) = m1Ok;
 end;
 
 function Mode1Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;

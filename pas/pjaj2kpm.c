@@ -303,14 +303,24 @@ static int lift(int64_t *v, int64_t n, int odd, int fwd)
     /* back, an odd sample would not come again: the forward doubles it */
     if (odd && !fwd && (v[0] & 1)) return -1;
     if (odd) v[0] = fwd ? 2 * v[0] : v[0] >> 1;
-  } else if (!fwd) {
-    for (i = odd; i < n; i += 2) v[i] -= (v[ext(i - 1, n)] + v[ext(i + 1, n)] + 2) >> 2;
-    for (i = !odd; i < n; i += 2) v[i] += (v[ext(i - 1, n)] + v[ext(i + 1, n)]) >> 1;
   } else {
-    for (i = !odd; i < n; i += 2) v[i] -= (v[ext(i - 1, n)] + v[ext(i + 1, n)]) >> 1;
-    for (i = odd; i < n; i += 2) v[i] += (v[ext(i - 1, n)] + v[ext(i + 1, n)] + 2) >> 2;
+    /* each step: the samples at the ends through the symmetric extension,
+       the others (i - 1 >= 0, i + 1 < n) without it */
+#define LIFT(start, OP, rnd, sh) do { \
+      for (i = (start); i < n && i < 1; i += 2) v[i] OP (v[ext(i - 1, n)] + v[ext(i + 1, n)] + (rnd)) >> (sh); \
+      for (; i + 1 < n; i += 2) v[i] OP (v[i - 1] + v[i + 1] + (rnd)) >> (sh); \
+      for (; i < n; i += 2) v[i] OP (v[ext(i - 1, n)] + v[ext(i + 1, n)] + (rnd)) >> (sh); \
+    } while (0)
+    if (!fwd) { LIFT(odd, -=, 2, 2); LIFT(!odd, +=, 0, 1); }
+    else { LIFT(!odd, -=, 0, 1); LIFT(odd, +=, 2, 2); }
+#undef LIFT
   }
-  for (i = 0; i < n; i++) if (v[i] > (1 << 30) || v[i] < -(1 << 30)) return -1;
+  {
+    /* the whole line within 30 bits (no early exit: the loop vectorizes) */
+    int bad = 0;
+    for (i = 0; i < n; i++) bad |= (v[i] > (1 << 30)) | (v[i] < -(1 << 30));
+    if (bad) return -1;
+  }
   return 0;
 }
 
@@ -443,7 +453,12 @@ PX_INLINE int ac_code(ac_t *a, uint32_t p16, int bit, const int dec)
   if (p16 < 1) p16 = 1; else if (p16 > 65535) p16 = 65535;
   xm = a->x1 + (uint32_t)(((uint64_t)(a->x2 - a->x1) * p16) >> 16);
   if (dec) bit = a->x <= xm;
-  if (bit) a->x2 = xm; else a->x1 = xm + 1;
+  {
+    /* without a branch on the bit (pjaj2kmc.c's) */
+    uint32_t mk = 0u - (uint32_t)bit;
+    a->x2 = (xm & mk) | (a->x2 & ~mk);
+    a->x1 = (a->x1 & mk) | ((xm + 1) & ~mk);
+  }
   while (((a->x1 ^ a->x2) & 0xFF000000u) == 0) {
     if (dec) {
       uint32_t b = a->p >= 0 && a->p < a->len ? a->d[a->p] : 0;
@@ -540,14 +555,16 @@ PX_INLINE int mix_code(pxm_t *m, const int dec, int bit, ctr_t **c, int n, wset_
 static void px_init(pxm_t *m, int hb)
 {
   int i, j, k; uint8_t *p = (uint8_t *)m; int64_t z;
-  for (z = 0; z < (int64_t)sizeof(pxm_t); z++) p[z] = 0;
+  /* 8 bytes at a time: pxm_t's size is a multiple of 8 (it holds int64_t),
+     and so is the large tables' (hsize is a multiple of 4: 6 hsize / 4 x 4) */
+  { uint64_t *q = (uint64_t *)p; for (z = 0; z < (int64_t)sizeof(pxm_t) / 8; z++) q[z] = 0; }
   for (i = 0; i < 1024; i++) { m->lr[i] = 6 + 31457 / (1024 + 64 * i); m->blr[i] = m->lr[i] * 3 / 2; }
   m->hbits = hb; m->hsize = (int64_t)1 << hb;
   m->b3 = (ctr_t *)(p + sizeof(pxm_t) + 64 - ((uintptr_t)(p + sizeof(pxm_t)) & 63));
   m->b4 = m->b3 + m->hsize;
   m->bx[0] = m->b4 + m->hsize; m->bx[1] = m->bx[0] + (m->hsize >> 2); m->bx[2] = m->bx[1] + (m->hsize >> 2);
-  { uint8_t *q = (uint8_t *)m->b3;
-    for (z = 0; z < (2 * m->hsize + 3 * (m->hsize >> 2)) * (int64_t)sizeof(ctr_t); z++) q[z] = 0; }
+  { uint64_t *q = (uint64_t *)m->b3;
+    for (z = 0; z < (2 * m->hsize + 3 * (m->hsize >> 2)) * (int64_t)sizeof(ctr_t) / 8; z++) q[z] = 0; }
   /* the weights start at 1/N of each input, the maps at the identity */
   for (i = 0; i < (1 << 8); i++) for (j = 0; j < 14; j++) m->bw[i].w[j] = 65536 / 7;
   for (k = 0; k < 3; k++) for (i = 0; i < 512; i++) for (j = 0; j < NIN; j++) m->mw[k][i].w[j] = 65536 / 5;
@@ -563,6 +580,47 @@ static void px_init(pxm_t *m, int hb)
 /* the pixel of row r (0: above the plane) at x; 0 outside the row */
 #define PXB(r, x) ((r) && (x) >= 0 && (x) < w ? (uint32_t)((r)[x] & 1) : 0u)
 
+/* one pixel of code_bitonal at x: FETCH(r, x) the pixel of row r at x, 0
+   outside it */
+#define BITONAL_PIXEL(FETCH) do { \
+      uint32_t t1, t2, t3, t4, h3, h4, sel; uint64_t k; ctr_t *c[7]; int bit; \
+      t1 = ((w2 >> 3) & 7) << 7 | ((w1 >> 4) & 0x1F) << 2 | (uint32_t)(w0 & 3); \
+      t2 = ((w2 >> 2) & 0x1F) << 11 | ((w1 >> 3) & 0x7F) << 4 | (uint32_t)(w0 & 0xF); \
+      t3 = ((w2 >> 1) & 0x7F) << 15 | ((w1 >> 2) & 0x1FF) << 6 | (uint32_t)(w0 & 0x3F); \
+      t4 = (w2 & 0x1FF) << 21 | (w1 & 0x1FFF) << 8 | (uint32_t)(w0 & 0xFF); \
+      h3 = m->hbits >= 22 ? t3 : ((t3 + 1) * 0x9E3779B1u) >> sh; \
+      h4 = ((t4 + 1) * 0x9E3779B1u + 0x632BE5ABu) >> sh; \
+      c[0] = &m->b1[t1]; c[1] = &m->b2[t2]; c[2] = &m->b3[h3 & hmask]; c[3] = &m->b4[h4 & hmask]; \
+      /* rows y - 4 (x - 4 .. x + 4) and y - 3 (x - 8 .. x + 8) with t3 */ \
+      k = (uint64_t)((w4 >> 4) & 0x1FF) << 40 ^ (uint64_t)w3 << 22 ^ t3; \
+      c[4] = &m->bx[0][(k * 0x9E3779B97F4A7C15ull) >> xs]; \
+      /* row y - 1 at x - 16 .. x + 16, row y at x - 16 .. x - 1, row y - 2 at x - 2 .. x + 2 */ \
+      k = ((wl >> 8) & 0x1FFFFFFFFull) << 16 ^ (w0 & 0xFFFF) ^ (uint64_t)((w2 >> 2) & 0x1F) << 50; \
+      c[5] = &m->bx[1][((k + 7) * 0xD6E8FEB86659FD93ull) >> xs]; \
+      /* t1, rows y - 6, y - 8 and y - 12 at x - 4, x and x + 4, row y - 1 at \
+         x - 20, x - 12, x + 12 and x + 20, row y at x - 12 and x - 20 */ \
+      k = t1; \
+      k = k << 3 | ((w6 >> 8) & 1) << 2 | ((w6 >> 4) & 1) << 1 | (w6 & 1); \
+      k = k << 3 | ((w8 >> 8) & 1) << 2 | ((w8 >> 4) & 1) << 1 | (w8 & 1); \
+      k = k << 3 | ((wc >> 8) & 1) << 2 | ((wc >> 4) & 1) << 1 | (wc & 1); \
+      k = k << 4 | ((wl >> 44) & 1) << 3 | ((wl >> 36) & 1) << 2 | ((wl >> 12) & 1) << 1 | ((wl >> 4) & 1); \
+      k = k << 2 | ((w0 >> 11) & 1) << 1 | ((w0 >> 19) & 1); \
+      c[6] = &m->bx[2][((k + 3) * 0x9E3779B97F4A7C15ull) >> xs]; \
+      sel = ((w2 >> 3) & 7) << 5 | ((w1 >> 5) & 7) << 2 | (uint32_t)(w0 & 3); \
+      bit = dec ? 0 : r0[x] & 1; \
+      bit = mix_code(m, dec, bit, c, 7, &m->bw[sel], m->bapm[t1], m->blr); \
+      if (dec) r0[x] = (uint16_t)bit; \
+      w2 = ((w2 << 1) | FETCH(r2, x + 5)) & 0x1FF; \
+      w1 = ((w1 << 1) | FETCH(r1, x + 7)) & 0x1FFF; \
+      w0 = ((w0 << 1) | (uint32_t)bit) & 0xFFFFFFFFull; \
+      w3 = ((w3 << 1) | FETCH(r3, x + 9)) & 0x1FFFF; \
+      w4 = ((w4 << 1) | FETCH(r4, x + 9)) & 0x1FFFF; \
+      w6 = ((w6 << 1) | FETCH(r6, x + 5)) & 0x1FF; \
+      w8 = ((w8 << 1) | FETCH(r8, x + 5)) & 0x1FF; \
+      wc = ((wc << 1) | FETCH(r12, x + 5)) & 0x1FF; \
+      wl = ((wl << 1) | FETCH(r1, x + 25)) & 0x1FFFFFFFFFFFFull; \
+    } while (0)
+
 /* a 1-bit plane, row by row: seven templates, mixed and mapped. Four of
    the rows y - 2 to y (10, 16, 22 and 30 pixels; the two large ones in
    tables of 2^hb counters, hashed when they do not fit) and three farther
@@ -570,7 +628,7 @@ static void px_init(pxm_t *m, int hb)
    22-pixel one; rows y - 1 and y, 16 pixels each way, with three of row y
    - 2; and the 10-pixel one with sparse pixels of rows y - 12, y - 8, y -
    6, y - 1 and y (a text line's period and the far left and right) */
-static int code_bitonal(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_t h)
+PX_INLINE int code_bitonal(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_t h)
 {
   int64_t x, y; uint32_t hmask = (uint32_t)m->hsize - 1; int sh = 32 - m->hbits, xs = 64 - (m->hbits - 2);
   for (y = 0; y < h; y++) {
@@ -589,48 +647,52 @@ static int code_bitonal(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_
     for (x = -6; x <= 6; x++) w1 = (w1 << 1) | PXB(r1, x);
     for (x = -8; x <= 8; x++) { w3 = (w3 << 1) | PXB(r3, x); w4 = (w4 << 1) | PXB(r4, x); }
     for (x = -24; x <= 24; x++) wl = (wl << 1) | PXB(r1, x);
-    for (x = 0; x < w; x++) {
-      uint32_t t1, t2, t3, t4, h3, h4, sel; uint64_t k; ctr_t *c[7]; int bit;
-      t1 = ((w2 >> 3) & 7) << 7 | ((w1 >> 4) & 0x1F) << 2 | (uint32_t)(w0 & 3);
-      t2 = ((w2 >> 2) & 0x1F) << 11 | ((w1 >> 3) & 0x7F) << 4 | (uint32_t)(w0 & 0xF);
-      t3 = ((w2 >> 1) & 0x7F) << 15 | ((w1 >> 2) & 0x1FF) << 6 | (uint32_t)(w0 & 0x3F);
-      t4 = (w2 & 0x1FF) << 21 | (w1 & 0x1FFF) << 8 | (uint32_t)(w0 & 0xFF);
-      h3 = m->hbits >= 22 ? t3 : ((t3 + 1) * 0x9E3779B1u) >> sh;
-      h4 = ((t4 + 1) * 0x9E3779B1u + 0x632BE5ABu) >> sh;
-      c[0] = &m->b1[t1]; c[1] = &m->b2[t2]; c[2] = &m->b3[h3 & hmask]; c[3] = &m->b4[h4 & hmask];
-      /* rows y - 4 (x - 4 .. x + 4) and y - 3 (x - 8 .. x + 8) with t3 */
-      k = (uint64_t)((w4 >> 4) & 0x1FF) << 40 ^ (uint64_t)w3 << 22 ^ t3;
-      c[4] = &m->bx[0][(k * 0x9E3779B97F4A7C15ull) >> xs];
-      /* row y - 1 at x - 16 .. x + 16, row y at x - 16 .. x - 1, row y - 2 at x - 2 .. x + 2 */
-      k = ((wl >> 8) & 0x1FFFFFFFFull) << 16 ^ (w0 & 0xFFFF) ^ (uint64_t)((w2 >> 2) & 0x1F) << 50;
-      c[5] = &m->bx[1][((k + 7) * 0xD6E8FEB86659FD93ull) >> xs];
-      /* t1, rows y - 6, y - 8 and y - 12 at x - 4, x and x + 4, row y - 1 at
-         x - 20, x - 12, x + 12 and x + 20, row y at x - 12 and x - 20 */
-      k = t1;
-      k = k << 3 | ((w6 >> 8) & 1) << 2 | ((w6 >> 4) & 1) << 1 | (w6 & 1);
-      k = k << 3 | ((w8 >> 8) & 1) << 2 | ((w8 >> 4) & 1) << 1 | (w8 & 1);
-      k = k << 3 | ((wc >> 8) & 1) << 2 | ((wc >> 4) & 1) << 1 | (wc & 1);
-      k = k << 4 | ((wl >> 44) & 1) << 3 | ((wl >> 36) & 1) << 2 | ((wl >> 12) & 1) << 1 | ((wl >> 4) & 1);
-      k = k << 2 | ((w0 >> 11) & 1) << 1 | ((w0 >> 19) & 1);
-      c[6] = &m->bx[2][((k + 3) * 0x9E3779B97F4A7C15ull) >> xs];
-      sel = ((w2 >> 3) & 7) << 5 | ((w1 >> 5) & 7) << 2 | (uint32_t)(w0 & 3);
-      bit = dec ? 0 : r0[x] & 1;
-      bit = mix_code(m, dec, bit, c, 7, &m->bw[sel], m->bapm[t1], m->blr);
-      if (dec) r0[x] = (uint16_t)bit;
-      w2 = ((w2 << 1) | PXB(r2, x + 5)) & 0x1FF;
-      w1 = ((w1 << 1) | PXB(r1, x + 7)) & 0x1FFF;
-      w0 = ((w0 << 1) | (uint32_t)bit) & 0xFFFFFFFFull;
-      w3 = ((w3 << 1) | PXB(r3, x + 9)) & 0x1FFFF;
-      w4 = ((w4 << 1) | PXB(r4, x + 9)) & 0x1FFFF;
-      w6 = ((w6 << 1) | PXB(r6, x + 5)) & 0x1FF;
-      w8 = ((w8 << 1) | PXB(r8, x + 5)) & 0x1FF;
-      wc = ((wc << 1) | PXB(r12, x + 5)) & 0x1FF;
-      wl = ((wl << 1) | PXB(r1, x + 25)) & 0x1FFFFFFFFFFFFull;
+    /* where every pixel the windows take in (up to x + 25) is in the row,
+       without the bounds: a row above the plane (none) reads row y, masked */
+    {
+      const uint16_t *q1 = r1 ? r1 : r0, *q2 = r2 ? r2 : r0, *q3 = r3 ? r3 : r0, *q4 = r4 ? r4 : r0;
+      const uint16_t *q6 = r6 ? r6 : r0, *q8 = r8 ? r8 : r0, *q12 = r12 ? r12 : r0;
+      uint16_t k1 = r1 ? 1 : 0, k2 = r2 ? 1 : 0, k3 = r3 ? 1 : 0, k4 = r4 ? 1 : 0, k6 = r6 ? 1 : 0, k8 = r8 ? 1 : 0;
+      uint16_t k12 = r12 ? 1 : 0;
+      int64_t xf = w - 25;
+#define PXF(r, xx) ((uint32_t)(Q_##r[xx] & K_##r))
+#define Q_r1 q1
+#define Q_r2 q2
+#define Q_r3 q3
+#define Q_r4 q4
+#define Q_r6 q6
+#define Q_r8 q8
+#define Q_r12 q12
+#define K_r1 k1
+#define K_r2 k2
+#define K_r3 k3
+#define K_r4 k4
+#define K_r6 k6
+#define K_r8 k8
+#define K_r12 k12
+      for (x = 0; x < xf; x++) BITONAL_PIXEL(PXF);
+#undef PXF
+      for (; x < w; x++) BITONAL_PIXEL(PXB);
     }
   }
   return 0;
 }
 #undef PXB
+#undef BITONAL_PIXEL
+#undef Q_r1
+#undef Q_r2
+#undef Q_r3
+#undef Q_r4
+#undef Q_r6
+#undef Q_r8
+#undef Q_r12
+#undef K_r1
+#undef K_r2
+#undef K_r3
+#undef K_r4
+#undef K_r6
+#undef K_r8
+#undef K_r12
 
 /* ------------------------------------------------------------------ 2 to 16 bits */
 static inline int med(int a, int b, int c)
@@ -674,7 +736,7 @@ static inline int flog(uint32_t v)
    and the row above */
 #define NP 8
 #define PX_RESW (2 + 2 * NP)
-static int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_t h, int depth, int cls,
+PX_INLINE int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_t h, int depth, int cls,
   int32_t *res, const uint16_t *po)
 {
   int maxv = (1 << depth) - 1, range = maxv + 1, half = range >> 1, t1, t2, t3, f;
@@ -850,9 +912,51 @@ static int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int64_
    bytes, pjaj2kp_model_size(hb)) holds the model; res, pjaj2kp_res_width()
    max(w) int32. 0, or -1 */
 int32_t pjaj2kp_res_width(void) { return PX_RESW; }
+
+/* the two models compiled once for each direction, and again on x86 for
+   SSE4.1 and for AVX2 (the mixer's lanes in pmulld, pminsd and pmaxsd),
+   taken by path (2 AVX2, 1 SSE4.1: pjamodel's cpuid, as pjaj2kmc.c's): the
+   same C, the same integer arithmetic, so the same bits on every path */
+#define PX_COPY(SUF, ATTR) \
+  ATTR static int bitonal_e##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h) { return code_bitonal(m, 0, pl, w, h); } \
+  ATTR static int bitonal_d##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h) { return code_bitonal(m, 1, pl, w, h); } \
+  ATTR static int samples_e##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h, int depth, int cls, int32_t *res, \
+    const uint16_t *po) { return code_samples(m, 0, pl, w, h, depth, cls, res, po); } \
+  ATTR static int samples_d##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h, int depth, int cls, int32_t *res, \
+    const uint16_t *po) { return code_samples(m, 1, pl, w, h, depth, cls, res, po); }
+PX_COPY(, )
+#if (defined(__x86_64__) || defined(__i386__)) && !defined(PJA_V7_PLAIN) && (defined(__GNUC__) || defined(__clang__))
+#define PX_SIMD 1
+PX_COPY(_sse41, __attribute__((target("sse4.1"))))
+PX_COPY(_avx2, __attribute__((target("avx2"))))
+#endif
+
+static int bitonal(pxm_t *m, int dec, int path, uint16_t *pl, int64_t w, int64_t h)
+{
+#ifdef PX_SIMD
+  if (path == 2) return dec ? bitonal_d_avx2(m, pl, w, h) : bitonal_e_avx2(m, pl, w, h);
+  if (path == 1) return dec ? bitonal_d_sse41(m, pl, w, h) : bitonal_e_sse41(m, pl, w, h);
+#endif
+  (void)path;
+  return dec ? bitonal_d(m, pl, w, h) : bitonal_e(m, pl, w, h);
+}
+
+static int samples(pxm_t *m, int dec, int path, uint16_t *pl, int64_t w, int64_t h, int depth, int cls, int32_t *res,
+  const uint16_t *po)
+{
+#ifdef PX_SIMD
+  if (path == 2)
+    return dec ? samples_d_avx2(m, pl, w, h, depth, cls, res, po) : samples_e_avx2(m, pl, w, h, depth, cls, res, po);
+  if (path == 1)
+    return dec ? samples_d_sse41(m, pl, w, h, depth, cls, res, po) : samples_e_sse41(m, pl, w, h, depth, cls, res, po);
+#endif
+  (void)path;
+  return dec ? samples_d(m, pl, w, h, depth, cls, res, po) : samples_e(m, pl, w, h, depth, cls, res, po);
+}
+
 int32_t pjaj2kp_code(void *mem, int64_t size, int32_t hb, int32_t encoding, px_put_t put, void *pctx,
   const uint8_t *data, int64_t len, int32_t n, const int32_t *w, const int32_t *h, const int32_t *depth,
-  uint16_t **planes, int32_t *res, int64_t rescap)
+  uint16_t **planes, int32_t *res, int64_t rescap, int32_t path)
 {
   pxm_t *m = mem; int i, k, dec = !encoding;
   if (size < pjaj2kp_model_size(hb) || n < 0) return -1;
@@ -869,13 +973,13 @@ int32_t pjaj2kp_code(void *mem, int64_t size, int32_t hb, int32_t encoding, px_p
     if (w[i] < 0 || h[i] < 0 || depth[i] < 1 || depth[i] > 16) return -1;
     if (sz == 0) continue;
     if (depth[i] == 1) {
-      if (code_bitonal(m, dec, planes[i], w[i], h[i])) return -1;
+      if (bitonal(m, dec, path, planes[i], w[i], h[i])) return -1;
       continue;
     }
     if (PX_RESW * (int64_t)w[i] > rescap) return -1;
     /* the previous component, when it has the same size */
     if (i > 0 && w[i - 1] == w[i] && h[i - 1] == h[i] && depth[i - 1] > 1) po = planes[i - 1];
-    if (code_samples(m, dec, planes[i], w[i], h[i], depth[i], i > 0, res, po)) return -1;
+    if (samples(m, dec, path, planes[i], w[i], h[i], depth[i], i > 0, res, po)) return -1;
   }
   if (!dec) {
     /* the last bytes out (x1, as pjaarith's Finish) */

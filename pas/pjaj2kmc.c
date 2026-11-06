@@ -78,6 +78,7 @@ typedef struct {
 typedef struct {
   ac_t ac;
   int32_t enc, err;
+  int32_t path;                    /* the copy of the passes that runs: 0 plain, 1 SSE4.1, 2 AVX2 */
   int64_t tsize[NC];             /* each context's table, in counters */
   ctr_t *t[NC];
   int32_t wa[NSA][NW] __attribute__((aligned(32))), wb[NSB][NW] __attribute__((aligned(32)));
@@ -110,7 +111,13 @@ KM_INLINE int ac_code(ac_t *a, uint32_t p16, int bit, const int dec)
   if (p16 < 1) p16 = 1; else if (p16 > 65535) p16 = 65535;
   xm = a->x1 + (uint32_t)(((uint64_t)(a->x2 - a->x1) * p16) >> 16);
   if (dec) bit = a->x <= xm;
-  if (bit) a->x2 = xm; else a->x1 = xm + 1;
+  {
+    /* without a branch on the bit (decoding, a guess the processor misses
+       about once an event) */
+    uint32_t mk = 0u - (uint32_t)bit;
+    a->x2 = (xm & mk) | (a->x2 & ~mk);
+    a->x1 = (a->x1 & mk) | ((xm + 1) & ~mk);
+  }
   while (((a->x1 ^ a->x2) & 0xFF000000u) == 0) {
     if (dec) {
       uint32_t b = a->p >= 0 && a->p < a->len ? a->d[a->p] : 0;
@@ -128,20 +135,32 @@ KM_INLINE int ac_code(ac_t *a, uint32_t p16, int bit, const int dec)
 /* ------------------------------------------------------------------ helpers */
 static inline int clampi(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static inline uint32_t ab(int32_t v) { return v < 0 ? 0u - (uint32_t)v : (uint32_t)v; }
-/* floor(log2 v), v > 0; two 32-bit scans, so that a 32-bit target calls
-   no library */
+/* floor(log2 v), v > 0; on a 32-bit target two 32-bit scans, so that it
+   calls no library */
+#if UINTPTR_MAX > 0xFFFFFFFFu
+static inline int ilog2_64(uint64_t v) { return 63 - __builtin_clzll(v); }
+#else
 static inline int ilog2_64(uint64_t v)
 {
   uint32_t hi = (uint32_t)(v >> 32);
   return hi ? 63 - __builtin_clz(hi) : 31 - __builtin_clz((uint32_t)v);
 }
-/* floor(2 log2 v), v > 0 */
+#endif
+/* floor(2 log2 v), 0 < v < 2^63: 2 l and the bit below the top one (none
+   for v = 1: (v << 1) >> 0 is even) */
 static inline int q2log(uint64_t v)
 {
   int l = ilog2_64(v);
-  return 2 * l + (l > 0 ? (int)((v >> (l - 1)) & 1) : 0);
+  return 2 * l + (int)(((v << 1) >> l) & 1);
 }
-static inline int sgn3(int32_t v) { return v > 0 ? 1 : v < 0 ? -1 : 0; }
+/* c ? a : b, without a branch */
+static inline int sel(int c, int a, int b) { return b ^ ((a ^ b) & -(c != 0)); }
+/* q2log(v) - d clamped to [lo, hi] for v > 0, z for v = 0 */
+static inline int qlog_or(uint64_t v, int d, int lo, int hi, int z)
+{
+  return sel(v != 0, clampi(q2log(v | (v == 0)) - d, lo, hi), z);
+}
+static inline int sgn3(int32_t v) { return (v > 0) - (v < 0); }
 static inline int32_t truncshr(int32_t x, int n) { return (x + ((x >> 31) & ((1 << n) - 1))) >> n; }
 
 /* a * b / c for a, b, c >= 0 (c > 0) whose product fits 63 bits, without
@@ -163,8 +182,9 @@ static int32_t muldiv(int64_t a, int64_t b, int64_t c)
 /* a map's byte: 0 for 0, else floor(2 log2 |v|) + 1, and 128 when v < 0 */
 static inline uint8_t mapcode(int32_t v)
 {
-  if (!v) return 0;
-  return (uint8_t)((q2log(ab(v)) + 1) | (v < 0 ? 128 : 0));
+  uint32_t u = ab(v);
+  int c = (q2log(u | (u == 0)) + 1) | (v < 0 ? 128 : 0);
+  return (uint8_t)(c & -(u != 0));
 }
 KM_INLINE int32_t mapval(const j2km_t *m, uint8_t c)
 {
@@ -289,8 +309,8 @@ KM_INLINE int event(j2km_t *m, const int dec, int bit, int k, int x, int y, int 
   uint64_t nd = (uint64_t)ab(R[i - rw - 1]) + ab(R[i - rw + 1]) + ab(R[i + rw - 1]) + ab(R[i + rw + 1]);
   uint64_t n2 = (uint64_t)ab(R[i - 2]) + ab(R[i + 2]) + ab(R[i - 2 * rw]) + ab(R[i + 2 * rw]);
   uint64_t nsum = 2 * n4 + nd;
-  int ln = nsum ? clampi(q2log(nsum) - 2 * B - 2, -6, 12) : -7;
-  int ln2 = n2 ? clampi(q2log(n2) - 2 * B, -4, 8) : -5;
+  int ln = qlog_or(nsum, 2 * B + 2, -6, 12, -7);
+  int ln2 = qlog_or(n2, 2 * B, -4, 8, -5);
   int lp = -9, lps = 0, lx = -9, lxs = 0, depth = clampi(m->mbc - B, 0, 20), orl = m->orient * 16 + m->lvl;
   int lnI, lpI, lxI, ext = 0, sa, sb, a0, a1, j;
   uint32_t v[NC], K = (uint32_t)k;
@@ -321,7 +341,7 @@ KM_INLINE int event(j2km_t *m, const int dec, int bit, int k, int x, int y, int 
   } else {
     uint32_t me = ab(R[i]);
     int r = clampi(ilog2_64(me ? me : 1) - B, 1, 8) - 1;
-    int rel = me ? clampi(q2log(nsum + 1) - q2log(me), -8, 8) : 0;
+    int rel = sel(me != 0, clampi(q2log(nsum + 1) - q2log(me | (me == 0)), -8, 8), 0);
     int mb = (int)((me >> (B > 0 ? B - 1 : 0)) & 7);
     ext = r;
     v[0] = sd * R_RC * R_R + r;
@@ -359,7 +379,7 @@ KM_INLINE int event_run(j2km_t *m, const int dec, int bit, int x, int y0, int B,
   int sa, sb, a0, a1, a2, pos;
   for (k = -2; k < 6; k++)
     for (dx = -2; dx <= 2; dx++) sw += ab(R[i0 + k * rw + dx]);
-  lw = sw ? clampi(q2log(sw) - 2 * B - 2, -6, 12) : -7;
+  lw = qlog_or(sw, 2 * B + 2, -6, 12, -7);
   for (k = 0; k < 4; k++) {
     if (m->haveP && m->PQ[pi + k * m->w] > -100) { j = clampi(m->PQ[pi + k * m->w] + m->pqoff - 2 * B, -8, 8); if (j > lp) lp = j; }
     if (m->haveX && m->XQ[pi + k * m->w] > -100) { j = clampi(m->XQ[pi + k * m->w] + m->xqoff - 2 * B, -8, 8); if (j > lx) lx = j; }
@@ -501,7 +521,8 @@ KM_INLINE void pass_cup(j2km_t *m, uint8_t *st, uint8_t *nb, int w, int h, const
           !(nb[i0] | nb[i0 + stride] | nb[i0 + 2 * stride] | (nb[i0 + 3 * stride] & (causal ? ~SOUTH : 0xFF)))) {
         /* run-length mode: whether any of the four becomes significant, and
            if one does, the significance of each up to the first that is */
-        int r = 4, k, rq = rl < 1 ? 0 : rl < 2 ? 1 : rl < 4 ? 2 : rl < 8 ? 3 : rl < 16 ? 4 : rl < 32 ? 5 : rl < 64 ? 6 : 7;
+        /* rl's bucket: 0, 1, 2-3, 4-7, .., 32-63, 64 and more */
+        int r = 4, k, rq = sel(rl, clampi(ilog2_64((uint64_t)(rl | 1)) + 1, 0, 7), 0);
         if (!dec) {
           if (take(m, 17)) { r = take(m, 18) << 1; r |= take(m, 18); }
           if (m->err) return;
@@ -570,6 +591,32 @@ KM_INLINE int64_t run_cb(j2km_t *m, int32_t w, int32_t h, int32_t sty, int32_t n
   return m->ns;
 }
 
+/* The passes compiled once for each direction, and again on x86 for SSE4.1
+   and for AVX2 (the mixer's 16 lanes in pmulld, pminsd and pmaxsd), taken
+   when pjamodel's cpuid says so (pjaj2km_path, from UseSse41 and UseAvx2,
+   which PJA_NOASM=1 and PJA_NOAVX2=1 turn off): the same C, the same
+   integer arithmetic, so the same bits on every path. */
+#define KM_COPY(SUF, ATTR) \
+  ATTR static int64_t run_cb_e##SUF(j2km_t *m, int32_t w, int32_t h, int32_t sty, int32_t np, int32_t top, \
+    int32_t *passend) { return run_cb(m, w, h, sty, np, top, passend, 0); } \
+  ATTR static int64_t run_cb_d##SUF(j2km_t *m, int32_t w, int32_t h, int32_t sty, int32_t np, int32_t top, \
+    int32_t *passend) { return run_cb(m, w, h, sty, np, top, passend, 1); }
+KM_COPY(, )
+#if (defined(__x86_64__) || defined(__i386__)) && !defined(PJA_V7_PLAIN) && (defined(__GNUC__) || defined(__clang__))
+#define KM_SIMD 1
+KM_COPY(_sse41, __attribute__((target("sse4.1"))))
+KM_COPY(_avx2, __attribute__((target("avx2"))))
+#endif
+
+static int64_t run_path(j2km_t *m, int32_t w, int32_t h, int32_t sty, int32_t np, int32_t top, int32_t *passend)
+{
+#ifdef KM_SIMD
+  if (m->path == 2) return m->enc ? run_cb_e_avx2(m, w, h, sty, np, top, passend) : run_cb_d_avx2(m, w, h, sty, np, top, passend);
+  if (m->path == 1) return m->enc ? run_cb_e_sse41(m, w, h, sty, np, top, passend) : run_cb_d_sse41(m, w, h, sty, np, top, passend);
+#endif
+  return m->enc ? run_cb_e(m, w, h, sty, np, top, passend) : run_cb_d(m, w, h, sty, np, top, passend);
+}
+
 /* ------------------------------------------------------------------ the API */
 static j2km_t *M(void *mem) { return (j2km_t *)(((uintptr_t)mem + 63) & ~(uintptr_t)63); }
 
@@ -615,6 +662,17 @@ int32_t pjaj2km_init(void *mem, int64_t size, int32_t hb, int32_t encoding, km_p
     }
   m->bands = 0; m->nb = 0; m->maps = 0; m->mapsize = 0; m->zcomp = -1;
   return 0;
+}
+
+/* the copy of the passes the model runs (after pjaj2km_init): 2 AVX2, 1
+   SSE4.1, else the plain one; a copy this object does not have is not taken */
+void pjaj2km_path(void *mem, int32_t path)
+{
+#ifdef KM_SIMD
+  M(mem)->path = path == 1 || path == 2 ? path : 0;
+#else
+  (void)path; M(mem)->path = 0;
+#endif
 }
 
 /* encoding: the last bytes out (x1, as pjaarith's Finish) */
@@ -685,14 +743,24 @@ int64_t pjaj2km_cb(void *mem, int32_t b, int32_t x0, int32_t y0, int32_t w, int3
         if (q) for (j = 0; j < (int64_t)m->bands[k].w * m->bands[k].h; j++) m->maps[m->bands[k].map + j] = 0;
       }
   }
-  /* the values around the code-block, as the maps have them */
-  for (y = -2; y < h + 2; y++)
-    for (x = -2; x < w + 2; x++) {
-      int64_t gx = (int64_t)x0 + x, gy = (int64_t)y0 + y;
-      int32_t v = 0;
-      if (map && (x < 0 || y < 0 || x >= w || y >= h) && gx >= 0 && gy >= 0 && gx < g->w && gy < g->h)
-        v = mapval(m, map[gy * g->w + gx]);
-      RI(x, y) = v;
+  /* the values around the code-block, as the maps have them (the two
+     rows and columns around it inside the band; 0 elsewhere) */
+  {
+    int64_t k, nr = (int64_t)(h + 4) * m->rw;
+    for (k = 0; k < nr; k++) m->R[k] = 0;
+  }
+  if (map)
+    for (y = -2; y < h + 2; y++) {
+      int64_t gy = (int64_t)y0 + y;
+      const uint8_t *row;
+      int inner = y >= 0 && y < h;
+      if (gy < 0 || gy >= g->h) continue;
+      row = map + gy * g->w;
+      for (x = -2; x < w + 2; x++) {
+        int64_t gx = (int64_t)x0 + x;
+        if (inner && x == 0) { x = w - 1; continue; }
+        if (gx >= 0 && gx < g->w) RI(x, y) = mapval(m, row[gx]);
+      }
     }
   /* the parent and the other components */
   pmap = map ? band_map(m, g->parent) : 0;
@@ -704,18 +772,32 @@ int64_t pjaj2km_cb(void *mem, int32_t b, int32_t x0, int32_t y0, int32_t w, int3
     for (x = 0; x < w; x++) m->colA[x] = muldiv((int64_t)x0 + x, pg->w, g->w);
     for (y = 0; y < h; y++) m->rowA[y] = muldiv((int64_t)y0 + y, pg->h, g->h);
     m->pqoff = -2 * pg->mb + 2 * g->mb - 4;
-    for (y = 0; y < h; y++)
-      for (x = 0; x < w; x++) {
-        int32_t px = m->colA[x], py = m->rowA[y], pw = pg->w, ph = pg->h;
-        int32_t pv = mapval(m, pmap[(int64_t)py * pw + px]);
-        uint64_t s = 2 * (uint64_t)ab(pv);
-        s += ab(mapval(m, pmap[(int64_t)py * pw + (px > 0 ? px - 1 : px)]));
-        s += ab(mapval(m, pmap[(int64_t)py * pw + (px + 1 < pw ? px + 1 : px)]));
-        s += ab(mapval(m, pmap[(int64_t)(py > 0 ? py - 1 : py) * pw + px]));
-        s += ab(mapval(m, pmap[(int64_t)(py + 1 < ph ? py + 1 : py) * pw + px]));
-        m->PS[y * w + x] = (int8_t)sgn3(pv);
-        m->PQ[y * w + x] = (int16_t)(s ? q2log(s) : -100);
+    /* a parent coefficient serves the coefficients it maps to (about four):
+       a row or a column that maps where the one before it did is a copy */
+    for (y = 0; y < h; y++) {
+      int16_t *pq = m->PQ + y * w; int8_t *ps = m->PS + y * w;
+      int32_t py = m->rowA[y], pw = pg->w, ph = pg->h;
+      const uint8_t *r0, *ru, *rd;
+      if (y > 0 && py == m->rowA[y - 1]) {
+        for (x = 0; x < w; x++) { pq[x] = pq[x - w]; ps[x] = ps[x - w]; }
+        continue;
       }
+      r0 = pmap + (int64_t)py * pw; ru = pmap + (int64_t)(py > 0 ? py - 1 : py) * pw;
+      rd = pmap + (int64_t)(py + 1 < ph ? py + 1 : py) * pw;
+      for (x = 0; x < w; x++) {
+        int32_t px = m->colA[x], pv;
+        uint64_t s;
+        if (x > 0 && px == m->colA[x - 1]) { pq[x] = pq[x - 1]; ps[x] = ps[x - 1]; continue; }
+        pv = mapval(m, r0[px]);
+        s = 2 * (uint64_t)ab(pv);
+        s += ab(mapval(m, r0[px > 0 ? px - 1 : px]));
+        s += ab(mapval(m, r0[px + 1 < pw ? px + 1 : px]));
+        s += ab(mapval(m, ru[px]));
+        s += ab(mapval(m, rd[px]));
+        ps[x] = (int8_t)sgn3(pv);
+        pq[x] = (int16_t)sel(s != 0, q2log(s | (s == 0)), -100);
+      }
+    }
   }
   if (xm0) {
     const j2kmband_t *g0 = &m->bands[g->cross0], *g1 = xm1 ? &m->bands[g->cross1] : 0;
@@ -732,11 +814,10 @@ int64_t pjaj2km_cb(void *mem, int32_t b, int32_t x0, int32_t y0, int32_t w, int3
         uint64_t s = 2 * (uint64_t)ab(v0);
         if (g1) s += 2 * (uint64_t)ab(mapval(m, xm1[(int64_t)m->rowC[y] * g1->w + m->colC[x]]));
         m->XS[y * w + x] = (int8_t)sgn3(v0);
-        m->XQ[y * w + x] = (int16_t)(s ? q2log(s) : -100);
+        m->XQ[y * w + x] = (int16_t)sel(s != 0, q2log(s | (s == 0)), -100);
       }
   }
-  if (m->enc) r = run_cb(m, w, h, sty, npasses, g->mb - zbp, passend, 0);
-  else r = run_cb(m, w, h, sty, npasses, g->mb - zbp, passend, 1);
+  r = run_path(m, w, h, sty, npasses, g->mb - zbp, passend);
   if (r >= 0 && m->enc && r != n) r = -5;
   /* the code-block's values into its band's map */
   if (r >= 0 && map) {
