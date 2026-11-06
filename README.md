@@ -231,7 +231,13 @@ pages, maps, solar and satellite images, DICOM; 150 MB) the codestreams come out
 **8.5% smaller**, 17% on the book pages; on 30 files from seven encoders,
 11.8%. It is slower than for JPEG (about 0.1 to 0.25 MB/s to compress and
 0.2 to 0.5 MB/s to extract on one thread; a large tiled codestream uses
-several). HTJ2K and Part 2 codestreams are kept as bytes. The 7-Zip
+several). Since 0.9.6 **HTJ2K** codestreams too (`.jph`, `.jhc`, DICOM
+frames): each HT code-block's segments are decoded and written again
+exactly as their encoder ended them (OpenJPH, Grok, OpenHTJ2K, Kakadu), its
+values through a model, or a lossless codestream's pixels through the
+pixel models: **11% smaller** on 716 real HTJ2K codestreams (460 MB of
+cinema frames, DICOM and photos), 27% on lossless and lossy photos.
+Part 2 codestreams are kept as bytes. The 7-Zip
 plugin and the zpaq-std codecs leave JPEG 2000 files as they are, for now
 ([details](doc/CODEC.md)).
 

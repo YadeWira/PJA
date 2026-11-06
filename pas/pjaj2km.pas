@@ -50,6 +50,15 @@ function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; d
   out why: string): TMode1Result; overload;
 { A mode 1 stream back to its codestream, which must be len bytes. }
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
+{ Mode 3 (doc/CODEC.md, "JPEG 2000, stage F"): an HTJ2K codestream, its
+  code-blocks' values (pjaj2kht.c) through mode 3's model (pjaj2khm.c);
+  the stream's layout is mode 1's. st gets the analysis's counts. Every
+  other codestream is refused. }
+function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; var st: TJ2kStats): TMode1Result; overload;
+function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
+  out why: string; var st: TJ2kStats): TMode1Result; overload;
+function J2kMode3Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
 
 implementation
 
@@ -64,6 +73,7 @@ type
   PSliceOut = ^TSliceOut;
   TSlices = class
     encoding: Boolean;
+    ht: Boolean;                     { mode 3's model (pjaj2khm.c), not mode 1's }
     mems: array of Pointer;          { one model a worker, made when it first asks }
     memSize: Int64;
     { encoding: each slice's bytes }
@@ -75,7 +85,7 @@ type
     srcOff, srcLen: array of Int64;
     asked: array[0..J2K_MAX_SLICES - 1] of Boolean;
     nAsked: LongInt;
-    constructor Create(encode: Boolean; threads: Integer);
+    constructor Create(encode, isHt: Boolean; threads: Integer);
     destructor Destroy; override;
     function Slice(k, hb, worker: Integer): Pointer;
     procedure SliceEnd(k, worker: Integer);
@@ -90,12 +100,12 @@ begin
   s.outN[k] := s.outN[k] + n;
 end;
 
-constructor TSlices.Create(encode: Boolean; threads: Integer);
+constructor TSlices.Create(encode, isHt: Boolean; threads: Integer);
 var k: Integer;
 begin
   inherited Create;
-  encoding := encode;
-  memSize := KmSize(KM_HBMAX);
+  encoding := encode; ht := isHt;
+  if ht then memSize := HmSize(KM_HBMAX) else memSize := KmSize(KM_HBMAX);
   if threads < 1 then threads := 1;
   SetLength(mems, threads);
   for k := 0 to J2K_MAX_SLICES - 1 do begin ctx[k].owner := Self; ctx[k].k := k; end;
@@ -122,6 +132,13 @@ begin
     InterLockedIncrement(nAsked);
   end;
   if mems[worker] = nil then mems[worker] := GetMem(memSize);
+  if ht then begin
+    if encoding then begin
+      outN[k] := 0;
+      if not HmInit(mems[worker], memSize, hb, True, @PutBytes, @ctx[k], nil, 0) then Exit;
+    end else
+      if not HmInit(mems[worker], memSize, hb, False, nil, nil, PByte(src) + srcOff[k], srcLen[k]) then Exit;
+  end else
   if encoding then begin
     outN[k] := 0;
     if not KmInit(mems[worker], memSize, hb, True, @PutBytes, @ctx[k], nil, 0) then Exit;
@@ -132,7 +149,8 @@ end;
 
 procedure TSlices.SliceEnd(k, worker: Integer);
 begin
-  if encoding and (worker >= 0) and (worker <= High(mems)) and (mems[worker] <> nil) then KmFinish(mems[worker]);
+  if encoding and (worker >= 0) and (worker <= High(mems)) and (mems[worker] <> nil) then
+    if ht then HmFinish(mems[worker]) else KmFinish(mems[worker]);
 end;
 
 procedure PutU32(var b: TBytes; var p: SizeInt; v: Cardinal);
@@ -153,7 +171,7 @@ begin
   Result := Cardinal(h[0]) or (Cardinal(h[1]) shl 8) or (Cardinal(h[2]) shl 16) or (Cardinal(h[3]) shl 24);
 end;
 
-function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
+function DecodeWith(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes; ht: Boolean): TMode1Result;
 var s, k: Integer; p, side, total, bound: Int64; cd: TCoder; blob: TBytes; sl: TSlices; lk: TJ2kModelLink;
   why: string;
 begin
@@ -172,7 +190,7 @@ begin
   p := 9 + 4 * s;
   side := GetU32(stream, p); p := p + 4;
   if side > Length(stream) - p then Exit(m1Bad);
-  sl := TSlices.Create(False, threads);
+  sl := TSlices.Create(False, ht, threads);
   try
     SetLength(sl.srcOff, s); SetLength(sl.srcLen, s);
     total := p + side;
@@ -187,7 +205,7 @@ begin
     cd.InitDecoder(Copy(stream, p, side), 0);
     if not CodeRaw(cd, blob, bound) then Exit(m1Bad);
     lk := Default(TJ2kModelLink);
-    lk.kind := kmDecode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads;
+    lk.kind := kmDecode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads; lk.ht := ht;
     if not J2kRebuildWith(blob, lk, cs, why) then begin cs := nil; Exit(m1Bad); end;
     if (sl.nAsked <> s) or (Length(cs) <> len) or (Check(cs, 0, len) <> GetU32(stream, 1)) then begin
       cs := nil; Exit(m1Bad);
@@ -198,17 +216,27 @@ begin
   end;
 end;
 
-function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
-  out why: string): TMode1Result;
-var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; k, s: Integer;
+function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
+begin
+  Result := DecodeWith(stream, len, threads, cs, False);
+end;
+
+function J2kMode3Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
+begin
+  Result := DecodeWith(stream, len, threads, cs, True);
+end;
+
+{ mode 1's stream, or mode 3's when ht; decoded and compared when decodeIt }
+function EncodeWith(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
+  out why: string; ht: Boolean; var st: TJ2kStats): TMode1Result;
+var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; cd: TCoder; k, s: Integer;
   p: SizeInt; total: Int64; was: TStage;
 begin
   stream := nil; why := '';
-  sl := TSlices.Create(True, threads);
+  sl := TSlices.Create(True, ht, threads);
   try
     lk := Default(TJ2kModelLink);
-    lk.kind := kmEncode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads;
-    st := Default(TJ2kStats);
+    lk.kind := kmEncode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads; lk.ht := ht;
     if not J2kAnalyzeWith(data, off, len, lk, blob, why, st) then Exit(m1Refused);
     if Length(blob) > J2kSideBound(len) then begin why := 'side information too large'; Exit(m1Refused); end;
     s := sl.nAsked;
@@ -240,7 +268,7 @@ begin
     verify, pjastage) }
   if not decodeIt then Exit(m1Ok);
   was := StageEnter(stVerify);
-  if (J2kMode1Decode(stream, len, threads, back) <> m1Ok) or (Length(back) <> len) or
+  if (DecodeWith(stream, len, threads, back, ht) <> m1Ok) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
     StageEnter(was);
     stream := nil; why := 'verify';
@@ -256,10 +284,47 @@ begin
   Result := J2kMode1Encode(data, off, len, threads, True, stream, why);
 end;
 
+function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
+  out why: string): TMode1Result;
+var st: TJ2kStats;
+begin
+  st := Default(TJ2kStats);
+  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, False, st);
+end;
+
+function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; var st: TJ2kStats): TMode1Result;
+begin
+  Result := J2kMode3Encode(data, off, len, threads, True, stream, why, st);
+end;
+
+function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
+  out why: string; var st: TJ2kStats): TMode1Result;
+begin
+  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, True, st);
+end;
+
 function Mode1Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes): Boolean;
 var why: string;
 begin
   Result := J2kMode1Encode(data, off, len, threads, decodeIt, stream, why) = m1Ok;
+end;
+
+function Mode3Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes): Boolean;
+var why: string; st: TJ2kStats;
+begin
+  st := Default(TJ2kStats);
+  Result := J2kMode3Encode(data, off, len, threads, decodeIt, stream, why, st) = m1Ok;
+end;
+
+function Mode3Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
+begin
+  case J2kMode3Decode(stream, len, threads, cs) of
+    m1Ok: Result := ceOk;
+    m1Future: Result := ceFutureVersion;
+    m1TooLarge: Result := ceTooLarge;
+    else Result := ceBadStream;
+  end;
 end;
 
 function Mode1Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
@@ -275,4 +340,6 @@ end;
 initialization
   J2kMode1Enc := @Mode1Enc;
   J2kMode1Dec := @Mode1Dec;
+  J2kMode3Enc := @Mode3Enc;
+  J2kMode3Dec := @Mode3Dec;
 end.

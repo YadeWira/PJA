@@ -63,6 +63,11 @@ function J2kExtension(const data: TBytes): string;
 { A box that holds boxes, whose jp2c boxes the walk looks into (pjainfoj2k
   walks the same tree); t its type, 4 bytes big-endian }
 function J2kIsSuperbox(t: Cardinal): Boolean;
+{ Whether the codestream data[off..off + len) is an HTJ2K one (Part 15):
+  its main header has a CAP marker segment with Part 15's bit, or a COD or
+  COC whose code-block style has the HT bit (0x40). Its main header alone
+  is read (at most 1 MB of it). }
+function J2kIsHt(const data: TBytes; off, len: Int64): Boolean;
 
 threadvar
   { > 0: a codestream whose SIZ declares more samples (its image area times
@@ -96,6 +101,33 @@ end;
 function Be32(const d: TBytes; p: Int64): Cardinal;
 begin
   Result := (Cardinal(d[p]) shl 24) or (Cardinal(d[p + 1]) shl 16) or (Cardinal(d[p + 2]) shl 8) or d[p + 3];
+end;
+
+function J2kIsHt(const data: TBytes; off, len: Int64): Boolean;
+var p, e, L: Int64; m, nc: Integer;
+begin
+  Result := False;
+  if (off < 0) or (len < 4) or (off + len > Length(data)) then Exit;
+  e := off + len; if e > off + (1 shl 20) then e := off + (1 shl 20);
+  if (data[off] <> $FF) or (data[off + 1] <> $4F) then Exit;
+  p := off + 2; nc := 0;
+  while p + 4 <= e do begin
+    if data[p] <> $FF then Exit;
+    m := Be16(data, p);
+    if (m = $FF90) or (m = $FF93) or (m = $FFD9) then Exit;
+    if (m >= $FF30) and (m <= $FF3F) then begin p := p + 2; Continue; end;
+    L := Be16(data, p + 2);
+    if (L < 2) or (p + 2 + L > e) then Exit;
+    case m of
+      $FF51: if L >= 38 then nc := Be16(data, p + 38);
+      $FF50: if (L >= 6) and (Be32(data, p + 4) and (1 shl 17) <> 0) then Exit(True);
+      $FF52: if (L >= 12) and (data[p + 12] and $40 <> 0) then Exit(True);
+      $FF53: if nc < 257 then begin
+               if (L >= 9) and (data[p + 9] and $40 <> 0) then Exit(True);
+             end else if (L >= 10) and (data[p + 10] and $40 <> 0) then Exit(True);
+    end;
+    p := p + 2 + L;
+  end;
 end;
 
 function J2kKind(const data: TBytes): TJ2kKind;

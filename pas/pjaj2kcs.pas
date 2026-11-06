@@ -71,6 +71,13 @@ type
     rule: array[0..15] of Int64;      { segments by how they end }
     brule: array[0..3] of Int64;      { layer boundaries: OpenJPEG's, shortest prefix, explicit, decoder's reach }
     side: array[0..J2K_NSTREAMS - 1] of Int64;
+    { HTJ2K (mode 3): code-blocks by their cleanup's rule (pjaj2kht.c's
+      0 to 15), their refinement's (0 to 4, 5 kept as bytes), kept as bytes
+      by why (HT_RAW_*); the code-blocks taken, the samples }
+    htCup: array[0..15] of Int64;
+    htRef: array[0..7] of Int64;
+    htRaw: array[0..7] of Int64;
+    htCbs, htSamples: Int64;
   end;
 
 type
@@ -119,6 +126,12 @@ type
     passend: PLongInt): Int64 of object;
   { the tile's code-blocks are all done: '' or why it cannot be taken }
   TJ2kPixEndFn = function(km: Pointer): string of object;
+  { mode 4 (HTJ2K's pixels): an HT code-block of the tile's band (x0, y0 in
+    the band, w x h), np passes whose cleanup is at plane B: encoding, its
+    values q (pjaj2kht.c's) to the coefficients, False when they are not
+    whole (a plane left out: a lossy code-block); decoding, its values made
+    from the coefficients into q, False when they cannot be }
+  TJ2kPixCbHtFn = function(km: Pointer; band, x0, y0, w, h, np, B: Integer; q: PLongInt): Boolean of object;
   TJ2kModelLink = record
     kind: TJ2kModelKind;
     { kmEncode, kmDecode: slice k starts on a worker (0 to threads - 1; a
@@ -130,7 +143,16 @@ type
     pixTile: TJ2kPixTileFn;  { kmPixEncode, kmPixDecode }
     pixCb: TJ2kPixCbFn;
     pixEnd: TJ2kPixEndFn;
+    { mode 3: an HTJ2K codestream, its code-blocks through pjaj2kht.c and
+      (kmEncode, kmDecode) pjaj2khm.c's model; every other codestream is
+      refused }
+    ht: Boolean;
+    pixCbHt: TJ2kPixCbHtFn;  { kmPixEncode, kmPixDecode with ht }
   end;
+
+const
+  { why an HT code-block is kept as its bytes (TJ2kStats.htRaw) }
+  HT_RAW_DECODE = 0; HT_RAW_RULE = 1; HT_RAW_SETS = 2; HT_RAW_PIECES = 3; HT_RAW_SIZE = 4;
 
 const
   { the maps of a tile (pjaj2kmc.c) take at most this many bytes; a tile
@@ -185,6 +207,12 @@ function KmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: 
   data: PByte; len: Int64): Boolean;
 procedure KmFinish(mem: Pointer);
 function KmUsed(mem: Pointer): Int64;
+{ mode 3's model (pjaj2khm.c), the same way }
+function HmSize(hb: Integer): Int64;
+function HmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): Boolean;
+procedure HmFinish(mem: Pointer);
+function HmUsed(mem: Pointer): Int64;
 function J2kStreamName(i: Integer): string;
 function J2kRuleName(i: Integer): string;
 { the SIZ marker segment (marker and length included) a blob's headers
@@ -197,6 +225,8 @@ uses pjamodel, pjathread, pjaj2k;
 
 {$L pjaj2kt1.o}
 {$L pjaj2kmc.o}
+{$L pjaj2kht.o}
+{$L pjaj2khm.o}
 
 function pjaj2k_t1_decode(w, h, orient, sty, npasses: LongInt; data: PByte; seglen, segpasses: PLongInt;
   nseg: LongInt; sym: PByte; symcap: Int64; passend: PLongInt; st: PByte): Int64; cdecl; external;
@@ -228,9 +258,46 @@ procedure pjaj2km_tile(mem: Pointer; bands: Pointer; nb: LongInt; maps: PByte; m
 function pjaj2km_cb(mem: Pointer; b, x0, y0, w, h, sty, npasses, zbp: LongInt; sym: PByte; n: Int64;
   passend: PLongInt): Int64; cdecl; external;
 
+{ HTJ2K's code-blocks (pjaj2kht.c) and mode 3's model (pjaj2khm.c) }
+function pjaj2kh_wsize: Int64; cdecl; external;
+function pjaj2kh_decode(mem: Pointer; w, h, causal, np: LongInt; data: PByte; L1, L2: LongInt; q: PLongInt): LongInt;
+  cdecl; external;
+function pjaj2kh_cup(mem: Pointer; w, h, np: LongInt; q: PLongInt; rule: LongInt; outp: PByte; cap: LongInt): LongInt;
+  cdecl; external;
+function pjaj2kh_ref(mem: Pointer; w, h, causal, np: LongInt; q: PLongInt; rule: LongInt; outp: PByte;
+  cap: LongInt): LongInt; cdecl; external;
+function pjaj2khm_size(hb: LongInt): Int64; cdecl; external;
+function pjaj2khm_init(mem: Pointer; size: Int64; hb, encoding: LongInt; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): LongInt; cdecl; external;
+procedure pjaj2khm_finish(mem: Pointer); cdecl; external;
+function pjaj2khm_used(mem: Pointer): Int64; cdecl; external;
+procedure pjaj2khm_tile(mem: Pointer; bands: Pointer; nb: LongInt; maps: PByte; mapsize: Int64); cdecl; external;
+function pjaj2khm_cb(mem: Pointer; b, x0, y0, w, h, causal, np, plane: LongInt; q: PLongInt): LongInt; cdecl; external;
+
 function KmSize(hb: Integer): Int64;
 begin
   Result := pjaj2km_size(hb);
+end;
+
+function HmSize(hb: Integer): Int64;
+begin
+  Result := pjaj2khm_size(hb);
+end;
+
+function HmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): Boolean;
+begin
+  Result := pjaj2khm_init(mem, size, hb, Ord(encoding), put, pctx, data, len) = 0;
+end;
+
+procedure HmFinish(mem: Pointer);
+begin
+  pjaj2khm_finish(mem);
+end;
+
+function HmUsed(mem: Pointer): Int64;
+begin
+  Result := pjaj2khm_used(mem);
 end;
 
 function KmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
@@ -582,6 +649,14 @@ type
     slFirst, slHb: array of LongInt;
     slPos: array of array[SH_LAY..SH_HDRX] of Int64;
     worker: Integer;
+    { HTJ2K (mode 3): its code-blocks are HT ones (lk.ht); each code-block's
+      state, 0 while its passes are placeholders, 1 once its cleanup is in;
+      whether the packet's entry has its cleanup; the code-blocks' scratch }
+    ht: Boolean;
+    cbHt: array of LongInt;
+    tFound: array of LongInt;
+    htws: TBytes; htq: array of LongInt; htout: TBytes;
+    htLastCup, htLastRef: Integer;
     procedure StartSlice(k, t: Integer);
     procedure EndSlice(k: Integer);
     constructor Create(analysing: Boolean);
@@ -616,6 +691,10 @@ type
     function Pieces(cb, np, k0: Integer): Integer;
     procedure Trees;
     procedure DoCb(cb: Integer);
+    function HtAsks(cb, np: Integer): Boolean;
+    function HtReadLens(cb, np, lb, nl: Integer; tpEnd: Int64; out found: Boolean): Integer;
+    procedure DeriveHt(cb, np: Integer; found: Boolean; pos: Int64; l0: Integer; useLens: Boolean);
+    procedure DoCbHt(cb: Integer);
     procedure BitOut(b: Integer);
     procedure BitsOut(v: QWord; n: Integer);
     procedure TTEncode(base, leaf, thr: Integer);
@@ -671,8 +750,14 @@ begin
   c.nl := d[p]; c.xcb := d[p + 1] + 2; c.ycb := d[p + 2] + 2; c.sty := d[p + 3]; c.tr := d[p + 4]; Inc(p, 5);
   if c.nl > MAXNL then Refuse('COD: levels');
   if (c.xcb > 10) or (c.ycb > 10) or (c.xcb + c.ycb > 12) then Refuse('COD: code-block size');
-  if c.sty and $40 <> 0 then Refuse('HTJ2K');
-  if c.sty and $80 <> 0 then Refuse('COD: code-block style');
+  if ht then begin
+    { mode 3: HT code-blocks only }
+    if c.sty and $40 = 0 then Refuse('HTJ2K: Part 1 code-blocks');
+    if c.sty and $80 <> 0 then Refuse('HTJ2K: mixed code-blocks');
+  end else begin
+    if c.sty and $40 <> 0 then Refuse('HTJ2K');
+    if c.sty and $80 <> 0 then Refuse('COD: code-block style');
+  end;
   c.prec := s and 1 <> 0;
   for i := 0 to c.nl do
     if c.prec then begin
@@ -729,7 +814,7 @@ begin
              nMainPoc := n;
            end;
     $FF50: { CAP: Part 15 (HTJ2K) }
-           if (e >= 8) and (Be32(it.raw, 4) and (1 shl 17) <> 0) then Refuse('HTJ2K');
+           if (e >= 8) and (Be32(it.raw, 4) and (1 shl 17) <> 0) and not ht then Refuse('HTJ2K');
     $FF60: begin
              hasPpm := True;
            end;
@@ -995,12 +1080,12 @@ begin
   SetLength(cbBand, ncb); SetLength(cbFirst, ncb); SetLength(cbZbp, ncb); SetLength(cbPasses, ncb);
   SetLength(cbNseg, ncb); SetLength(cbSegHave, ncb); SetLength(cbSegMax, ncb); SetLength(cbLb, ncb);
   SetLength(cbHead, ncb); SetLength(cbTail, ncb); SetLength(cbPb, ncb); SetLength(cbLeaf, ncb); SetLength(cbELb, ncb);
-  SetLength(cbDOff, ncb); SetLength(cbCur, ncb);
+  SetLength(cbDOff, ncb); SetLength(cbCur, ncb); SetLength(cbHt, ncb);
   for b := 0 to nb - 1 do
     for n := bands[b].base to bands[b].base + bands[b].ncbx * bands[b].ncby - 1 do cbBand[n] := b;
   for n := 0 to ncb - 1 do begin
     cbFirst[n] := -1; cbZbp[n] := 0; cbPasses[n] := 0; cbNseg[n] := 0; cbSegHave[n] := 0; cbSegMax[n] := 0;
-    cbLb[n] := 3; cbHead[n] := -1; cbTail[n] := -1; cbPb[n] := -1; cbLeaf[n] := 0;
+    cbLb[n] := 3; cbHead[n] := -1; cbTail[n] := -1; cbPb[n] := -1; cbLeaf[n] := 0; cbHt[n] := 0;
   end;
   SetLength(prNext, nprec); SetLength(prPb, nprec);
   for n := 0 to nprec - 1 do begin prNext[n] := 0; prPb[n] := -1; end;
@@ -1397,6 +1482,106 @@ begin
   end;
 end;
 
+{ ------------------------------------------------------------------ HTJ2K's segments }
+{ HT code-blocks' passes (Part 15, as Grok reads them): the first
+  contribution(s) hold placeholder passes and then the first cleanup pass,
+  all one segment whose last pass is the cleanup's; after it each cleanup
+  pass is a segment, and the SigProp and MagRef passes after it another.
+  While a code-block has had only placeholders, a contribution of np passes
+  holds its cleanup only if sp = np - (passes so far + np - 1) mod 3 >= 1
+  and its length (Lblock + log2 sp bits) is not 0; a length 0 is the
+  placeholders', Lblock + log2 np bits in all. Whether a contribution has
+  its cleanup, where the rule leaves it open (HtAsks), is in the side
+  information. }
+function TJ2k.HtAsks(cb, np: Integer): Boolean;
+begin
+  Result := (cbHt[cb] = 0) and (np - (cbPasses[cb] + np - 1) mod 3 >= 1);
+end;
+
+{ the lengths of cb's np new passes, read: into tNps[0..] (passes) and
+  tLens[nl..]; how many, -1 when they cannot be an HT code-block's }
+function TJ2k.HtReadLens(cb, np, lb, nl: Integer; tpEnd: Int64; out found: Boolean): Integer;
+var tot, sp, take, rem: Integer; L: QWord;
+  procedure Add(passes: Integer; len: QWord);
+  begin
+    if Result >= Length(tNps) then SetLength(tNps, 2 * Length(tNps) + 256);
+    if Length(tLens) < nl + Result + 1 then SetLength(tLens, 2 * (nl + Result + 1) + 256);
+    tNps[Result] := passes; tLens[nl + Result] := Int64(len); Inc(Result);
+  end;
+begin
+  Result := 0; found := False;
+  tot := cbPasses[cb]; rem := np;
+  if cbHt[cb] = 0 then begin
+    sp := np - (tot + np - 1) mod 3;
+    if sp >= 1 then L := BitsIn(lb + Flog2(sp)) else L := 0;
+    if (sp >= 1) and (L <> 0) then begin
+      found := True;
+      Add(sp, L); rem := np - sp; tot := tot + sp;
+    end else begin
+      { placeholders: a length 0 over all of them (Part 1 passes, of a mixed
+        code-block, are refused) }
+      if sp >= 1 then L := BitsIn(Flog2(np) - Flog2(sp)) else L := BitsIn(lb + Flog2(np));
+      if (L <> 0) or brBad then Exit(-1);
+      Add(np, 0);
+      Exit;
+    end;
+  end;
+  while rem > 0 do begin
+    if tot mod 3 = 0 then take := 1 else take := 3 - tot mod 3;
+    if take > rem then take := rem;
+    L := BitsIn(lb + Flog2(take));
+    if Int64(L) > tpEnd then Exit(-1);
+    Add(take, L);
+    rem := rem - take; tot := tot + take;
+  end;
+  if brBad then Result := -1;
+end;
+
+{ the pieces of cb's np new passes added to it, as HtReadLens reads them
+  (found: the contribution has the cleanup, when HtAsks) }
+procedure TJ2k.DeriveHt(cb, np: Integer; found: Boolean; pos: Int64; l0: Integer; useLens: Boolean);
+var k, take, sp, n: Integer;
+  procedure Piece(passes: Integer);
+  begin
+    if npc >= Length(pcSeg) then begin
+      n := 2 * npc + 64;
+      SetLength(pcSeg, n); SetLength(pcNp, n); SetLength(pcNext, n); SetLength(pcLen, n); SetLength(pcPos, n);
+    end;
+    pcSeg[npc] := cbNseg[cb] - 1; pcNp[npc] := passes; pcNext[npc] := -1;
+    if useLens then begin pcLen[npc] := tLens[l0 + k]; pcPos[npc] := pos; pos := pos + tLens[l0 + k]; end
+    else begin pcLen[npc] := 0; pcPos[npc] := 0; end;
+    if cbTail[cb] >= 0 then pcNext[cbTail[cb]] := npc else cbHead[cb] := npc;
+    cbTail[cb] := npc;
+    Inc(npc); Inc(k);
+    cbSegHave[cb] := cbSegHave[cb] + passes;
+    cbPasses[cb] := cbPasses[cb] + passes;
+  end;
+  procedure NewSeg(mx: Integer);
+  begin
+    Inc(cbNseg[cb]); cbSegHave[cb] := 0; cbSegMax[cb] := mx;
+  end;
+begin
+  k := 0;
+  if cbHt[cb] = 0 then begin
+    if cbNseg[cb] = 0 then NewSeg(MAXPASSES * 4);
+    sp := np - (cbPasses[cb] + np - 1) mod 3;
+    if (sp < 1) or not found then begin Piece(np); Exit; end;
+    Piece(sp);
+    cbSegMax[cb] := cbSegHave[cb]; cbHt[cb] := 1;
+    np := np - sp;
+  end;
+  while np > 0 do begin
+    if cbPasses[cb] mod 3 = 0 then begin NewSeg(1); take := 1; end
+    else begin
+      if (cbPasses[cb] mod 3 = 1) or (cbSegMax[cb] <> 2) or (cbSegHave[cb] >= 2) then NewSeg(2);
+      take := 3 - cbPasses[cb] mod 3;
+    end;
+    if take > np then take := np;
+    Piece(take);
+    np := np - take;
+  end;
+end;
+
 procedure TJ2k.AddIe(cb, flags, np, lbInc: Integer);
 var n: Integer;
 begin
@@ -1418,20 +1603,22 @@ end;
 { the passes' prediction: those left to code, at least 1 }
 function PassPred(j: TJ2k; cb: Integer): Int64;
 begin
+  { HT: one pass, the cleanup, as most encoders write them }
+  if j.ht then Exit(1);
   Result := Max64(1, 3 * Int64(j.bands[j.cbBand[cb]].mb - j.cbZbp[cb]) - 2 - j.cbPasses[cb]);
 end;
 
 { ------------------------------------------------------------------ analysis: one packet }
 function TJ2k.TryPacket(c, r, p, l: Integer; tpEnd: Int64): Boolean;
 var pos, hstart, body, tot: Int64; sop, eph, present, b, i, j, k, n, pb, cb, cw, ch, lg0, np, lbInc, lb, nt, nl,
-  nsop, pred: Integer; bg: TBandG;
+  nsop, pred: Integer; bg: TBandG; found: Boolean;
   procedure Room(m: Integer);
   var q: Integer;
   begin
     if m <= Length(tCb) then Exit;
     q := 2 * m + 64;
     SetLength(tCb, q); SetLength(tIncl, q); SetLength(tFirst, q); SetLength(tZbp, q); SetLength(tNp, q);
-    SetLength(tInc, q); SetLength(tL0, q); SetLength(tLn, q);
+    SetLength(tInc, q); SetLength(tL0, q); SetLength(tLn, q); SetLength(tFound, q);
   end;
 begin
   Result := False;
@@ -1488,11 +1675,17 @@ begin
             lb := lb + lbInc;
             if brBad or (lb > 32) or (cbPasses[cb] + np > 4 * MAXPASSES) then begin Undo(lg0); Exit; end;
             tNp[nt] := np; tInc[nt] := lbInc;
-            n := Pieces(cb, np, 0);
-            if Length(tLens) < nl + n then SetLength(tLens, 2 * (nl + n) + 256);
-            for k := 0 to n - 1 do begin
-              tLens[nl + k] := Int64(BitsIn(lb + Flog2(tNps[k])));
-              if tLens[nl + k] > tpEnd then begin Undo(lg0); Exit; end;
+            if ht then begin
+              n := HtReadLens(cb, np, lb, nl, tpEnd, found);
+              if n < 0 then begin Undo(lg0); Exit; end;
+              tFound[nt] := Ord(found);
+            end else begin
+              n := Pieces(cb, np, 0);
+              if Length(tLens) < nl + n then SetLength(tLens, 2 * (nl + n) + 256);
+              for k := 0 to n - 1 do begin
+                tLens[nl + k] := Int64(BitsIn(lb + Flog2(tNps[k])));
+                if tLens[nl + k] > tpEnd then begin Undo(lg0); Exit; end;
+              end;
             end;
             if brBad then begin Undo(lg0); Exit; end;
             tLn[nt] := n; nl := nl + n;
@@ -1540,7 +1733,10 @@ begin
     end;
     sw[SH_T2].S(PassPred(Self, cb) - tNp[i]);
     cbLb[cb] := cbLb[cb] + tInc[i];
-    Derive(cb, tNp[i], body, tL0[i], True);
+    if ht then begin
+      if HtAsks(cb, tNp[i]) then sw[SH_T2].Put(tFound[i]);
+      DeriveHt(cb, tNp[i], tFound[i] <> 0, body, tL0[i], True);
+    end else Derive(cb, tNp[i], body, tL0[i], True);
     iePcN[nie - 1] := npc - iePc0[nie - 1];
     for k := tL0[i] to tL0[i] + tLn[i] - 1 do body := body + tLens[k];
   end;
@@ -1569,7 +1765,7 @@ end;
 
 { ------------------------------------------------------------------ rebuild: one packet's side information }
 function TJ2k.EmitRebuild(c, r, p, l: Integer): Boolean;
-var flags, b, i, j, pb, cw, ch, cb, ex, pred, bb: Integer; bg: TBandG; zp, np: Int64;
+var flags, b, i, j, pb, cw, ch, cb, ex, pred, bb, fd: Integer; bg: TBandG; zp, np: Int64;
 begin
   if npk >= npkTarget then Exit(False);
   if npk >= Length(pkC) then begin
@@ -1608,7 +1804,12 @@ begin
           np := PassPred(Self, cb) - sr[SH_T2].SI(-1000, 1000);
           if (np < 1) or (np > 164) or (cbPasses[cb] + np > 4 * MAXPASSES) then Refuse('bad passes');
           ieNp[nie - 1] := np;
-          Derive(cb, np, 0, 0, False);
+          if ht then begin
+            fd := 1;
+            if HtAsks(cb, np) then fd := sr[SH_T2].Get;
+            if fd > 1 then Refuse('bad passes');
+            DeriveHt(cb, np, fd = 1, 0, 0, False);
+          end else Derive(cb, np, 0, 0, False);
           iePcN[nie - 1] := npc - iePc0[nie - 1];
         end;
     end;
@@ -1757,6 +1958,10 @@ begin
     if Length(kmBands) > 0 then lk.dump.WriteBuffer(kmBands[0], SizeOf(TKmBand) * Length(kmBands));
   end else
     if km = nil then Refuse('internal: no model')
+    else if ht then begin
+      if Length(kmBands) > 0 then pjaj2khm_tile(km, @kmBands[0], Length(kmBands), At(kmMaps, 0), kmMapSize)
+      else pjaj2khm_tile(km, nil, 0, nil, 0);
+    end
     else if Length(kmBands) > 0 then pjaj2km_tile(km, @kmBands[0], Length(kmBands), At(kmMaps, 0), kmMapSize)
     else pjaj2km_tile(km, nil, 0, nil, 0);
 end;
@@ -2182,6 +2387,202 @@ begin
   end;
 end;
 
+{ ------------------------------------------------------------------ HTJ2K's code-blocks (mode 3) }
+const
+  { the cleanup's rules tried (pjaj2kht.c), most likely first; the
+    refinement's }
+  HT_CUPS: array[0..9] of Integer = (0, 2, 3, 1, 4, 8, 10, 11, 9, 12);
+  HT_REFS = 5;            { 0 to 4; HT_REFS: kept as bytes }
+  { a code-block's byte in t1rule: kept as bytes, else the cleanup's rule
+    (its place in HT_CUPS) x 8 + the refinement's (0 without one) }
+  HT_T1R_RAW = 255;
+  HT_OUTCAP = 65536;      { a segment made again, at most }
+
+{ An HT code-block: its cleanup and refinement segments decoded into its
+  values (pjaj2kht.c), and the rules that write them again found; the
+  values to the model (or, without one, in the blob's last stream). Kept as
+  its bytes (t1rule 1, as DoCb's) when it has more than one HT set,
+  placeholder passes with bytes, a segment the layers cut, or does not come
+  back with a rule; its refinement alone kept as bytes when its rule is not
+  found. A code-block whose passes are all placeholders has no bytes and
+  nothing in t1rule. }
+procedure TJ2k.DoCbHt(cb: Integer);
+var bg: TBandG; w, h, sty, causal, nseg, k, pc, np, npm, s0, cup, ref, L1, L2, i, r, B: Integer;
+  x0, y0, x1, y1, gx, gy, tot, a: Int64; lens: array[0..1] of Int64; npieces: array[0..1] of Integer;
+  lastPc0: Integer; firstNz: Boolean;
+
+  procedure KeepBytes(reason: Integer);
+  var pc_: Integer;
+  begin
+    { mode 4 needs every code-block's values }
+    if lk.kind = kmPixEncode then Refuse('pixels: a code-block kept as bytes');
+    sw[SH_T1R].Put(HT_T1R_RAW);
+    Inc(st.cbRaw); Inc(st.htRaw[reason]);
+    pc_ := cbHead[cb];
+    while pc_ >= 0 do begin sw[SH_T1X].V(pcLen[pc_]); pc_ := pcNext[pc_]; end;
+    sw[SH_T1X].PutN(segdata, 0, tot);
+  end;
+
+begin
+  bg := bands[cbBand[cb]];
+  gx := (cb - bg.base) mod bg.ncbx; gy := (cb - bg.base) div bg.ncbx;
+  x0 := Max64(bg.x0, (bg.gx0 + gx) shl bg.cbw); x1 := Min64(bg.x1, (bg.gx0 + gx + 1) shl bg.cbw);
+  y0 := Max64(bg.y0, (bg.gy0 + gy) shl bg.cbh); y1 := Min64(bg.y1, (bg.gy0 + gy + 1) shl bg.cbh);
+  w := x1 - x0; h := y1 - y0;
+  sty := comps[bg.comp].sty; causal := Ord(sty and 8 <> 0);
+  if not an then cbDOff[cb] := cbData.n;
+  { only placeholders: no bytes }
+  if cbHt[cb] = 0 then begin
+    pc := cbHead[cb];
+    while pc >= 0 do begin
+      if an and (pcLen[pc] <> 0) then Refuse('internal: HT placeholders');
+      pcLen[pc] := 0; pc := pcNext[pc];
+    end;
+    Exit;
+  end;
+  { the segments: 0 the placeholders and the cleanup, 1 the refinement }
+  nseg := cbNseg[cb];
+  npieces[0] := 0; npieces[1] := 0; lens[0] := 0; lens[1] := 0;
+  s0 := 0; np := 0; tot := 0; lastPc0 := -1; firstNz := False;
+  pc := cbHead[cb];
+  while pc >= 0 do begin
+    if pcSeg[pc] = 0 then begin
+      s0 := s0 + pcNp[pc];
+      { a piece before the cleanup's with bytes }
+      if an and (lastPc0 >= 0) and (pcLen[lastPc0] <> 0) then firstNz := True;
+      lastPc0 := pc;
+    end else if pcSeg[pc] = 1 then np := np + pcNp[pc];
+    if pcSeg[pc] <= 1 then Inc(npieces[pcSeg[pc]]);
+    if an then begin
+      if pcLen[pc] > High(LongInt) - tot then Refuse('limits: segment');
+      if pcSeg[pc] <= 1 then lens[pcSeg[pc]] := lens[pcSeg[pc]] + pcLen[pc];
+      tot := tot + pcLen[pc];
+    end;
+    pc := pcNext[pc];
+  end;
+  if (s0 < 1) or ((s0 - 1) mod 3 <> 0) then Refuse('internal: HT passes');
+  np := np + 1;
+  { the cleanup's plane: the band's Mb - 1, less the zero bit-planes and the
+    placeholder sets }
+  B := bg.mb - 1 - cbZbp[cb] - (s0 - 1) div 3;
+  if an then begin
+    EnsureB(segdata, tot + 8);
+    a := 0; pc := cbHead[cb];
+    while pc >= 0 do begin
+      if pcLen[pc] > 0 then Move(cs[pcPos[pc]], segdata[a], pcLen[pc]);
+      a := a + pcLen[pc]; pc := pcNext[pc];
+    end;
+    Inc(st.cbs);
+    if nseg > 2 then begin KeepBytes(HT_RAW_SETS); Exit; end;
+    if firstNz or (npieces[1] > 1) then begin KeepBytes(HT_RAW_PIECES); Exit; end;
+    if (lens[0] > HT_OUTCAP) or (lens[1] > HT_OUTCAP) or (w > 1024) or (h > 1024) or (w * h > 4096) then begin
+      KeepBytes(HT_RAW_SIZE); Exit;
+    end;
+    L1 := lens[0]; L2 := lens[1];
+    if Length(htws) = 0 then SetLength(htws, pjaj2kh_wsize);
+    if Length(htq) < 4096 then SetLength(htq, 4096);
+    EnsureB(htout, HT_OUTCAP);
+    EnsureB(segdata, tot + 8);
+    if pjaj2kh_decode(@htws[0], w, h, causal, np, At(segdata, 0), L1, L2, @htq[0]) < 0 then begin
+      KeepBytes(HT_RAW_DECODE); Exit;
+    end;
+    { the cleanup's rule: the last one found first }
+    cup := -1;
+    for i := -1 to High(HT_CUPS) do begin
+      if i < 0 then r := htLastCup else r := HT_CUPS[i];
+      if (i >= 0) and (r = htLastCup) then Continue;
+      if (pjaj2kh_cup(@htws[0], w, h, np, @htq[0], r, @htout[0], HT_OUTCAP) = L1) and
+         CompareMem(@htout[0], @segdata[0], L1) then begin cup := r; Break; end;
+    end;
+    if cup < 0 then begin KeepBytes(HT_RAW_RULE); Exit; end;
+    htLastCup := cup;
+    ref := 0;
+    if np > 1 then begin
+      ref := HT_REFS;
+      for i := -1 to HT_REFS - 1 do begin
+        if i < 0 then r := htLastRef else r := i;
+        if (i >= 0) and (r = htLastRef) then Continue;
+        if (pjaj2kh_ref(@htws[0], w, h, causal, np, @htq[0], r, @htout[0], HT_OUTCAP) = L2) and
+           ((L2 = 0) or CompareMem(@htout[0], @segdata[L1], L2)) then begin ref := r; Break; end;
+      end;
+      if ref < HT_REFS then htLastRef := ref;
+    end;
+    i := 0;
+    while HT_CUPS[i] <> cup do Inc(i);
+    sw[SH_T1R].Put(i * 8 + ref);
+    Inc(st.htCup[cup]); Inc(st.htCbs); st.htSamples := st.htSamples + Int64(w) * h;
+    if np > 1 then begin
+      Inc(st.htRef[ref]);
+      if ref = HT_REFS then begin sw[SH_T1X].V(L2); sw[SH_T1X].PutN(segdata, L1, L2); end;
+    end;
+  end else begin
+    r := sr[SH_T1R].Get;
+    if r = HT_T1R_RAW then begin
+      tot := 0; pc := cbHead[cb];
+      while pc >= 0 do begin pcLen[pc] := sr[SH_T1X].VI(High(LongInt)); tot := tot + pcLen[pc]; pc := pcNext[pc]; end;
+      sr[SH_T1X].GetN(cbData, tot);
+      Exit;
+    end;
+    if (nseg > 2) or (npieces[1] > 1) or (w > 1024) or (h > 1024) or (w * h > 4096) then Refuse('bad HT code-block');
+    if (r shr 3 > High(HT_CUPS)) or (r and 7 > HT_REFS) or ((np = 1) and (r and 7 <> 0)) then Refuse('bad rule');
+    cup := HT_CUPS[r shr 3]; ref := r and 7;
+    if Length(htws) = 0 then SetLength(htws, pjaj2kh_wsize);
+    if Length(htq) < 4096 then SetLength(htq, 4096);
+    EnsureB(htout, HT_OUTCAP);
+  end;
+  { mode 4: the values to the coefficients and back; the cleanup's written
+    from them as they are }
+  if lk.kind in [kmPixEncode, kmPixDecode] then begin
+    if not Assigned(lk.pixCbHt) or (km = nil) then Refuse('internal: no pixels');
+    if not lk.pixCbHt(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, np, B, @htq[0]) then
+      if an then Refuse('pixels: a code-block''s values') else Refuse('values');
+    if an then Exit;
+    npm := np;
+  end else begin
+  { the values: with a refinement kept as bytes, the cleanup's alone }
+  npm := np;
+  if (np > 1) and (ref = HT_REFS) then npm := 1;
+  if an and (npm <> np) then
+    for i := 0 to w * h - 1 do
+      if htq[i] < 0 then htq[i] := -((-htq[i]) shr 1) else htq[i] := htq[i] shr 1;
+  case lk.kind of
+    kmEncode: if pjaj2khm_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, causal, npm, B, @htq[0]) <> 0 then
+        Refuse('model');
+    kmDecode: if pjaj2khm_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, causal, npm, B, @htq[0]) <> 0 then
+        Refuse('values');
+    kmNone:
+      if an then for i := 0 to w * h - 1 do sw[SH_DEC].S(htq[i])
+      else for i := 0 to w * h - 1 do htq[i] := sr[SH_DEC].SI(-(1 shl 30), 1 shl 30);
+    else Refuse('internal: HT link');
+  end;
+  if an then Exit;
+  end;
+  { the segments again }
+  L1 := pjaj2kh_cup(@htws[0], w, h, npm, @htq[0], cup, @htout[0], HT_OUTCAP);
+  if L1 < 2 then Refuse('HT cleanup');
+  cbData.PutN(htout, 0, L1);
+  L2 := 0;
+  if np > 1 then begin
+    if ref = HT_REFS then begin
+      L2 := sr[SH_T1X].VI(HT_OUTCAP);
+      sr[SH_T1X].GetN(cbData, L2);
+    end else begin
+      L2 := pjaj2kh_ref(@htws[0], w, h, causal, np, @htq[0], ref, @htout[0], HT_OUTCAP);
+      if L2 < 0 then Refuse('HT refinement');
+      cbData.PutN(htout, 0, L2);
+    end;
+  end;
+  { the pieces: the cleanup's segment in its last piece, the refinement's
+    in its one piece }
+  pc := cbHead[cb]; k := 0;
+  while pc >= 0 do begin
+    if pcSeg[pc] = 0 then begin if pc = lastPc0 then pcLen[pc] := L1 else pcLen[pc] := 0; end
+    else pcLen[pc] := L2;
+    pc := pcNext[pc]; Inc(k);
+  end;
+  Inc(st.cbs);
+end;
+
 { ------------------------------------------------------------------ packet headers written }
 { OpenJPEG's bio, writing }
 procedure TJ2k.BitOut(b: Integer);
@@ -2438,7 +2839,10 @@ begin
   st.packets := st.packets + npk;
   if not hdrPacked then Trees;
   cbData.n := 0;
-  for i := 0 to ncb - 1 do begin cbDOff[i] := 0; if cbPasses[i] > 0 then DoCb(i); end;
+  for i := 0 to ncb - 1 do begin
+    cbDOff[i] := 0;
+    if cbPasses[i] > 0 then if ht then DoCbHt(i) else DoCb(i);
+  end;
   if lk.kind in [kmPixEncode, kmPixDecode] then begin
     if km = nil then Refuse('internal: no pixels');
     tpw := lk.pixEnd(km);
@@ -2633,6 +3037,13 @@ end;
 
 const BLOB_VERSION = 1;
 
+{ the blob's version: 1 (stage B's, the decisions in it), 2 (with a model:
+  modes 1 and 2), and for HTJ2K 3 (the values in it) and 4 (mode 3) }
+function BlobVersion(const lk: TJ2kModelLink): Integer;
+begin
+  Result := BLOB_VERSION + Ord(lk.kind in [kmEncode, kmDecode, kmPixEncode, kmPixDecode]) + 2 * Ord(lk.ht);
+end;
+
 var sliceBytesSet: Int64 = J2K_SLICE_BYTES;
 
 procedure J2kTestSlicesFromEnv;
@@ -2734,6 +3145,9 @@ begin
   a.tails := a.tails + b.tails; a.tailBits := a.tailBits + b.tailBits; a.decisions := a.decisions + b.decisions;
   for i := 0 to 15 do a.rule[i] := a.rule[i] + b.rule[i];
   for i := 0 to 3 do a.brule[i] := a.brule[i] + b.brule[i];
+  for i := 0 to 15 do a.htCup[i] := a.htCup[i] + b.htCup[i];
+  for i := 0 to 7 do begin a.htRef[i] := a.htRef[i] + b.htRef[i]; a.htRaw[i] := a.htRaw[i] + b.htRaw[i]; end;
+  a.htCbs := a.htCbs + b.htCbs; a.htSamples := a.htSamples + b.htSamples;
 end;
 
 type
@@ -2764,7 +3178,7 @@ var j: TJ2k; t, e: Integer;
 begin
   j := TJ2k.Create(True);
   parts[k] := j;
-  j.lk := main.lk; j.worker := w;
+  j.lk := main.lk; j.worker := w; j.ht := main.ht;
   j.cs := data; j.csOff := off; j.csLen := len;
   j.nslice := main.nslice;
   j.Structure;
@@ -2781,7 +3195,7 @@ var j: TJ2k; i, t, e: Integer;
 begin
   j := TJ2k.Create(False);
   try
-    j.lk := main.lk; j.worker := w;
+    j.lk := main.lk; j.worker := w; j.ht := main.ht;
     for i := 0 to J2K_NSTREAMS - 1 do begin j.sr[i] := main.sr[i]; j.sr[i].p := 0; end;
     j.ReadHeaders;
     j.nslice := main.nslice; j.slFirst := main.slFirst; j.slHb := main.slHb; j.slPos := main.slPos;
@@ -2808,12 +3222,13 @@ var j: TJ2k; r: TBR; i, k, t, nu, s: Integer; n: array[0..J2K_NSTREAMS - 1] of I
 begin
   cs := nil; why := ''; Result := False;
   j := TJ2k.Create(False);
-  j.lk := lk;
+  j.lk := lk; j.ht := lk.ht;
   try
     try
       r := Default(TBR); r.d := blob; r.p := 0; r.e := Length(blob);
-      { version 2: the decisions coded apart, by slices (mode 1) }
-      if r.Get <> BLOB_VERSION + Ord(lk.kind in [kmDecode, kmPixDecode]) then Refuse('blob version');
+      { version 2: the decisions coded apart, by slices (mode 1); 3 and 4:
+        HTJ2K's (mode 3) }
+      if r.Get <> BlobVersion(lk) then Refuse('blob version');
       for i := 0 to J2K_NSTREAMS - 1 do n[i] := r.VI(High(LongInt));
       p := r.p;
       for i := 0 to J2K_NSTREAMS - 1 do begin
@@ -2869,7 +3284,9 @@ begin
           if used[i] <> 0 then j.Tile(i);
         for i := 0 to J2K_NSTREAMS - 1 do
           if (i <> SH_DEC) and (j.sr[i].p <> j.sr[i].e) then Refuse('side information left over: ' + J2kStreamName(i));
-        if (j.dbits + 7) div 8 <> j.sr[SH_DEC].e then Refuse('decisions left over');
+        if j.ht then begin
+          if j.sr[SH_DEC].p <> j.sr[SH_DEC].e then Refuse('values left over');
+        end else if (j.dbits + 7) div 8 <> j.sr[SH_DEC].e then Refuse('decisions left over');
       end;
       cs := j.Assemble;
       Result := True;
@@ -2883,7 +3300,9 @@ begin
 end;
 
 const NOLINK: TJ2kModelLink = (kind: kmNone; slice: nil; sliceEnd: nil; threads: 1; dump: nil; pixTile: nil;
-  pixCb: nil; pixEnd: nil);
+  pixCb: nil; pixEnd: nil; ht: False; pixCbHt: nil);
+  HTLINK: TJ2kModelLink = (kind: kmNone; slice: nil; sliceEnd: nil; threads: 1; dump: nil; pixTile: nil;
+  pixCb: nil; pixEnd: nil; ht: True; pixCbHt: nil);
 
 function J2kBlobSiz(const blob: TBytes; out siz: TBytes): Boolean;
 var r: TBR; i: Integer; n: array[0..J2K_NSTREAMS - 1] of Int64; v: Integer;
@@ -2892,7 +3311,7 @@ begin
   try
     r := Default(TBR); r.d := blob; r.p := 0; r.e := Length(blob);
     v := r.Get;
-    if (v < BLOB_VERSION) or (v > BLOB_VERSION + 1) then Exit;
+    if (v < BLOB_VERSION) or (v > BLOB_VERSION + 3) then Exit;
     for i := 0 to J2K_NSTREAMS - 1 do n[i] := r.VI(High(LongInt));
     if n[SH_HDR] > r.e - r.p then Exit;
     r.e := r.p + n[SH_HDR];
@@ -2936,7 +3355,7 @@ begin
   if (off < 0) or (len < 0) or (off + len > Length(data)) then begin reason := 'bad range'; Exit; end;
   if lk.kind in [kmDecode, kmPixDecode] then begin reason := 'bad link'; Exit; end;
   j := TJ2k.Create(True);
-  j.lk := lk;
+  j.lk := lk; j.ht := lk.ht;
   if lk.kind = kmDump then begin lk.dump.WriteByte(Ord('S')); lk.dump.WriteQWord(QWord(len)); end;
   try
     try
@@ -2993,7 +3412,7 @@ begin
       end;
       j.WriteHeaders;
       w := Default(TBW);
-      w.Put(BLOB_VERSION + Ord(lk.kind in [kmEncode, kmPixEncode]));
+      w.Put(BlobVersion(lk));
       for i := 0 to J2K_NSTREAMS - 1 do w.V(j.sw[i].n);
       for i := 0 to J2K_NSTREAMS - 1 do w.PutN(j.sw[i].d, 0, j.sw[i].n);
       if lk.kind in [kmEncode, kmPixEncode] then begin
@@ -3007,7 +3426,8 @@ begin
       blob := w.Bytes;
       { checked: the blob alone gives the codestream back (with a model, the
         caller decodes the whole stream instead) }
-      if (lk.kind = kmNone) and not J2kRebuildInto(blob, NOLINK, back, why) then Refuse('verify: ' + why);
+      if (lk.kind = kmNone) and not lk.ht and not J2kRebuildInto(blob, NOLINK, back, why) then Refuse('verify: ' + why);
+      if (lk.kind = kmNone) and lk.ht and not J2kRebuildInto(blob, HTLINK, back, why) then Refuse('verify: ' + why);
       if (lk.kind = kmNone) and ((Length(back) <> len) or ((len > 0) and not CompareMem(@back[0], @data[off], len))) then begin
         k := 0;
         while (k < Length(back)) and (k < len) and (back[k] = data[off + k]) do Inc(k);

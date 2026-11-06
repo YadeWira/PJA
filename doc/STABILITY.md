@@ -14,7 +14,7 @@ later, its own zpaq-std codecs): the releases before it refuse such a
 stream cleanly ("a newer version": `FutureVersion`, `PJA_E_VERSION` in
 the library since 0.9.5, `PJA_E_DATA` before), and read everything else as
 before. The JPEG 2000 family came that way, as stream version 8, in 0.9.5
-(below).
+(below), and HTJ2K as two more of its codestream modes in 0.9.6.
 
 ## The `.pja` file
 
@@ -32,7 +32,7 @@ plugins carry for each file:
 | 5 | the zpaq-std codecs pja, pjals, pjall, pjalsx and their z and o and 8 | a JPEG or JPEG-LS file; model byte 0 (full) and 1 (fast, read only) |
 | 6 | pjax, pjax7 and their z and 8 | a JPEG with JPEGs inside it (MPO, Ultra HDR), 12-bit JPEG, DNL |
 | 7 | the command and the library since 0.1.0; pja7, pjax7 and their z and 8 | the coefficients through version 7's model |
-| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled, 2 as its pixels), and the other bytes through the raw bytes' model |
+| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled, 2 as its pixels; since 0.9.6, for HTJ2K, 3 modelled and 4 as its pixels), and the other bytes through the raw bytes' model |
 
 With them, the parts stream, the PATCH stream (a repaired JPEG) and the
 bytes stream (a file stored as it is), as `doc/CODEC.md` describes them.
@@ -67,12 +67,32 @@ bits), bit for bit, and the bounds a reader holds a stream to before it
 decodes a plane (the planes at most 2^27 samples and max(2^20, 1,024 x
 the codestream's bytes), a plane of 2 bits or more at most 2^20 samples
 wide): a later release may only widen them.
-Later stages (HTJ2K, DICOM fragments) come only as new codestream mode
+Codestream modes 3 and 4 (HTJ2K, `doc/CODEC.md`, "JPEG 2000, stage F")
+are fixed from 0.9.6, and every release from 0.9.6 on reads what 0.9.6
+writes; 0.9.5 reads them as `FutureVersion`. For mode 3 (an HTJ2K
+codestream taken apart and its code-blocks' values through a
+context-mixing model) that is: its stream's layout, mode 1's (layout byte
+0, the check, the slices, the side information through the raw bytes'
+model within the same bound, each slice's values); the side information's
+blob (version 4: mode 1's ten streams and slice table, with Part 15's
+segments in the packet headers, whether a contribution holds its cleanup
+pass, and a code-block's byte in t1rule: kept as bytes, or its cleanup's
+and refinement's rules); the HT code-block's values as pjaj2kht.c decodes
+them, the rules that write its segments again (OpenJPH and Grok,
+OpenHTJ2K, Kakadu 8, the shortest MEL prefix; the VLC codeword by
+OpenJPH's choice or the fewest bits; SigProp and MagRef as written,
+without trailing zero bytes, or fused), and the model's events, contexts,
+counters, mixer, maps and constants, bit for bit. For mode 4 (a
+reversible HTJ2K codestream kept as its pixels): mode 2's stream layout,
+planes, transforms, pixel models and bounds, with mode 3's side
+information, and the HT code-blocks' values taken as the coefficients
+(cleanup at plane 0, or at plane 1 with both refinement passes).
+Later stages (DICOM fragments) come only as new codestream mode
 values, a new layout byte of mode 1 or 2 (layout 1 is reserved for a
 codestream coded with the model and the side information's context as
 the file's previous codestream left them: MJ2 frames, JPX; 0.9.5 reads it
-as `FutureVersion`), or new flags, in this same layout; nothing a release has written changes meaning. A program
-without mode 1's model or mode 2's (the zpaq-std plugin) reads that mode
+as `FutureVersion`; mode 3's and 4's layout bytes the same), or new flags, in this same layout; nothing a release has written changes meaning. A program
+without mode 1's or mode 3's model or the pixels' (modes 2 and 4: the zpaq-std plugin) reads that mode
 as `FutureVersion`; the encoder may change which codestreams it models
 and in which mode, which code-blocks it keeps as bytes, its slices and
 its tables' sizes, and when it uses the colour byte (all written in the

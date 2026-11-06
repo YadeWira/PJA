@@ -101,6 +101,21 @@ m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 4 "$PJA/tes
 m5=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 1 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
 [ -n "$m4" ] && [ "$m4" = "$m5" ] || { echo "FAIL: mode 2 in slices differs on 1 and 4 threads ($m4, $m5)"; exit 1; }
 echo "mode 2: streams $m1; in slices of 1500 bytes, the same on 1 and 4 threads ($m4)"
+echo "-- JPEG 2000 stage F: modes 3 and 4 (HTJ2K), the HT blobs, damaged codestreams, blobs and streams, slices on 1 and 4 threads"
+r=$("$OUT/test_j2kcs" -q -mode4 -fuzz 100 -m3fuzz 400 "$PJA/tests/j2k" | grep -E '^(ht|mode 3|mode 4|choice HT|fuzz)')
+echo "$r"
+echo "$r" | grep -q '^ht: 4 HT codestreams rebuilt from their blob, failed 0' || { echo "FAIL: the HT blobs"; exit 1; }
+echo "$r" | grep -q '^mode 3: 4 codestreams, .*refused 0, failed 0' || { echo "FAIL: mode 3"; exit 1; }
+echo "$r" | grep -q '^mode 3 fuzz: 1600 damaged streams' || { echo "FAIL: mode 3 fuzz"; exit 1; }
+echo "$r" | grep -q 'FAILED 0$' || { echo "FAIL: HT fuzz"; exit 1; }
+# the two lossless samples as their pixels, the two lossy ones not
+echo "$r" | grep -q '^mode 4: 2 codestreams, .*refused 2, failed 0' || { echo "FAIL: mode 4"; exit 1; }
+echo "$r" | grep -q '^mode 4 fuzz: 800 damaged streams' || { echo "FAIL: mode 4 fuzz"; exit 1; }
+echo "$r" | grep -q 'mode 0 0, mode 3 2, mode 4 2$' || { echo "FAIL: the HT choice"; exit 1; }
+m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -mode4 -threads 1 "$PJA/tests/j2k" | grep -E '^mode (3|4):' | sed 's/.*digest //' | tr '\n' ' ')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -mode4 -threads 4 "$PJA/tests/j2k" | grep -E '^mode (3|4):' | sed 's/.*digest //' | tr '\n' ' ')
+[ -n "$m1" ] && [ "$m1" = "$m4" ] || { echo "FAIL: modes 3 and 4 in slices differ on 1 and 4 threads ($m1, $m4)"; exit 1; }
+echo "modes 3 and 4 in slices of 1500 bytes: the same streams on 1 and 4 threads ($m1)"
 # small codestreams that ask much work: 65535 tiles of 2 tile-parts each
 # (1.9 MB, taken), 2 million code-blocks in 111 bytes (refused at the
 # entries' bound); seconds, not the minutes the work grew to before

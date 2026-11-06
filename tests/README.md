@@ -115,3 +115,21 @@ too.
 | file | made with |
 |---|---|
 | `lossless_com.j2k` | `grayscale.jpg` (64x64, `djpeg -pnm`) → `opj_compress -C "<text>"`: `lossless53.j2k` with a COM of 9,939 bytes of text, the text `PJA test comment line N: a long compressible COM marker segment.` for N = 0 to 149, joined by spaces |
+
+For stage F (stream version 8's modes 3 and 4: HTJ2K, Part 15), four
+codestreams made from `jpg/`'s images (`djpeg -pnm`, and ImageMagick's
+`convert -crop` for the parts of `color_plasma.jpg`) with OpenJPH 0.18.2's
+`ojph_compress` and Grok 20.4.9's `grk_compress` (HT mode, `-M 64`; Grok
+writes HT only to a `.jhc` or `.jph`), built from their sources. None is
+downloaded:
+
+| file | made with |
+|---|---|
+| `ht_ojph_lossless.j2c` | `grayscale.jpg` (64x64) → `ojph_compress -reversible true -block_size {32,32} -num_decomps 3`: lossless (mode 4 takes it) |
+| `ht_ojph_tiles.j2c` | `color_plasma.jpg` cut to its top-left 96x80 → `ojph_compress -qstep 0.02 -block_size {16,16} -num_decomps 3 -prog_order CPRL -precincts {16,16},{32,32} -tile_size {64,48} -tileparts R -tlm_marker true`: lossy, CPRL, precincts, four tiles, tile-parts and TLM |
+| `ht_grk_lossless.jph` | `baseline_color.jpg` (64x64) → `grk_compress -M 64 -b 16,16 -n 3`: lossless RGB with the colour transform, in a JPH file (mode 4) |
+| `ht_grk_sop_eph.jhc` | `color_plasma.jpg` cut to 48x40 at (100, 60) → `grk_compress -M 64 -I --qfactor 60 -b 16,16 -n 2 -p LRCP -S -E`: lossy (the 9/7 wavelet), LRCP, SOP and EPH markers |
+
+Both encoders write the cleanup pass alone; HT refinement passes (SigProp
+and MagRef, Kakadu's) are tested on the corpus (`doc/CODEC.md`, stage F),
+whose files are not in the repository.

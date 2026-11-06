@@ -3730,3 +3730,239 @@ taken out a few percent: the model waits more than it computes.
   other.
 - Mode 2's pixel models run on one thread (one arithmetic stream for all
   the planes).
+
+## JPEG 2000, stage F: HTJ2K (mode 3) (06/11/2026)
+
+HTJ2K (High-Throughput JPEG 2000, ITU-T T.814 | ISO/IEC 15444-15) keeps
+Part 1's codestream (markers, tiles, precincts, packets) and replaces its
+code-blocks' arithmetic-coded passes with a cleanup pass of fixed codes
+(MagSgn: raw magnitude and sign bits; MEL: an adaptive run-length coder;
+VLC: a table of codewords per quad of samples, and the UVLC of their
+exponents), optionally followed by two refinement passes (SigProp and
+MagRef, raw bits). Until 0.9.6 an HTJ2K codestream stayed in mode 0, its
+bytes through the raw bytes' model. Stage F gives stream version 8 two
+codestream modes for it: mode 3, the code-blocks' values through a
+context-mixing model, and mode 4, a lossless codestream's pixels through
+mode 2's pixel models. Both are fixed from 0.9.6 (doc/STABILITY.md).
+
+**Mode 3's stream** is mode 1's layout (layout byte 0, the check, the
+slices, the side information through the raw bytes' model within
+`J2kSideBound`, each slice's arithmetic stream; `pas/pjaj2km.pas`), with
+the values of `pjaj2khm.c`'s model where mode 1 has decisions, and
+stage C's blob as version 4 (version 3 without a model, the tests' only).
+
+**The codestream taken apart** (`pjaj2kcs.pas` with `lk.ht`): as Part 1's,
+but for the code-blocks' segments in the packet headers (Part 15, as Grok
+reads them): while a code-block has had only placeholder passes, a
+contribution of np passes holds its cleanup pass only if sp = np -
+(passes so far + np - 1) mod 3 is at least 1 and the length (Lblock + log2
+sp bits) is not 0; the placeholders and the cleanup are one segment (whose
+cleanup plane is the zero bit-planes' plus a third of the placeholders); a
+zero length spans all np passes (Lblock + log2 np bits). After the cleanup
+each cleanup pass is a segment, and the SigProp and MagRef passes after it
+another. Where the rule leaves it open, whether a contribution has the
+cleanup is a byte of the t2 stream. The pass count's prediction is 1.
+Refused (mode 0): a codestream with Part 1 code-blocks (a COD or COC
+without the HT bit), with mixed code-blocks (the style's bit 0x80: a
+code-block may be Part 1's or HT's, which only its lengths tell), Part 2's
+styles, and what stage B refuses otherwise.
+
+**A code-block** (`pas/pjaj2kht.c`, C in the `pjav7c.c` style): its
+cleanup segment and refinement segment decoded (MEL forward from the
+segment's length less Scup, VLC backward from the byte before the last,
+MagSgn forward; SigProp forward and MagRef backward in the refinement
+segment) into one value a sample: with the cleanup alone mu, its
+magnitude at the cleanup's plane; with refinement passes 2 mu + r (r the
+MagRef bit, 0 with SigProp alone) for a sample significant in the
+cleanup, 1 for one SigProp makes significant; with its sign. Then the
+segments are written again from the values, the way each encoder ends
+them, and compared with the codestream's:
+
+| rule | cleanup segment |
+|---|---|
+| 0 | OpenJPH and Grok: a MEL run under way ended with a 1; the last MEL and VLC bytes fused into one when their bits agree; MagSgn padded with 1s, a last FF dropped |
+| 1 | OpenHTJ2K: the same, with no MEL byte when the MEL has no bits left |
+| 2, 3 | Kakadu 8 (the research's rules 16 and 17): a terminal MEL codeword when a run is under way or the last codeword was a 1; the last MEL byte fused with the last VLC byte when the MEL's own bits agree with the VLC's and the MEL still decodes every event (3: the fused byte may be FF where the two share no bit) |
+| 4 | the shortest prefix of the MEL bytes (among the last four) that decodes every event, fused with the last VLC byte when shorter |
+| + 8 | the VLC codeword with the fewest bits where a quad's exponents leave a choice, not OpenJPH's (the most implicit bits, the last one) |
+
+The refinement segment: SigProp's bytes then MagRef's in memory order,
+each as written or without its trailing zero bytes (rules 0 to 3), or
+the last SigProp byte and the first MagRef byte ORed into one (rule 4).
+The analysis tries the rule of the last code-block first. A code-block
+whose cleanup comes back with no rule is kept as its bytes (t1rule 255,
+as stage B's), and so is one with more than one HT set, a placeholder
+piece with bytes, or a refinement segment cut by the layers; one whose
+refinement alone does not come back keeps that segment as bytes (t1x),
+and the model codes its cleanup's values only. Its t1rule byte is the
+cleanup's rule (its place in the list tried) x 8 + the refinement's (5:
+as bytes). The research's exactness (gap3, 2026-11-05: OpenJPH 0.18.2's
+decoder instrumented) is reproduced by PJA's own decoder: the same
+samples on every code-block of its logs, and the cleanup back with one of
+the rules on all of them but one (OpenJPH's conformance streams 496,006
+of 496,006, the research's own OpenJPH and Grok streams 250,171 of
+250,171, Grok's 309 of 309, OpenHTJ2K's 1,531 of 1,532, Kakadu 8.0.5's
+462,499 of 462,499 with rules 0, 2 and 3 between them), the refinement on
+61,588 of Kakadu's 61,941.
+
+**The model** (`pas/pjaj2khm.c`): `pjaj2kmc.c`'s counters (two per
+context, one slowing to 1/256.5 and one at 1/8), its three sets of mixer
+weights and three adaptive probability maps, and pjaarith's coder, with
+its own events. A code-block's samples in raster order: whether the
+cleanup's magnitude is 0; its bit length, as "more than k" for k = 1, 2,
+..; the two bits under the top one through the mixer and the others with a
+counter each (by the length and the place); its sign; then, with
+refinement passes, each sample SigProp visits (the rule of pjaj2kht.c: an
+insignificant sample with a significant neighbour, none below the stripe
+in the causal mode) whether it becomes significant and its sign, and each
+sample significant in the cleanup its MagRef bit. The contexts: the
+magnitudes around the sample in the code-block's unit (2^B, 2^(B - 1) with
+refinement passes), weighted (2 x the left and upper ones, the diagonals,
+half of the two away), the left and upper ones alone, the largest, how
+many of the four are significant and the pattern of seven; the parent
+band's and the first two components' (pjaj2kmc.c's maps, one byte a
+sample, a value as floor(2 log2) of its magnitude in the band's half
+units); the depth under the band's Mb, the orientation and level, the
+component; for a sign, the signs around it, the parent's and the other
+component's. What the bits go to, on the tuning set (17 codestreams,
+20 MB): the zero flags 10%, the lengths 26%, the two top mantissa bits 17%
+(0.95 bit each), the lower ones 36% (1.00 bit each: they are noise), the
+signs 12% (0.90 bit each). Mixing the third mantissa bit too, and a
+context of the length against the neighbours' (2k - their log), changed
+nothing.
+
+**Mode 4, the pixels** (`pas/pjaj2kpx.pas`, beside mode 2): mode 2's
+stream layout, planes, transforms, pixel models and bounds, with mode 3's
+side information. A code-block's values are its coefficients when they are
+whole: the cleanup at plane 0 (OpenJPH's and Grok's lossless code-blocks),
+or at plane 1 with SigProp and MagRef (Kakadu's); any other code-block (a
+plane left out, a lossy one) and any code-block kept as its bytes, and the
+codestream is not taken. Back, the forward transforms give each
+code-block's coefficients, which are its values, written again with its
+rules. **Choice** (`pjacodec.CompressJ2k`): an HTJ2K codestream (its main
+header has CAP's Part 15 bit or the HT style) goes in mode 4, then mode 3
+unless mode 4's stream is below the least mode 3's could be (its side
+information and 7 / 10 of the coded bytes: mode 3 saves 30% at best), the
+smaller of them when it is smaller than the codestream, else mode 0;
+modes 1 and 2 never see it. Measured before mode 4 was built (53 lossless
+HT codestreams, 180 MB: each decoded by `ojph_expand`, coded lossless by
+OpenJPEG and taken by mode 2): mode 3 alone 11.40%, the pixels alone
+13.22%, the smaller of the two 13.96%; the pixels win on 37 of 53 (photos
+by about a fifth of the codestream more than mode 3, some radiographs and
+MRI lose by a few percent).
+
+**The real-world files.** The research had found no production HTJ2K
+file; these were looked for and downloaded for stage F (provenance, URLs,
+licences and SHA-1 in `/mnt/IA_LAB/agentes/pja/htj2k/dl/provenance.csv`;
+none is in the repository), with DICOM frames and PDF images cut out of
+their containers:
+
+| set | what | encoder | codestreams | bytes |
+|---|---|---|---|---|
+| Netflix Meridian (CC BY 4.0) | 4K cinema frames sampled from the HTJ2K MXFs of a public demo: 142 lossy 4:2:2 10-bit, 6 lossless 4:4:4 12-bit | Kakadu 8.4.1 | 148 | 179.4 MB |
+| OHIF's public DICOMweb | a CT series (174 slices) and dual-energy radiographs, lossless and lossy | OpenJPH 0.31 | 354 | 82.9 MB |
+| pacsbin (S3) | 10 radiographs | OpenJPH 0.7.3 | 10 | 73.0 MB |
+| ht-pdf.com | a UHD photo in four PDFs, 8 and 16 bits, lossless and lossy | Kakadu 8.1 | 4 | 46.6 MB |
+| chafey/openjphjs, DICOMHTJ2K, teknasd | CT, MR, MG, NM, RG, US, VL, XA, a 4K image | OpenJPH 0.6.3, 0.10 | 22 | 65.2 MB |
+| Grok's test data | Bretagne2, lossless and lossy | Grok 6.0 | 2 | 8.6 MB |
+| cornerstone3D, OHIF test data, pydicom, openjph.org | DICOM test images | OpenJPH 0.31 | 8 | 2.0 MB |
+| go-dicom-codecs, SwiftJ2K | synthetic interop fixtures (layers, precincts, tiles, refinement, mixed) | OpenJPH 0.30, Kakadu 8.4.1 | 168 | 2.5 MB |
+
+and, made here: 78 codestreams from 13 photos (1366x768 to 1920x1200, every
+12th of the b151 set) with OpenJPH 0.18.2 (lossless with 64x64 and 32x32
+code-blocks, qstep 0.005, qstep 0.02 with 16x16 and LRCP) and Grok 20.4.9
+(lossless, qfactor 85 with 32x32), and the research's sets (the
+conformance streams of aous72/jp2k_test_codestreams: Kakadu 8.0.5 and
+OpenJPH; jpylyzer's and OpenJPEG's HT files; its own OpenJPH and Grok
+streams).
+
+**Results** (06/11/2026, `test_j2kcs -mode4`: each codestream as mode 3
+and mode 4, decoded and compared; "saved" counts each codestream as
+`CompressJ2k` keeps it, the side information and the check included, and
+the codestreams no mode takes as they are):
+
+| set | codestreams | bytes | mode 3 alone | in mode 3 / 4 / 0 | saved |
+|---|---|---|---|---|---|
+| Netflix Meridian frames | 148 | 179,376,973 | 10.35% | 147 / 1 / 0 | **10.38%** |
+| OHIF DICOMweb (CT, DX) | 354 | 82,917,737 | 8.26% | 180 / 174 / 0 | **8.57%** |
+| pacsbin radiographs | 10 | 72,964,835 | 9.30% | 10 / 0 / 0 | **9.30%** |
+| ht-pdf UHD photo | 4 | 46,639,837 | 12.82% | 3 / 1 / 0 | **13.93%** |
+| openjphjs | 16 | 39,909,651 | 10.75% | 7 / 9 / 0 | **11.61%** |
+| chafey DICOMHTJ2K (VL) | 5 | 23,598,907 | 17.70% | 1 / 4 / 0 | **22.53%** |
+| Grok's Bretagne2 | 2 | 8,641,902 | 13.91% | 1 / 1 / 0 | **18.51%** |
+| the other DICOM test images (5 sets) | 9 | 3,705,357 | | 4 / 5 / 0 | 12.8% |
+| synthetic fixtures (go-dicom, SwiftJ2K) | 168 | 2,452,140 | 23.7% | 60 / 96 / 12 | 28.1% |
+| **real-world files, all** | **716** | **460,207,339** | 10.61% | | **11.24%** |
+| photos made here (OpenJPH, Grok) | 78 | 70,964,185 | 17.75% | 39 / 39 / 0 | **26.66%** |
+| research's own (OpenJPH, Grok) | 48 | 179,167,560 | 14.09% | 42 / 6 / 0 | 16.21% |
+| conformance, Kakadu 8.0.5 | 44 | 18,510,491 | 20.31% | 23 / 9 / 12 | 22.69% |
+| conformance, OpenJPH | 30 | 22,216,111 | 19.77% | 22 / 8 / 0 | 23.35% |
+| jpylyzer's, OpenJPEG's (Grok, OpenHTJ2K) | 4 | 834,154 | 21.91% | 2 / 2 / 0 | 21.91% |
+| **all** | **924** | **751,913,028** | 12.62% | 543 / 357 / 24 | **14.53%** |
+
+By encoder, all sets: Kakadu 275 codestreams 12.06%, OpenJPH 509 12.12%
+(OpenJPH's own photos 18.68%), Grok 55 20%, OpenHTJ2K 27.1%. The
+research's planning figure was 12% to 20% of the payload (lossless 11.8%,
+lossy 13% to 20%, with tiny-block test files inflating it); lossless
+medical images, the commonest real HTJ2K, come out at 8% to 12%, photos
+and Grok's at 18% to 27%. Every one of the 900 codestreams taken came
+back byte for byte. Code-blocks: 1,738,801 of 1,738,812 modelled, 11 kept
+as bytes (10 Kakadu cinema code-blocks whose cleanup no rule gives back,
+OpenHTJ2K's one); refinement segments kept as bytes 195 (Kakadu's
+conformance streams). Refused (mode 0): 11 Kakadu conformance streams
+with 33x33 tiles or 4x4 code-blocks whose side information passes
+`J2kSideBound` (a code-block costs bytes of t2 and t1rule, its payload
+there a few), one with 33 decomposition levels, and 12 SwiftJ2K fixtures
+with mixed or Part 1 code-blocks. Mode 4 did not take 3 rate-truncated codestreams and 14 cinema
+frames whose planes are past mode 2's bounds for their bytes; the
+lossy codestreams (the 9/7 wavelet) are not reversible.
+
+**Speed** (this machine, one thread, encoding with its check, under load
+from the other runs): mode 3 0.10 to 0.20 MB/s, decoding 0.2 to 0.4 MB/s;
+mode 4 about twice that. `pja a` and `x` of single files on one thread:
+a 1.76 MB Kakadu cinema frame 10.9 s and 7.7 s (mode 3, 12.4% saved); a
+6.7 MB OpenJPH radiograph 41 s (modes 4 and 3 both tried) and 10.3 s; a
+1.0 MB lossless photo 3.6 s and 1.8 s (mode 4, 35.9%); the 2.7 MB Kakadu
+UHD photo 12.7 s and 10.1 s. A single-tile codestream is one slice and one
+thread; tiled ones use several, as mode 1.
+
+**Damage and fuzzing.** `pas/run_codec_tests.sh` and the CI damage the HT
+samples; on top, 19.5 minutes on the 170 small HT codestreams (64 KB or
+less) of the sets, 12 at a time: 636,000 damaged codestreams (467,635
+taken and given back), 636,000 damaged HT blobs (257,860 gave a
+codestream), 636,000 damaged mode 3 streams (1,999 gave the codestream:
+damage past what the decoder reads), 159,000 damaged codestreams through
+mode 3 (117,201 taken and given back), 508,000 damaged mode 4 streams
+(2,612 gave the codestream): no exception, no other codestream, no time
+out (the slowest file 678 s for its 21,000 variants).
+
+**Open.** Lossless medical images gain least (8% to 10%): most of their
+bits are the coefficients' lower bits, which the model codes at 1.00 bit
+each, and the pixels win only for some of them. Side information for
+code-blocks of 4x4 or tiles of 33x33 passes the bound (mode 0). Mixed
+code-blocks (Part 1 or HT by their lengths) are refused; multiple HT sets
+and refinement segments cut by layers are kept as bytes (none in the
+sets). Kakadu's refinement segments without a rule (194 of 21,329 in its
+conformance streams) stay bytes.
+The zpaq-std plugin and the 7-Zip filter leave HTJ2K as before. Speed:
+the model costs about 2,000 instructions an event, as mode 1's.
+
+**Tests.** `tests/j2k` gets four HT codestreams made with OpenJPH and
+Grok from the repository's images (tests/README.md: two lossless, which
+mode 4 takes, and two lossy; tiles, tile-parts, TLM, precincts, CPRL,
+LRCP, SOP and EPH; a JPH file). `test_j2kcs -mode3` takes each HT
+codestream apart without a model (blob version 3, rebuilt from a copy and
+compared) and as mode 3; `-mode4` as mode 4 too, and the choice; `-fuzz`
+and `-m3fuzz` damage the codestreams, the HT blobs and the streams.
+`run_codec_tests.sh` and `.github/test.sh` run them (four in mode 3, two in
+mode 4, 1,600 + 800 damaged streams, the same streams on 1 and 4 threads
+in slices). `test_versions` sweeps the mode byte (5 to 255:
+`FutureVersion`), modes 3's and 4's layout bytes and reads both without
+the hooks (`FutureVersion`). `cli.sh`: an HT codestream in mode 3 and a
+JPH in mode 4 back byte for byte (the mode byte in the `.pja`), one bit
+of each stream damaged (rc 1, nothing written), `info --estimate`.
+`pja info` says mode 3 and 4 eligibility by the headers, and with
+`--estimate` the mode chosen. The JPEG and JPEG-LS streams' hash is
+unchanged (3387e58d…), and so are mode 1's and mode 2's streams of the
+earlier `tests/j2k` samples and stage B's blobs (the j2k line of
+`hash.txt` gains the four new samples' lines only).

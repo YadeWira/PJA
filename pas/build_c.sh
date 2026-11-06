@@ -1,8 +1,10 @@
 #!/bin/sh
 # The C part of PJA (stream version 7's model, pjav7c.c, and the helpers
 # around it, pjasysc.c; JPEG 2000's tier-1, pjaj2kt1.c, stream version 8's model, pjaj2kmc.c, and
-# its mode 2's pixels, pjaj2kpm.c) as objects for FreePascal to link: pjav7.pas takes them with
-# {$L pjav7c.o} and {$L pjasysc.o}, pjaj2kcs.pas with {$L pjaj2kt1.o} and {$L pjaj2kmc.o},
+# its mode 2's pixels, pjaj2kpm.c, and mode 3's HTJ2K code-blocks and model, pjaj2kht.c and
+# pjaj2khm.c) as objects for FreePascal to link: pjav7.pas takes them with
+# {$L pjav7c.o} and {$L pjasysc.o}, pjaj2kcs.pas with {$L pjaj2kt1.o}, {$L pjaj2kmc.o},
+# {$L pjaj2kht.o} and {$L pjaj2khm.o},
 # pjaj2kpx.pas with {$L pjaj2kpm.o}, found through -Fo<dir>.
 #
 #   pas/build_c.sh <out dir> [extra C flags]
@@ -49,3 +51,7 @@ $CC $FLAGS "$@" -c "$HERE/pjaj2kt1.c" -o "$OUT/pjaj2kt1.o"
 $CC $FLAGS "$@" -c "$HERE/pjaj2kmc.c" -o "$OUT/pjaj2kmc.o"
 # shellcheck disable=SC2086
 $CC $FLAGS "$@" -c "$HERE/pjaj2kpm.c" -o "$OUT/pjaj2kpm.o"
+# shellcheck disable=SC2086
+$CC $FLAGS "$@" -c "$HERE/pjaj2kht.c" -o "$OUT/pjaj2kht.o"
+# shellcheck disable=SC2086
+$CC $FLAGS "$@" -c "$HERE/pjaj2khm.c" -o "$OUT/pjaj2khm.o"
