@@ -133,6 +133,9 @@ var
     pjaj2kpx; its floor is mode 3's }
   J2kMode4Enc: TJ2kMode2Enc = nil;
   J2kMode4Dec: TJ2kMode1Dec = nil;
+  { a file's codestreams coded side by side (CompressJ2k); the zpaq-std
+    plugin turns it off, its mode 1 hook counting in threadvars }
+  J2kCodestreamsTogether: Boolean = True;
 
 { JPEG -> stream. With verify (the default), the stream is decompressed and
   compared before returning (a repaired JPEG's always). threads: how many
@@ -2128,7 +2131,8 @@ end;
 function CsTogether(const data: TBytes; const cs: TJ2kCodestreams; threads: Integer): Boolean;
 var i: Integer; n: Int64;
 begin
-  Result := (threads > 1) and (Length(cs) > 1);
+  Result := J2kCodestreamsTogether and (threads > 1) and (Length(cs) > 1);
+  if not Result then Exit;
   for i := 0 to High(cs) do begin
     if (cs[i].len > CODESTREAMS_TOGETHER) or (cs[i].len < 42) then Exit(False);
     n := J2kSizSamples(Copy(data, cs[i].off + 2, 40));

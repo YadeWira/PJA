@@ -50,9 +50,9 @@ function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; d
   out why: string): TMode1Result; overload;
 { The same, with the analysis' statistics (the zpaq-std plugin's: its ZPAQL's
   limits and memory, pjaj2kcs.TJ2kStats) and the side information's length
-  (the blob, before the raw bytes' model) }
-function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
+  (the blob, before the raw bytes' model); decoded and compared when decodeIt }
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean;
+  out stream: TBytes; out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
 { A mode 1 stream back to its codestream, which must be len bytes. }
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
 { Mode 3 (doc/CODEC.md, "JPEG 2000, stage F"): an HTJ2K codestream, its
@@ -298,11 +298,11 @@ begin
   Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, False, st, blobLen);
 end;
 
-function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
-  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean;
+  out stream: TBytes; out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
 begin
   st := Default(TJ2kStats);
-  Result := EncodeWith(data, off, len, threads, True, stream, why, False, st, blobLen);
+  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, False, st, blobLen);
 end;
 
 function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;

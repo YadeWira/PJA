@@ -144,10 +144,11 @@ begin
 end;
 
 { mode 1 for the plugin (pjacodec's hook): pjaj2km's, when PjkFits }
-function PjkMode1Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes): Boolean;
+function PjkMode1Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean;
+  out stream: TBytes): Boolean;
 var why: string; st: TJ2kStats; blobLen, w, b: Int64;
 begin
-  Result := (J2kMode1EncodeSt(data, off, len, threads, stream, why, st, blobLen) = m1Ok) and
+  Result := (J2kMode1EncodeSt(data, off, len, threads, decodeIt, stream, why, st, blobLen) = m1Ok) and
             PjkFits(st, stream, len, blobLen, w, b);
   if not Result then begin stream := nil; Exit; end;
   if w > CsWords then CsWords := w;
@@ -326,4 +327,10 @@ initialization
   InitCriticalSection(ArgsLock);
   J2kTileCost := @TileCost;
   J2kMode1Enc := @PjkMode1Enc;
+  { PjkMode1Enc counts in this thread's CsWords, CsBytes, CsCount }
+  J2kCodestreamsTogether := False;
+  { modes 3 and 4 (HTJ2K) have no ZPAQL: an HTJ2K codestream stays as bytes
+    (mode 0), as modes 2 and 4 are not linked in }
+  J2kMode3Enc := nil;
+  J2kMode3Dec := nil;
 end.
