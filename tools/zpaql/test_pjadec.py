@@ -17,7 +17,7 @@ block, as zpaq-std groups them.
         the 8 codecs' (v8zpaql.inc): pja78's, pjax78's, pjals8's, pjall8's,
         pjalsx8's, and with --lz their z; without a codec flag, JPEG-LS files
         through pjals8 (JPEGs, pja's as before)
-    test_pjadec.py --pjk <segment dir> <file> ...
+    test_pjadec.py --pja2k <segment dir> <file> ...
         the JPEG 2000 codec's (j2kzpaql.inc: stream version 8, modes 0 and
         1), each file alone with the H and M of its query ($3 | $4 << 8 in
         its .args), then the two smallest as segments of one block
@@ -87,7 +87,7 @@ def pjk_test(segdir, files):
             fails += 1
         print('  one block: %s %s (%.0f s)' % (' + '.join(os.path.basename(f) for f in group),
                                                'each the original' if ok else 'DIFFERS', time.time() - t))
-    print('%d JPEG 2000 files through the pjk decoder, %d failures' % (len(files), fails))
+    print('%d JPEG 2000 files through the pja2k decoder, %d failures' % (len(files), fails))
     sys.exit(1 if fails else 0)
 
 
@@ -138,7 +138,7 @@ def zconfig(name, incname='lzzpaql.inc'):
     return '\n'.join(m.replace("''", "'") for m in re.findall(r"^\s+'(.*)'#10", part, re.M)) + '\n'
 
 
-if args[:1] == ['--pjk']:
+if args[:1] == ['--pja2k']:
     pjk_test(args[1], args[2:])
 
 

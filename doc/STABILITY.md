@@ -130,8 +130,7 @@ the others stay to read older archives.
 
 JPEG 2000 comes at index 30 in 0.9.6 (`doc/CODEC.md`, "JPEG 2000 for
 zpaq-std (stage E)"): stream version 8 with codestream modes 0 and 1, its
-ZPAQL 51,521 bytes. Its name (`pjk` for now) waits for the owner's
-approval; it joins the table above, frozen like the others (name, index,
+ZPAQL 51,521 bytes. Its name is `pja2k`; it joins the table above, frozen like the others (name, index,
 stream, what it takes, ZPAQL), when 0.9.6 ships, and not before.
 
 ## Left as they are

@@ -94,8 +94,8 @@ python3 "$PJA/tools/zpaql/test_pjadec.py" --v8 --lz --pjalsx "$OUT/zpaqlsx" "${Z
 # JP2, each with the H and M of its query, then both in one block
 rm -rf "$OUT/zpaqlk"; mkdir -p "$OUT/zpaqlk"
 ZK=("$PJA/tests/j2k/plasma_cs.j2k" "$PJA/tests/j2k/gray_12bit.jp2")
-"$OUT/zpaql_segments" --pjk "$OUT/zpaqlk" "${ZK[@]}"
-python3 "$PJA/tools/zpaql/test_pjadec.py" --pjk "$OUT/zpaqlk" "${ZK[@]}" | tail -1
+"$OUT/zpaql_segments" --pja2k "$OUT/zpaqlk" "${ZK[@]}"
+python3 "$PJA/tools/zpaql/test_pjadec.py" --pja2k "$OUT/zpaqlk" "${ZK[@]}" | tail -1
 # the plugin as zpaq-std loads it (ctypes): its codecs, what the JPEG 2000
 # codec takes, its compress, query and decompress
 sh "$PAS/build_c.sh" "$OUT/pc" -fPIC

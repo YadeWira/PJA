@@ -10,7 +10,7 @@
     zpaql_segments --pjalsx <out dir> <jls> ...  the pjalsx codec's (subsampled JPEG-LS)
     zpaql_segments --pja7 <out dir> <jpeg> ...   the pja7 codec's (stream version 7)
     zpaql_segments --pjax7 <out dir> <jpeg> ...  the pjax7 codec's (pjax's, version 7)
-    zpaql_segments --pjk <out dir> <file> ...    the JPEG 2000 codec's (pjazsj2k: stream
+    zpaql_segments --pja2k <out dir> <file> ...    the JPEG 2000 codec's (pjazsj2k: stream
                                                  version 8, modes 0 and 1); its .args is
                                                  the query's, $3 | $4 << 8 }
 program zpaql_segments;
@@ -27,7 +27,7 @@ begin
   pjalsx := ParamStr(1) = '--pjalsx';
   pja7 := ParamStr(1) = '--pja7';
   pjax7 := ParamStr(1) = '--pjax7';
-  pjk := ParamStr(1) = '--pjk';
+  pjk := ParamStr(1) = '--pja2k';
   first := 2; outDir := ParamStr(1);
   if pjax or pjall or pjalsx or pja7 or pjax7 or pjk then begin first := 3; outDir := ParamStr(2); end;
   for i := first to ParamCount do begin

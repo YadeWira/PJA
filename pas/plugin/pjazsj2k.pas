@@ -34,7 +34,7 @@ uses SysUtils, pjacodec, pjaj2k, pjaj2kcs, pjaj2km, pjablake3, pjaarith, pjamode
 const
   { the codec's name: PROVISIONAL (it may not end in z, o or 8, which
     zpaqstd_detect_v1 reads as other codecs' suffixes) }
-  PJK_NAME = 'pjk';
+  PJK_NAME = 'pja2k';
   { the ZPAQL's limits: 2^26 words of H, 2^28 bytes of M }
   PJK_MAX_PH = 26;
   PJK_MAX_PM = 28;

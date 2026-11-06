@@ -3511,12 +3511,10 @@ the command says of mode 2:
 
 The zpaq-std plugin gets a codec for files of the JPEG 2000 family, index
 30 of `zpaqstd_codecs_v1`, with a ZPAQL decoder, so that any zpaq extracts
-its blocks without the plugin. Its name, `pjk`, is **provisional** until
-the owner approves it: it is in one place, `pas/plugin/pjazsj2k.pas`'s
-`PJK_NAME` (and `tools/zpaql/gen_pjadec.py`'s `J2K_NAME`, the PCOMP's
-label), and may not end in `z`, `o` or `8`, which `zpaqstd_detect_v1` reads
-as other codecs' suffixes. It is frozen, with its stream, what it takes
-and its ZPAQL, when 0.9.6 ships.
+its blocks without the plugin. Its name is `pja2k` (approved by the owner on
+06/11/2026; it may not end in `z`, `o` or `8`, which `zpaqstd_detect_v1` reads
+as suffixes of other families). In the sources it is `pas/plugin/pjazsj2k.pas`'s
+`PJK_NAME` and `tools/zpaql/gen_pjadec.py`'s `J2K_NAME` (the PCOMP's label). It is frozen, with its stream, what it takes and its ZPAQL, when 0.9.6 ships.
 
 **What it writes.** Stream version 8 as the command writes it
 (`pjacodec.Compress`, the same bytes), with codestream modes 0 and 1
@@ -3610,11 +3608,11 @@ samples).
 - in zpaqlc's interpreter (`zpaqlvm.py`): `plasma_cs.j2k` (37 s) and
   `gray_12bit.jp2` (33 s) alone and in one block of two segments (69 s),
   with the H and M of their query; the suite runs this (`test_pjadec.py
-  --pjk`);
+  --pja2k`);
 - with libzpaq (zpaq 7.15's engine, JIT): the 15 files of `tests/j2k`
   and the 113 gap1 codestreams (`gap1/cs`), each with the H and M of its
   query, back byte for byte;
-- zpaq-std 2.3.0 (`-sat:pja:pjk+2`, the plugin built from this tree in a
+- zpaq-std 2.3.0 (`-sat:pja:pja2k+2`, the plugin built from this tree in a
   copy of its `codecs/`): the 15 files of `tests/j2k` and 12 gap1
   codestreams of 400 KB or less in one block of 27 segments, 608,366 bytes
   to 542,620 (89.2%), decoded by the plugin (1.2 s) and by the ZPAQL
@@ -3679,8 +3677,8 @@ same stream version 8.
 
 **Tests.** `run_tests.sh`: `gen_pjadec.py --check` covers `j2kzpaql.inc`
 (and checks `j2kmodel.zl`'s KPK against pjaj2kmc.c's PK and the packed
-tables against pjaj2km_tab.h); `zpaql_segments --pjk` writes the codec's
-segments and query, `test_pjadec.py --pjk` decodes two of them in the
+tables against pjaj2km_tab.h); `zpaql_segments --pja2k` writes the codec's
+segments and query, `test_pjadec.py --pja2k` decodes two of them in the
 interpreter, alone and in one block; `pas/tests/probe_plugin.py` loads the
 plugin as zpaq-std does (ctypes): 31 codecs, the JPEG 2000 codec at 30
 with its ZPAQL only through `$3..$5`, detect taking every file of

@@ -10,7 +10,7 @@ const
     RANGE; a table holds min(RANGE, 2^hb), two words a counter) }
   J2K_ZPAQL_RANGES: array[0..7] of Int64 = (1440, 291600, 259200, 1632960, 2570400, 4300800, 1814400, 12830400);
   PJK_ZPAQL: AnsiString =
-    'comp 0 0 $3 $4 0 hcomp halt pcomp pjk8 ; a> 255 jt 8 c=r 0 *c=a a=c a++ r=a 0 halt a= 1 a<<= 13 r=a 214 a= 3 a<<= 12 d= 62 *d=a a= 1 a<<= 14 d= 63 *d=a a= 65 a<<= 8 d= 141 *d=a a= 33 a<<= 9 d= 142'#10 +
+    'comp 0 0 $3 $4 0 hcomp halt pcomp pja2k8 ; a> 255 jt 8 c=r 0 *c=a a=c a++ r=a 0 halt a= 1 a<<= 13 r=a 214 a= 3 a<<= 12 d= 62 *d=a a= 1 a<<= 14 d= 63 *d=a a= 65 a<<= 8 d= 141 *d=a a= 33 a<<= 9 d= 142'#10 +
     '*d=a a= 161 a<<= 9 d= 237 *d=a a++ d= 174 *d=a a+= 205 d= 64 *d=a a+= 8 d= 175 *d=a a= 163 a<<= 9 a|= 214 r=a 242 a= 171 a<<= 9 a|= 214 r=a 188 a= 183 a<<= 9 a|= 214 d= 103 *d=a a= 185 a<<= 9 a|= 214'#10 +
     'd= 176 *d=a a+= 64 d= 177 *d=a a+= 8 d= 178 *d=a a+= 8 r=a 197 a= 65 a<<= 10 a|= 147 a+=a d= 143 *d=a a= 147 a<<= 10 a|= 166 d= 144 *d=a a= 167 a<<= 10 a|= 166 d= 65 *d=a a= 85 a<<= 10 a-= 253 a+=a'#10 +
     'd= 66 *d=a a= 171 a<<= 9 a-= 225 a+=a d= 67 *d=a a= 43 a<<= 12 a-= 194 d= 179 *d=a a= 175 a<<= 10 a|= 34 d= 180 *d=a a= 227 a<<= 10 a|= 246 d= 181 *d=a a= 67 a<<= 12 a-= 158 d= 182 *d=a a+= 128 d= 238'#10 +

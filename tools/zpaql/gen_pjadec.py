@@ -255,7 +255,7 @@ def make_j2k_consts():
 # the JPEG 2000 codec's name: PROVISIONAL until the owner approves it (as
 # pjazsj2k.pas's PJK_NAME); the PCOMP is named after it, with the stream's
 # version
-J2K_NAME = 'pjk'
+J2K_NAME = 'pja2k'
 
 
 def j2k_pk():
