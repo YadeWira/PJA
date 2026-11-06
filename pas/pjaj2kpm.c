@@ -914,28 +914,33 @@ PX_INLINE int code_samples(pxm_t *m, const int dec, uint16_t *pl, int64_t w, int
 int32_t pjaj2kp_res_width(void) { return PX_RESW; }
 
 /* the two models compiled once for each direction, and again on x86 for
-   SSE4.1 and for AVX2 (the mixer's lanes in pmulld, pminsd and pmaxsd),
-   taken by path (2 AVX2, 1 SSE4.1: pjamodel's cpuid, as pjaj2kmc.c's): the
-   same C, the same integer arithmetic, so the same bits on every path */
-#define PX_COPY(SUF, ATTR) \
+   SSE4.1 and (the multi-bit one) for AVX2: the mixers' lanes in pmulld,
+   pminsd and pmaxsd, taken by path (2 AVX2, 1 SSE4.1: pjamodel's cpuid, as
+   pjaj2kmc.c's). The same C, the same integer arithmetic, so the same bits
+   on every path. The bitonal model's AVX2 copy was 7% slower than its
+   SSE4.1 one (its 14 lanes are 8 + 4 + 2 there; a bitonal page, one
+   thread): it takes the SSE4.1 copy on both paths */
+#define PX_COPY_B(SUF, ATTR) \
   ATTR static int bitonal_e##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h) { return code_bitonal(m, 0, pl, w, h); } \
-  ATTR static int bitonal_d##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h) { return code_bitonal(m, 1, pl, w, h); } \
+  ATTR static int bitonal_d##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h) { return code_bitonal(m, 1, pl, w, h); }
+#define PX_COPY_S(SUF, ATTR) \
   ATTR static int samples_e##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h, int depth, int cls, int32_t *res, \
     const uint16_t *po) { return code_samples(m, 0, pl, w, h, depth, cls, res, po); } \
   ATTR static int samples_d##SUF(pxm_t *m, uint16_t *pl, int64_t w, int64_t h, int depth, int cls, int32_t *res, \
     const uint16_t *po) { return code_samples(m, 1, pl, w, h, depth, cls, res, po); }
-PX_COPY(, )
+PX_COPY_B(, )
+PX_COPY_S(, )
 #if (defined(__x86_64__) || defined(__i386__)) && !defined(PJA_V7_PLAIN) && (defined(__GNUC__) || defined(__clang__))
 #define PX_SIMD 1
-PX_COPY(_sse41, __attribute__((target("sse4.1"))))
-PX_COPY(_avx2, __attribute__((target("avx2"))))
+PX_COPY_B(_sse41, __attribute__((target("sse4.1"))))
+PX_COPY_S(_sse41, __attribute__((target("sse4.1"))))
+PX_COPY_S(_avx2, __attribute__((target("avx2"))))
 #endif
 
 static int bitonal(pxm_t *m, int dec, int path, uint16_t *pl, int64_t w, int64_t h)
 {
 #ifdef PX_SIMD
-  if (path == 2) return dec ? bitonal_d_avx2(m, pl, w, h) : bitonal_e_avx2(m, pl, w, h);
-  if (path == 1) return dec ? bitonal_d_sse41(m, pl, w, h) : bitonal_e_sse41(m, pl, w, h);
+  if (path == 1 || path == 2) return dec ? bitonal_d_sse41(m, pl, w, h) : bitonal_e_sse41(m, pl, w, h);
 #endif
   (void)path;
   return dec ? bitonal_d(m, pl, w, h) : bitonal_e(m, pl, w, h);
