@@ -78,6 +78,30 @@ they are); 9.9% smaller than JPEG XL (2.2 to 3.1 times as fast). None of
 the four takes 12-bit or lossless JPEG, and only packJPG takes
 arithmetic-coded ones.
 
+### JPEG 2000
+
+No other recompressor takes JPEG 2000. Against general-purpose compressors,
+on 113 real JPEG 2000 codestreams (150 MB: Internet Archive, Library of
+Congress, OSGeo, Helioviewer, Sentinel-2 and DICOM), every one given back
+byte for byte:
+
+| | size | saved |
+|---|---|---|
+| bzip2 -9 | 100.18% | it grows |
+| bzip3 | 100.05% | it grows |
+| zip -9 | 99.81% | 0.19% |
+| xz -9e | 99.78% | 0.22% |
+| 7-Zip -mx=9 (LZMA2) | 99.76% | 0.24% |
+| zstd --ultra -22 | 99.72% | 0.28% |
+| brotli -q 11 | 99.67% | 0.33% |
+| zpaq -m5 | 99.56% | 0.44% (18 min) |
+| **PJA 0.9.5** | **91.53%** | **8.47%** |
+
+By kind: scanned 1-bit book pages about 70% smaller (the pixels through a
+bitonal model, better than JBIG1); book and map scans 9 to 17%; solar,
+Sentinel-2 and medical images 6 to 7%. It is slower than on JPEG (about
+0.1-0.25 MB/s per thread to compress).
+
 ## Safe by design
 
 PJA's first rule is that the original comes back byte for byte, or nothing
