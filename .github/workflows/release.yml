@@ -124,8 +124,8 @@ jobs:
           pattern: hash-*
       - name: Compare the streams' hashes
         run: |
-          for f in hash-*/*; do echo "$f: $(cat "$f")"; done
-          n=$(cat hash-*/* | sort -u | wc -l)
+          for f in hash-*/*; do echo "$f: $(cat "$f" | tr '\n' ' ')"; done
+          n=$(for f in hash-*/*; do tr -d '\r' < "$f" | cksum; done | sort -u | wc -l)
           if [ "$n" -ne 1 ]; then
             echo "the codec's streams differ between platforms" >&2
             exit 1

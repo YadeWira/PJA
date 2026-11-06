@@ -100,13 +100,25 @@ for f in "$OUT"/st7/*; do mv "$f" "$OUT/st/v7_$(basename "$f")"; done
 [ "$(wc -l < "$OUT/streams.txt")" -ge 30 ] || { echo "FAIL: too few streams"; exit 1; }
 $SHA "$OUT/streams.txt" | cut -c1-64 > hash.txt
 echo "$(wc -l < "$OUT/streams.txt" | tr -d ' ') streams, SHA-256 of their list: $(cat hash.txt)"
+# JPEG 2000's (version 8, mode 1: C too), on a line of their own, so that
+# the first line stays what it was before them: the file's codestreams
+# whole, and in slices of 1500 bytes on 4 threads
+mkdir -p "$OUT/stj"
+"$OUT/dump_streams$EXE" tests/j2k "$OUT/stj"
+mkdir -p "$OUT/stj4"
+PJA_J2K_SLICE=1500 "$OUT/dump_streams$EXE" tests/j2k "$OUT/stj4" 4
+for f in "$OUT"/stj4/*; do mv "$f" "$OUT/stj/s_$(basename "$f")"; done
+(cd "$OUT/stj" && $SHA * | sed 's/ [ *]/  /' | sort) > "$OUT/streams_j2k.txt"
+[ "$(wc -l < "$OUT/streams_j2k.txt")" -ge 24 ] || { echo "FAIL: too few JPEG 2000 streams"; exit 1; }
+echo "j2k $($SHA "$OUT/streams_j2k.txt" | cut -c1-64)" >> hash.txt
+echo "$(wc -l < "$OUT/streams_j2k.txt" | tr -d ' ') JPEG 2000 streams, SHA-256 of their list: $(tail -1 hash.txt)"
 
-echo "== JPEG 2000 stage B: each codestream taken apart and put back together"
-# not a format yet (stage C codes it): the side information and the decisions
-# in pjaj2kcs's blob, rebuilt from the blob alone; its digest should be the
-# same on every platform
+echo "== JPEG 2000 stages B and C: each codestream taken apart and put back together"
+# the side information and the decisions in pjaj2kcs's blob, rebuilt from
+# the blob alone (its digest should be the same on every platform), and
+# each codestream as stream version 8's mode 1, decoded and compared
 mkdir -p "$OUT/uj"
 $FPC -O3 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/uj" -o"$OUT/test_j2kcs$EXE" pas/tests/test_j2kcs.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-"$OUT/test_j2kcs$EXE" -q -min 14 -fuzz 20 tests/j2k > "$OUT/j2kcs.txt" || { cat "$OUT/j2kcs.txt"; echo "FAIL: test_j2kcs"; exit 1; }
-grep -E '^(files|fuzz|blobs)' "$OUT/j2kcs.txt"
+"$OUT/test_j2kcs$EXE" -q -min 14 -fuzz 20 -mode1 tests/j2k > "$OUT/j2kcs.txt" || { cat "$OUT/j2kcs.txt"; echo "FAIL: test_j2kcs"; exit 1; }
+grep -E '^(files|fuzz|blobs|mode 1)' "$OUT/j2kcs.txt"

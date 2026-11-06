@@ -10,15 +10,18 @@
     written: version 8 is a whole file): BadStream;
   - a version 6 stream with parts whose first part's stream starts with 9
     to 255: FutureVersion, not BadStream;
-  - a version 8 stream with a flag set, or a codestream of a mode other
-    than raw (1 to 255): FutureVersion;
+  - a version 8 stream with a flag set, or a codestream of a mode this
+    release does not know (2 to 255): FutureVersion; a codestream of mode 1
+    (modelled, pjaj2km) whose stream's layout byte is 1 to 255:
+    FutureVersion; and mode 1 read by a program without pjaj2km (the
+    zpaq-std plugin: pjacodec's hooks nil): FutureVersion;
   - a .pja whose codec stream starts with 9 to 255: Unpack gives
     Codec(FutureVersion); a .pja of version 5 to 255: Format(FutureVersion).
 
     test_versions <directory>... }
 program test_versions;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjapack, pjaformat, pjablake3, pjav7;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjapack, pjaformat, pjablake3, pjav7, pjaj2km;
 
 const
   J2K_ENTRY = 13;
@@ -74,6 +77,7 @@ end;
 var
   files: TStringList; sr: TSearchRec; i, d, b, k, p, e: Integer; data, st, pja, m, back: TBytes;
   r: TCodecResult; pr: TPackResult; h: THash16; seen: array[0..8] of Integer; patch, v8, inparts: Integer;
+  mode1: Integer; enc1: TJ2kMode1Enc; dec1: TJ2kMode1Dec;
   raised: Boolean; name: string; pjas: Integer;
 begin
   files := TStringList.Create; files.Sorted := True;
@@ -82,7 +86,7 @@ begin
       repeat if (sr.Attr and faDirectory) = 0 then files.Add(ParamStr(d) + '/' + sr.Name); until FindNext(sr) <> 0;
       FindClose(sr);
     end;
-  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0; inparts := 0;
+  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0; inparts := 0; mode1 := 0;
   FillChar(seen, SizeOf(seen), 0);
   { hand-made }
   RandSeed := 8;
@@ -124,7 +128,20 @@ begin
       if st[0] = STREAM_J2K then begin
         { the flags, then each codestream's mode }
         Sweep(st, 1, name + ' (flags)', 1);
-        for e := 0 to Integer(GetU32(st, 2)) - 1 do Sweep(st, 6 + J2K_ENTRY * e + 12, name + ' (mode)', 1);
+        p := 6 + J2K_ENTRY * Integer(GetU32(st, 2));
+        for e := 0 to Integer(GetU32(st, 2)) - 1 do begin
+          Sweep(st, 6 + J2K_ENTRY * e + 12, name + ' (mode)', 2);
+          if st[6 + J2K_ENTRY * e + 12] = 1 then begin
+            { mode 1: its stream's layout byte, and a program without mode 1 }
+            Sweep(st, p, name + ' (mode 1 layout)', 1);
+            enc1 := J2kMode1Enc; dec1 := J2kMode1Dec;
+            J2kMode1Enc := nil; J2kMode1Dec := nil;
+            Check(Verdict(st, raised) = ceFutureVersion, name + ': mode 1 without pjaj2km is not FutureVersion');
+            J2kMode1Enc := enc1; J2kMode1Dec := dec1;
+            Inc(mode1);
+          end;
+          p := p + Integer(GetU32(st, 6 + J2K_ENTRY * e + 8));
+        end;
         { as a PATCH's repaired file (one edit, none or one byte put in
           front): never written, refused }
         for e := 0 to 1 do begin
@@ -156,10 +173,10 @@ begin
       Inc(pjas);
     end;
   end;
-  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d; PATCH %d, with parts %d, .pja %d',
-                 [seen[5], seen[6], seen[7], seen[8], patch, inparts, pjas]));
+  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d (codestreams of mode 1: %d); PATCH %d, with parts %d, .pja %d',
+                 [seen[5], seen[6], seen[7], seen[8], mode1, patch, inparts, pjas]));
   { each kind met, so that none of the sweeps above ran empty }
-  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (inparts > 0) and (v8 > 0) and (pjas > 0),
+  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (inparts > 0) and (v8 > 0) and (mode1 > 0) and (pjas > 0),
         'every kind of stream among the samples');
   Writeln(files.Count, ' files, ', cells, ' cells, ', failures, ' failures');
   if (failures > 0) or (cells < 10000) then Halt(1);

@@ -4,7 +4,7 @@
   compared byte for byte. J2kAnalyze checks it too before it says yes; this
   does it again on a copy of the blob, after the analysis is gone.
 
-    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-l list] <file or directory>...
+    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-mode1] [-dumpcb file] [-l list] <file or directory>...
 
   A directory is walked (files of the JPEG 2000 family by their first
   bytes; the rest ignored); -l takes the names from a file, one a line.
@@ -19,6 +19,14 @@
   but one gives a digest (FNV-1a, 64 bits) of all the blobs, in order: the
   same on every platform.
 
+  -mode1: each codestream taken also as stream version 8's mode 1
+  (pjaj2km), decoded and compared: its size and its side information's
+  (a line MODE1 file #i length stream side encode-s decode-s), the totals;
+  -threads N: its slices on N threads.
+
+  -dumpcb file: what stream version 8's model is given for each codestream
+  taken (pjaj2kcs's kmDump), to tune the model outside PJA.
+
   -side prefix: each stream of the side information of the codestreams
   taken, appended to prefix.<stream> (to measure what a general compressor
   makes of them).
@@ -31,13 +39,18 @@
   side checked). }
 program test_j2kcs;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaj2k, pjaj2kcs;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaj2k, pjaj2kcs, pjaj2km;
 
 var
   quiet: Boolean;
   fuzz, minOk: Integer;
   digest: QWord = QWord($CBF29CE484222325);
   sidePrefix: string;
+  dumpS: TFileStream;
+  mode1: Boolean;
+  m1Threads: Integer = 1;
+  m1Digest: QWord;
+  m1Cs, m1Bytes, m1Side, m1Fail: Int64; tM1e, tM1d: Double;
   rnd: QWord = 88172645463325252;
   fzRuns, fzOk, fzFail, fzBlob, fzBlobOk: Int64;
   st: TJ2kStats;
@@ -156,9 +169,42 @@ begin
   end;
 end;
 
+{$push}{$Q-}{$R-}
+function Fnv(const b: TBytes): QWord;
+var k: SizeInt;
+begin
+  Result := QWord($CBF29CE484222325);
+  for k := 0 to High(b) do Result := (Result xor b[k]) * QWord($100000001B3);
+end;
+{$pop}
+
+{ -mode1: the codestream as stream version 8's mode 1 (pjaj2km), decoded
+  again and compared; its size, its side information's, the time each way }
+procedure Mode1One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
+var m, back: TBytes; why: string; t0: TDateTime; r: TMode1Result; side: Int64; te, td: Double;
+begin
+  t0 := Now;
+  r := J2kMode1Encode(d, off, len, m1Threads, m, why);
+  te := MilliSecondsBetween(Now, t0) / 1000;
+  if r <> m1Ok then begin Inc(m1Fail); Writeln('MODE1 FAIL ', f, ' #', ci, ': ', why); Exit; end;
+  t0 := Now;
+  r := J2kMode1Decode(m, len, m1Threads, back);
+  td := MilliSecondsBetween(Now, t0) / 1000;
+  if (r <> m1Ok) or (Length(back) <> len) or not CompareMem(@back[0], @d[off], len) then begin
+    Inc(m1Fail); Writeln('MODE1 FAIL ', f, ' #', ci, ': decode'); Exit;
+  end;
+  side := Int64(m[9 + 4 * Int64(m[5])]) or (Int64(m[10 + 4 * Int64(m[5])]) shl 8) or
+    (Int64(m[11 + 4 * Int64(m[5])]) shl 16) or (Int64(m[12 + 4 * Int64(m[5])]) shl 24);
+  m1Digest := m1Digest xor Fnv(m);
+  m1Cs := m1Cs + len; m1Bytes := m1Bytes + Length(m); m1Side := m1Side + side;
+  tM1e := tM1e + te; tM1d := tM1d + td;
+  Writeln('MODE1 ', ExtractFileName(f), ' #', ci, ' ', len, ' ', Length(m), ' ', side, ' ',
+    FormatFloat('0.000', te), ' ', FormatFloat('0.000', td));
+end;
+
 procedure OneFile(const f: string);
 var d, blob, back, blob2: TBytes; cs: TJ2kCodestreams; i: Integer; why: string; t0: TDateTime; ok: Boolean;
-  s0: TJ2kStats; sz: Int64;
+  s0, s1: TJ2kStats; sz: Int64; lkd: TJ2kModelLink;
 begin
   if not ReadFile(f, d) then Exit;
   if not J2kCodestreams(d, cs) then Exit;
@@ -178,6 +224,12 @@ begin
       Count(why);
       if fuzz > 0 then FuzzOne(d, cs[i].off, cs[i].len, nil, f, i);
       Continue;
+    end;
+    if mode1 then Mode1One(d, cs[i].off, cs[i].len, f, i);
+    if dumpS <> nil then begin
+      lkd.kind := kmDump; lkd.slice := nil; lkd.dump := dumpS;
+      s1 := Default(TJ2kStats);
+      if not J2kAnalyzeWith(d, cs[i].off, cs[i].len, lkd, blob2, why, s1) then Writeln('DUMP FAIL ', f, ': ', why);
     end;
     { again, from a copy of the blob alone }
     blob2 := Copy(blob);
@@ -231,6 +283,9 @@ begin
     if ParamStr(i) = '-q' then quiet := True
     else if ParamStr(i) = '-fuzz' then begin Inc(i); fuzz := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-side' then begin Inc(i); sidePrefix := ParamStr(i); end
+    else if ParamStr(i) = '-mode1' then mode1 := True
+    else if ParamStr(i) = '-threads' then begin Inc(i); m1Threads := StrToInt(ParamStr(i)); end
+    else if ParamStr(i) = '-dumpcb' then begin Inc(i); dumpS := TFileStream.Create(ParamStr(i), fmCreate); end
     else if ParamStr(i) = '-min' then begin Inc(i); minOk := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-l' then begin
       Inc(i);
@@ -264,6 +319,13 @@ begin
         FormatFloat('0.00', bytesOk / 1048576 / Max(tRb, 0.001)), ' MB/s (', FormatFloat('0.0', tAn), ' s + ',
         FormatFloat('0.0', tRb), ' s)');
   end;
+  if mode1 and (m1Cs > 0) then
+    Writeln('mode 1: ', m1Cs, ' bytes of codestream -> ', m1Bytes, ' (', FormatFloat('0.000', 100.0 * m1Bytes / m1Cs),
+      '%, side ', m1Side, ' = ', FormatFloat('0.000', 100.0 * m1Side / m1Cs), '%), failed ', m1Fail, '; ',
+      FormatFloat('0.000', m1Cs / 1048576 / Max(tM1e, 0.001)), ' MB/s encoding (with its check), ',
+      FormatFloat('0.000', m1Cs / 1048576 / Max(tM1d, 0.001)), ' MB/s decoding; streams digest ',
+      IntToHex(m1Digest, 16));
+  if m1Fail > 0 then nfail := nfail + m1Fail;
   if fuzz > 0 then
     Writeln('fuzz: ', fzRuns, ' damaged codestreams (', fzOk, ' taken and given back), ', fzBlob, ' damaged blobs (',
       fzBlobOk, ' gave a codestream), FAILED ', fzFail);
@@ -283,5 +345,6 @@ begin
   Write(' fzruns=', fzRuns, ' fzok=', fzOk, ' fzblob=', fzBlob, ' fzblobok=', fzBlobOk, ' fzfail=', fzFail);
   Writeln;
   reasons.Free;
+  dumpS.Free;
   if nfail > 0 then Halt(1);
 end.

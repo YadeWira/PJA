@@ -43,9 +43,12 @@
   against what it has built so far, and refuses a blob that does not hold;
   the C side is only given buffers whose sizes it is told.
 
-  Stage B has no stream of its own: the blob (a version byte, the streams'
-  lengths, the streams) is what stage C will code with a model of the
-  decisions and of the side information, as codec stream version 8's mode 1. }
+  The blob is a version byte, the streams' lengths and the streams. Stage C
+  (stream version 8's mode 1, pjaj2km) writes version 2: the decisions left
+  out (pjaj2kmc.c's model codes them as the analysis finds them and decodes
+  them as the rebuild needs them) and a slice table after the streams: the
+  tiles in slices, each with its own model, analysed and rebuilt on
+  several threads (TSliced), the same blob for any number of them. }
 unit pjaj2kcs;
 
 {$I pja.inc}
@@ -54,7 +57,7 @@ unit pjaj2kcs;
 
 interface
 
-uses SysUtils;
+uses SysUtils, Classes;
 
 const
   { the side information's streams }
@@ -70,6 +73,39 @@ type
     side: array[0..J2K_NSTREAMS - 1] of Int64;
   end;
 
+type
+  { what is done with the decisions (doc/CODEC.md, "JPEG 2000, stage C"):
+    kept as bits in the blob's last stream (kmNone), coded by stream version
+    8's model as the analysis finds them (kmEncode) or decoded by it as the
+    rebuild needs them (kmDecode), or written to a file for the model's
+    tuning (kmDump, pas/tests/test_j2kcs -dumpcb) }
+  TJ2kModelKind = (kmNone, kmEncode, kmDecode, kmDump);
+  { The tiles of a codestream go in slices, each with its own model (and
+    arithmetic stream): slice k (from 0) starts, its model's tables of at
+    most 2^hb counters; the model (pjaj2kmc.c's, made by KmInit) to code it
+    with, nil when there is none }
+  TJ2kSliceFn = function(k, hb, worker: Integer): Pointer of object;
+  TJ2kSliceEndFn = procedure(k, worker: Integer) of object;
+  TJ2kModelLink = record
+    kind: TJ2kModelKind;
+    { kmEncode, kmDecode: slice k starts on a worker (0 to threads - 1; a
+      worker does one slice at a time) and asks for its model; it ends }
+    slice: TJ2kSliceFn;
+    sliceEnd: TJ2kSliceEndFn;
+    threads: Integer;        { the slices on so many threads at most }
+    dump: TStream;           { kmDump }
+  end;
+
+const
+  { the maps of a tile (pjaj2kmc.c) take at most this many bytes; a tile
+    that needs more is coded without them }
+  KM_MAPCAP = 1 shl 27;
+  { a slice's tables: 2^KM_HBMIN to 2^KM_HBMAX counters each (pjaj2kmc.c) }
+  KM_HBMIN = 10; KM_HBMAX = 20;
+  { the slices: one per J2K_SLICE_BYTES of codestream, at most one a tile
+    and J2K_MAX_SLICES }
+  J2K_SLICE_BYTES = 4 shl 20; J2K_MAX_SLICES = 64;
+
 { The codestream data[off..off + len) as side information and decisions,
   one blob that J2kRebuild turns back into it; checked here. False and
   why when it is refused. }
@@ -79,12 +115,31 @@ function J2kAnalyze(const data: TBytes; off, len: Int64; out blob: TBytes; out r
   and why: a check that failed, or (a bug) 'exception ...' }
 function J2kRebuild(const blob: TBytes; out cs: TBytes): Boolean;
 function J2kRebuildWhy(const blob: TBytes; out cs: TBytes; out why: string): Boolean;
+{ The same with a model: J2kAnalyzeWith(kmEncode) codes the decisions with
+  lk.mem's model as it finds them, leaves them out of the blob, and does
+  not rebuild the codestream (the caller checks the whole stream);
+  J2kRebuildWith(kmDecode) decodes them from lk.mem's model. kmDump writes
+  what the model would be given to lk.dump. }
+function J2kAnalyzeWith(const data: TBytes; off, len: Int64; const lk: TJ2kModelLink; out blob: TBytes;
+  out reason: string; var st: TJ2kStats): Boolean;
+function J2kRebuildWith(const blob: TBytes; const lk: TJ2kModelLink; out cs: TBytes; out why: string): Boolean;
+{ pjaj2kmc.c's model: the bytes it needs with tables of at most 2^hb
+  counters (-1: hb is not one); set up in mem (that many bytes) to encode,
+  its bytes going to put(pctx, ..), or to decode data[0..len); its last
+  bytes out; the bytes a decoder has read }
+type TKmPut = procedure(ctx: Pointer; b: PByte; n: PtrInt); cdecl;
+function KmSize(hb: Integer): Int64;
+function KmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): Boolean;
+procedure KmFinish(mem: Pointer);
+function KmUsed(mem: Pointer): Int64;
 function J2kStreamName(i: Integer): string;
 function J2kRuleName(i: Integer): string;
 
 implementation
 
 {$L pjaj2kt1.o}
+{$L pjaj2kmc.o}
 
 function pjaj2k_t1_decode(w, h, orient, sty, npasses: LongInt; data: PByte; seglen, segpasses: PLongInt;
   nseg: LongInt; sym: PByte; symcap: Int64; passend: PLongInt; st: PByte): Int64; cdecl; external;
@@ -99,6 +154,42 @@ function pjaj2k_mq_minprefix(X: PByte; n: Int64; ctx0, sym: PByte; nsym: Int64; 
 function pjaj2k_raw_pack(sym: PByte; n: Int64; pad: LongInt; outp: PByte; cap: Int64): Int64; cdecl; external;
 function pjaj2k_mq_reach(X: PByte; n: Int64; ctx0, sym: PByte; lim: Int64; pe: PInt64;
   npe, reset: LongInt): Int64; cdecl; external;
+
+type
+  { pjaj2kmc.c's j2kmband_t }
+  TKmBand = record
+    comp, res, orient, nres, w, h, mb, coarser, cross0, cross1: LongInt;
+    map: Int64;
+  end;
+function pjaj2km_size(hb: LongInt): Int64; cdecl; external;
+function pjaj2km_init(mem: Pointer; size: Int64; hb, encoding: LongInt; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): LongInt; cdecl; external;
+procedure pjaj2km_finish(mem: Pointer); cdecl; external;
+function pjaj2km_used(mem: Pointer): Int64; cdecl; external;
+procedure pjaj2km_tile(mem: Pointer; bands: Pointer; nb: LongInt; maps: PByte; mapsize: Int64); cdecl; external;
+function pjaj2km_cb(mem: Pointer; b, x0, y0, w, h, sty, npasses, zbp: LongInt; sym: PByte; n: Int64;
+  passend: PLongInt): Int64; cdecl; external;
+
+function KmSize(hb: Integer): Int64;
+begin
+  Result := pjaj2km_size(hb);
+end;
+
+function KmInit(mem: Pointer; size: Int64; hb: Integer; encoding: Boolean; put: TKmPut; pctx: Pointer;
+  data: PByte; len: Int64): Boolean;
+begin
+  Result := pjaj2km_init(mem, size, hb, Ord(encoding), put, pctx, data, len) = 0;
+end;
+
+procedure KmFinish(mem: Pointer);
+begin
+  pjaj2km_finish(mem);
+end;
+
+function KmUsed(mem: Pointer): Int64;
+begin
+  Result := pjaj2km_used(mem);
+end;
 
 const
   MAXNL = 32;
@@ -415,7 +506,21 @@ type
     brD: TBytes; brP, brE: Int64; brBuf, brCt: Cardinal; brBad: Boolean;
     { the bit writer }
     bw: TBW; bwBuf, bwCt: Cardinal;
+    { the model, if any (pjaj2kmc.c): the tile's bands and maps }
+    lk: TJ2kModelLink;
+    km: Pointer;                       { the slice's model }
+    kmBands: array of TKmBand; kmMaps: TBytes; kmMapSize: Int64;
+    { the slices: each one's first tile (its place among the tiles coded), its
+      tables' bits, and where streams 1 to 8 are when it starts }
+    nslice: Integer;
+    slFirst, slHb: array of LongInt;
+    slPos: array of array[SH_LAY..SH_HDRX] of Int64;
+    worker: Integer;
+    procedure StartSlice(k, t: Integer);
+    procedure EndSlice(k: Integer);
     constructor Create(analysing: Boolean);
+    procedure ModelTile;
+    procedure DumpCb(cb, x0, y0, w, h, sty, npass: Integer; nsym: Int64);
     { headers }
     procedure ParseMainItem(const it: TItem);
     procedure ParseCod(const d: TBytes; p, e: Int64; isCoc: Boolean; out c: TCodC; out g: TCodG);
@@ -1504,6 +1609,125 @@ begin
   x[18] := 46; x[17] := 3; x[0] := 4;
 end;
 
+{ The tile's bands for the model: each one's parent (the band one
+  resolution coarser of its orientation, the LL band for the first
+  resolution) and the bands of components 0 and 1 of the same resolution and
+  orientation; and their maps, one byte a coefficient, for components 0 and
+  1 and one more for the others in turn, if they fit in KM_MAPCAP }
+procedure TJ2k.ModelTile;
+var b, c, r, o: Integer; bg: TBandG; area, need, a0, a1, a2: Int64; base: array[0..2] of Int64;
+  areaOf: array of Int64;
+
+  function BandOf(c_, r_, o_: Integer): Integer;
+  begin
+    Result := -1;
+    if (c_ < 0) or (c_ >= ncomp) or (r_ < 0) or (r_ >= comps[c_].nres) then Exit;
+    if r_ = 0 then begin if o_ = 0 then Result := ress[comps[c_].res0].band[0]; end
+    else if o_ > 0 then Result := ress[comps[c_].res0 + r_].band[o_ - 1];
+  end;
+
+begin
+  SetLength(kmBands, Length(bands));
+  SetLength(areaOf, ncomp);
+  for c := 0 to ncomp - 1 do areaOf[c] := 0;
+  for b := 0 to High(bands) do begin
+    bg := bands[b];
+    c := bg.comp; r := bg.res; o := bg.orient;
+    kmBands[b] := Default(TKmBand);
+    kmBands[b].comp := c; kmBands[b].res := r; kmBands[b].orient := o; kmBands[b].nres := comps[c].nres;
+    kmBands[b].mb := bg.mb;
+    if (bg.x1 - bg.x0 < High(LongInt)) and (bg.y1 - bg.y0 < High(LongInt)) then begin
+      kmBands[b].w := bg.x1 - bg.x0; kmBands[b].h := bg.y1 - bg.y0;
+    end;
+    if r = 0 then kmBands[b].coarser := -1
+    else if r = 1 then kmBands[b].coarser := BandOf(c, 0, 0)
+    else kmBands[b].coarser := BandOf(c, r - 1, o);
+    kmBands[b].cross0 := -1; kmBands[b].cross1 := -1;
+    if c > 0 then kmBands[b].cross0 := BandOf(0, r, o);
+    if c > 1 then kmBands[b].cross1 := BandOf(1, r, o);
+    area := Int64(kmBands[b].w) * kmBands[b].h;
+    if areaOf[c] <= KM_MAPCAP then areaOf[c] := areaOf[c] + area;
+  end;
+  a0 := areaOf[0]; a1 := 0; a2 := 0;
+  if ncomp > 1 then a1 := areaOf[1];
+  for c := 2 to ncomp - 1 do if areaOf[c] > a2 then a2 := areaOf[c];
+  need := a0 + a1 + a2;
+  base[0] := 0; base[1] := a0; base[2] := a0 + a1;
+  for b := 0 to High(bands) do
+    if need > KM_MAPCAP then kmBands[b].map := -1
+    else begin
+      c := kmBands[b].comp; if c > 2 then c := 2;
+      kmBands[b].map := base[c];
+      base[c] := base[c] + Int64(kmBands[b].w) * kmBands[b].h;
+      if (kmBands[b].comp >= 2) and (b < High(bands)) and (kmBands[b + 1].comp <> kmBands[b].comp) then
+        base[2] := a0 + a1;
+    end;
+  if need > KM_MAPCAP then need := 0;
+  if Length(kmMaps) < need then begin kmMaps := nil; SetLength(kmMaps, need); end;
+  kmMapSize := need;
+  if lk.kind = kmDump then begin
+    lk.dump.WriteByte(Ord('T'));
+    lk.dump.WriteDWord(Length(kmBands));
+    lk.dump.WriteQWord(QWord(kmMapSize));
+    if Length(kmBands) > 0 then lk.dump.WriteBuffer(kmBands[0], SizeOf(TKmBand) * Length(kmBands));
+  end else
+    if km = nil then Refuse('internal: no model')
+    else if Length(kmBands) > 0 then pjaj2km_tile(km, @kmBands[0], Length(kmBands), At(kmMaps, 0), kmMapSize)
+    else pjaj2km_tile(km, nil, 0, nil, 0);
+end;
+
+{ Slice k starts at the t-th tile coded. Analysing: where the streams are,
+  and its model (its tables' bits by its share of the codestream);
+  rebuilding: the streams must be where the slice table says, and its
+  model is asked for }
+procedure TJ2k.StartSlice(k, t: Integer);
+var i: Integer;
+begin
+  if an then begin
+    if k >= Length(slFirst) then begin
+      SetLength(slFirst, k + 8); SetLength(slHb, k + 8); SetLength(slPos, k + 8);
+    end;
+    slFirst[k] := t;
+    for i := SH_LAY to SH_HDRX do slPos[k][i] := sw[i].n;
+    slHb[k] := KM_HBMIN;
+    while (slHb[k] < KM_HBMAX) and (Int64(1) shl (slHb[k] + 1) < csLen div nslice) do Inc(slHb[k]);
+  end else
+    for i := SH_LAY to SH_HDRX do
+      if sr[i].p <> slPos[k][i] then Refuse('bad slice');
+  case lk.kind of
+    kmEncode, kmDecode: begin
+        km := lk.slice(k, slHb[k], worker);
+        if km = nil then Refuse('no model');
+      end;
+    kmDump: begin lk.dump.WriteByte(Ord('L')); lk.dump.WriteByte(slHb[k]); end;
+    else ;
+  end;
+end;
+
+procedure TJ2k.EndSlice(k: Integer);
+begin
+  if lk.kind in [kmEncode, kmDecode] then lk.sliceEnd(k, worker);
+  km := nil;
+end;
+
+{ kmDump: what pjaj2km_cb would be given, the decisions as bits }
+procedure TJ2k.DumpCb(cb, x0, y0, w, h, sty, npass: Integer; nsym: Int64);
+var hd: array[0..8] of LongInt; bits: TBytes; i: Int64;
+begin
+  hd[0] := cbBand[cb]; hd[1] := x0; hd[2] := y0; hd[3] := w; hd[4] := h; hd[5] := sty; hd[6] := npass;
+  hd[7] := cbZbp[cb]; hd[8] := 0;
+  lk.dump.WriteByte(Ord('C'));
+  lk.dump.WriteBuffer(hd, SizeOf(hd));
+  lk.dump.WriteQWord(QWord(nsym));
+  bits := nil; SetLength(bits, (nsym + 7) div 8);
+  i := 0;
+  while i < nsym do begin
+    if symb[i] and 1 <> 0 then bits[i shr 3] := bits[i shr 3] or (128 shr (i and 7));
+    Inc(i);
+  end;
+  if Length(bits) > 0 then lk.dump.WriteBuffer(bits[0], Length(bits));
+end;
+
 procedure TJ2k.DoCb(cb: Integer);
 var bg: TBandG; w, h, sty, npass, nseg, k, pc, i, pad, rule, br, p0, p1, npe, sp, reset: Integer;
   x0, y0, x1, y1, tot, nsym, a, n, used, nf, ne, kk, on, L, Lo, Lt, prev, cap, segStart, d, dd,
@@ -1599,6 +1823,11 @@ begin
       Exit;
     end;
     st.decisions := st.decisions + nsym;
+    if lk.kind = kmEncode then begin
+      if pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), nsym,
+        @passend[0]) <> nsym then Refuse('model');
+    end else if lk.kind = kmDump then DumpCb(cb, x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, nsym)
+    else begin
     { the decisions' bits }
     Grow(sw[SH_DEC].d, (dbits + nsym) div 8 + 8);
     a := 0;
@@ -1608,6 +1837,7 @@ begin
       Inc(dbits); Inc(a);
     end;
     sw[SH_DEC].n := (dbits + 7) div 8;
+    end;
   end else begin
     cbDOff[cb] := cbData.n;
     if sr[SH_T1R].Get <> 0 then begin
@@ -1618,10 +1848,16 @@ begin
     end;
     if (npass > MAXPASSES) or (w > 1024) or (h > 1024) or (w * h > 4096) then Refuse('bad passes');
     EnsureB(symb, cap);
-    nsym := pjaj2k_t1_replay(w, h, bg.orient, sty, npass, At(sr[SH_DEC].d, 0), dbits, 8 * Int64(sr[SH_DEC].e),
-      used, At(symb, 0), cap, @passend[0], @stb[0]);
-    if nsym < 0 then Refuse('decisions');
-    dbits := dbits + used;
+    if lk.kind = kmDecode then begin
+      nsym := pjaj2km_cb(km, cbBand[cb], x0 - bg.x0, y0 - bg.y0, w, h, sty, npass, cbZbp[cb], At(symb, 0), cap,
+        @passend[0]);
+      if nsym < 0 then Refuse('decisions');
+    end else begin
+      nsym := pjaj2k_t1_replay(w, h, bg.orient, sty, npass, At(sr[SH_DEC].d, 0), dbits, 8 * Int64(sr[SH_DEC].e),
+        used, At(symb, 0), cap, @passend[0], @stb[0]);
+      if nsym < 0 then Refuse('decisions');
+      dbits := dbits + used;
+    end;
   end;
   Inc(st.cbs);
   { each segment's bytes }
@@ -2001,6 +2237,7 @@ begin
     if tps[i].isot = t then begin SetLength(tileTps, Length(tileTps) + 1); tileTps[High(tileTps)] := i; end;
   TileParams;
   Geometry;
+  if lk.kind <> kmNone then ModelTile;
   SetLength(bandZ, Length(bands));
   for i := 0 to High(bandZ) do bandZ[i] := 0;
   pkdPos := 0; nsopLast := -1;
@@ -2230,15 +2467,174 @@ end;
 
 const BLOB_VERSION = 1;
 
-function J2kRebuildInto(const blob: TBytes; out cs: TBytes; out why: string): Boolean;
-var j: TJ2k; r: TBR; i: Integer; n: array[0..J2K_NSTREAMS - 1] of Int64; p: Int64; used: TBytes;
+{ J2K_SLICE_BYTES; the tests make slices of fewer bytes with
+  PJA_J2K_SLICE=<bytes> (the slices are in the stream: any reader reads it) }
+function SliceBytes: Int64;
+begin
+  Result := StrToInt64Def(GetEnvironmentVariable('PJA_J2K_SLICE'), J2K_SLICE_BYTES);
+  if Result < 1 then Result := J2K_SLICE_BYTES;
+end;
+
+{ ------------------------------------------------------------------ slices on threads }
+type
+  TSliceWork = procedure(k, w: Integer) of object;
+  TSliceRun = class
+    next: LongInt;                { the next slice no worker has taken }
+    n: Integer;
+    work: TSliceWork;
+    errors: array of string;      { each slice's, '' when it went through }
+    procedure Loop(w: Integer);
+  end;
+  TSliceThread = class(TThread)
+    run: TSliceRun; w: Integer;
+    procedure Execute; override;
+  end;
+
+procedure TSliceRun.Loop(w: Integer);
+var k: Integer;
+begin
+  repeat
+    k := InterLockedIncrement(next) - 1;
+    if k >= n then Break;
+    try
+      work(k, w);
+    except
+      on E: EJ2k do errors[k] := E.Message;
+      on E: Exception do errors[k] := 'exception ' + E.ClassName + ': ' + E.Message;
+    end;
+    if errors[k] <> '' then Break;
+  until False;
+end;
+
+procedure TSliceThread.Execute;
+begin
+  run.Loop(w);
+end;
+
+{ work(k, w) for each slice k, on up to `threads` workers w (this thread is
+  worker 0); the first error, if any, refused }
+procedure RunSlices(n, threads: Integer; work: TSliceWork);
+var run: TSliceRun; pool: array of TSliceThread; i, m: Integer; why: string;
+begin
+  run := TSliceRun.Create;
+  try
+    run.n := n; run.work := work; run.next := 0;
+    SetLength(run.errors, n);
+    m := threads; if m > n then m := n; if m < 1 then m := 1;
+    SetLength(pool, m);
+    for i := 1 to m - 1 do begin
+      try
+        pool[i] := TSliceThread.Create(True);
+      except
+        pool[i] := nil;
+      end;
+      if pool[i] = nil then Break;
+      pool[i].run := run; pool[i].w := i; pool[i].FreeOnTerminate := False;
+      pool[i].Start;
+    end;
+    run.Loop(0);
+    for i := 1 to m - 1 do
+      if pool[i] <> nil then begin pool[i].WaitFor; pool[i].Free; end;
+    why := '';
+    for i := 0 to n - 1 do if (why = '') and (run.errors[i] <> '') then why := run.errors[i];
+    { a slice no worker took: one stopped at an error before it }
+    if (why = '') and (run.next < n) then why := 'slices left';
+  finally
+    run.Free;
+  end;
+  if why <> '' then Refuse(why);
+end;
+
+procedure AddStats(var a: TJ2kStats; const b: TJ2kStats);
+var i: Integer;
+begin
+  a.tiles := a.tiles + b.tiles; a.packets := a.packets + b.packets;
+  a.hdrExceptions := a.hdrExceptions + b.hdrExceptions; a.treeOverrides := a.treeOverrides + b.treeOverrides;
+  a.lbNonMinimal := a.lbNonMinimal + b.lbNonMinimal; a.cbs := a.cbs + b.cbs; a.cbRaw := a.cbRaw + b.cbRaw;
+  a.segs := a.segs + b.segs; a.rawSegs := a.rawSegs + b.rawSegs; a.bounds := a.bounds + b.bounds;
+  a.tails := a.tails + b.tails; a.tailBits := a.tailBits + b.tailBits; a.decisions := a.decisions + b.decisions;
+  for i := 0 to 15 do a.rule[i] := a.rule[i] + b.rule[i];
+  for i := 0 to 3 do a.brule[i] := a.brule[i] + b.brule[i];
+end;
+
+type
+  { a codestream's slices, analysed or rebuilt one per TJ2k on the workers
+    (the model's modes): the tiles of slice k are tiles[first[k] ..
+    first[k + 1]) }
+  TSliced = class
+    main: TJ2k;
+    tiles: array of Integer;          { the tiles coded, in order }
+    sliceOf: array of Integer;        { a tile's slice, -1 }
+    parts: array of TJ2k;             { analysis: each slice's, kept to be merged }
+    bytes: array of TBytes;           { rebuild: each tile-part's bytes }
+    data: TBytes; off, len: Int64;
+    procedure Analyse(k, w: Integer);
+    procedure Rebuild(k, w: Integer);
+    destructor Destroy; override;
+  end;
+
+destructor TSliced.Destroy;
+var k: Integer;
+begin
+  for k := 0 to High(parts) do parts[k].Free;
+  inherited Destroy;
+end;
+
+procedure TSliced.Analyse(k, w: Integer);
+var j: TJ2k; t, e: Integer;
+begin
+  j := TJ2k.Create(True);
+  parts[k] := j;
+  j.lk := main.lk; j.worker := w;
+  j.cs := data; j.csOff := off; j.csLen := len;
+  j.nslice := main.nslice;
+  j.Structure;
+  if k + 1 < main.nslice then e := main.slFirst[k + 1] else e := Length(tiles);
+  j.StartSlice(k, main.slFirst[k]);
+  for t := main.slFirst[k] to e - 1 do j.Tile(tiles[t]);
+  j.EndSlice(k);
+  { what is merged is kept; the scratch goes }
+  j.symb := nil; j.fb := nil; j.eb := nil; j.segdata := nil; j.kmMaps := nil; j.cbData.d := nil; j.tileOut.d := nil;
+end;
+
+procedure TSliced.Rebuild(k, w: Integer);
+var j: TJ2k; i, t, e: Integer;
+begin
+  j := TJ2k.Create(False);
+  try
+    j.lk := main.lk; j.worker := w;
+    for i := 0 to J2K_NSTREAMS - 1 do begin j.sr[i] := main.sr[i]; j.sr[i].p := 0; end;
+    j.ReadHeaders;
+    j.nslice := main.nslice; j.slFirst := main.slFirst; j.slHb := main.slHb; j.slPos := main.slPos;
+    for i := SH_LAY to SH_HDRX do j.sr[i].p := main.slPos[k][i];
+    if k + 1 < main.nslice then e := main.slFirst[k + 1] else e := Length(tiles);
+    j.StartSlice(k, main.slFirst[k]);
+    for t := main.slFirst[k] to e - 1 do j.Tile(tiles[t]);
+    j.EndSlice(k);
+    { the slice's side information, all of it and no more }
+    for i := SH_LAY to SH_HDRX do
+      if ((k + 1 < main.nslice) and (j.sr[i].p <> main.slPos[k + 1][i])) or
+         ((k + 1 = main.nslice) and (j.sr[i].p <> j.sr[i].e)) then
+        Refuse('side information left over: ' + J2kStreamName(i));
+    for i := 0 to High(j.tps) do
+      if sliceOf[j.tps[i].isot] = k then bytes[i] := j.tps[i].bytes;
+  finally
+    j.Free;
+  end;
+end;
+
+function J2kRebuildInto(const blob: TBytes; const lk: TJ2kModelLink; out cs: TBytes; out why: string): Boolean;
+var j: TJ2k; r: TBR; i, k, t, nu, s: Integer; n: array[0..J2K_NSTREAMS - 1] of Int64; p: Int64; used: TBytes;
+  sd: TSliced;
 begin
   cs := nil; why := ''; Result := False;
   j := TJ2k.Create(False);
+  j.lk := lk;
   try
     try
       r := Default(TBR); r.d := blob; r.p := 0; r.e := Length(blob);
-      if r.Get <> BLOB_VERSION then Refuse('blob version');
+      { version 2: the decisions coded apart, by slices (mode 1) }
+      if r.Get <> BLOB_VERSION + Ord(lk.kind = kmDecode) then Refuse('blob version');
       for i := 0 to J2K_NSTREAMS - 1 do n[i] := r.VI(High(LongInt));
       p := r.p;
       for i := 0 to J2K_NSTREAMS - 1 do begin
@@ -2248,11 +2644,52 @@ begin
       end;
       j.ReadHeaders;
       used := TileList(j);
-      for i := 0 to High(used) do
-        if used[i] <> 0 then j.Tile(i);
-      for i := 0 to J2K_NSTREAMS - 1 do
-        if (i <> SH_DEC) and (j.sr[i].p <> j.sr[i].e) then Refuse('side information left over: ' + J2kStreamName(i));
-      if (j.dbits + 7) div 8 <> j.sr[SH_DEC].e then Refuse('decisions left over');
+      nu := 0;
+      for i := 0 to High(used) do nu := nu + used[i];
+      j.nslice := 0;
+      if lk.kind = kmDecode then begin
+        { the slice table, after the streams }
+        r.p := p;
+        s := r.VI(Min64(nu, J2K_MAX_SLICES));
+        if s < 1 then Refuse('bad slices');
+        j.nslice := s;
+        SetLength(j.slFirst, s); SetLength(j.slHb, s); SetLength(j.slPos, s);
+        for k := 0 to s - 1 do begin
+          if k = 0 then j.slFirst[k] := 0 else j.slFirst[k] := r.VI(nu - 1);
+          if (k > 0) and (j.slFirst[k] <= j.slFirst[k - 1]) then Refuse('bad slices');
+          j.slHb[k] := r.Get;
+          if (j.slHb[k] < KM_HBMIN) or (j.slHb[k] > KM_HBMAX) then Refuse('bad slices');
+          for i := SH_LAY to SH_HDRX do
+            if k = 0 then j.slPos[k][i] := 0 else j.slPos[k][i] := r.VI(n[i]);
+        end;
+        if r.p <> r.e then Refuse('blob left over');
+      end else if p <> Length(blob) then Refuse('blob left over');
+      if lk.kind = kmDecode then begin
+        { each slice on its own TJ2k, on the workers }
+        sd := TSliced.Create;
+        try
+          sd.main := j;
+          SetLength(sd.tiles, nu); SetLength(sd.sliceOf, Length(used)); SetLength(sd.bytes, Length(j.tps));
+          t := 0; k := 0;
+          for i := 0 to High(used) do begin
+            sd.sliceOf[i] := -1;
+            if used[i] <> 0 then begin
+              while (k + 1 < j.nslice) and (j.slFirst[k + 1] <= t) do Inc(k);
+              sd.tiles[t] := i; sd.sliceOf[i] := k; Inc(t);
+            end;
+          end;
+          RunSlices(j.nslice, lk.threads, @sd.Rebuild);
+          for i := 0 to High(j.tps) do j.tps[i].bytes := sd.bytes[i];
+        finally
+          sd.Free;
+        end;
+      end else begin
+        for i := 0 to High(used) do
+          if used[i] <> 0 then j.Tile(i);
+        for i := 0 to J2K_NSTREAMS - 1 do
+          if (i <> SH_DEC) and (j.sr[i].p <> j.sr[i].e) then Refuse('side information left over: ' + J2kStreamName(i));
+        if (j.dbits + 7) div 8 <> j.sr[SH_DEC].e then Refuse('decisions left over');
+      end;
       cs := j.Assemble;
       Result := True;
     except
@@ -2264,51 +2701,117 @@ begin
   end;
 end;
 
+const NOLINK: TJ2kModelLink = (kind: kmNone; slice: nil; sliceEnd: nil; threads: 1; dump: nil);
+
 function J2kRebuild(const blob: TBytes; out cs: TBytes): Boolean;
 var why: string;
 begin
-  Result := J2kRebuildInto(blob, cs, why);
+  Result := J2kRebuildInto(blob, NOLINK, cs, why);
 end;
 
 function J2kRebuildWhy(const blob: TBytes; out cs: TBytes; out why: string): Boolean;
 begin
-  Result := J2kRebuildInto(blob, cs, why);
+  Result := J2kRebuildInto(blob, NOLINK, cs, why);
+end;
+
+function J2kRebuildWith(const blob: TBytes; const lk: TJ2kModelLink; out cs: TBytes; out why: string): Boolean;
+begin
+  Result := J2kRebuildInto(blob, lk, cs, why);
 end;
 
 function J2kAnalyze(const data: TBytes; off, len: Int64; out blob: TBytes; out reason: string;
   var st: TJ2kStats): Boolean;
-var j: TJ2k; i, k: Integer; w: TBW; used, back: TBytes; why: string;
+begin
+  Result := J2kAnalyzeWith(data, off, len, NOLINK, blob, reason, st);
+end;
+
+function J2kAnalyzeWith(const data: TBytes; off, len: Int64; const lk: TJ2kModelLink; out blob: TBytes;
+  out reason: string; var st: TJ2kStats): Boolean;
+var j: TJ2k; i, k, t, nu: Integer; w: TBW; used, back: TBytes; why: string; sd: TSliced;
 begin
   blob := nil; reason := ''; Result := False;
   if (off < 0) or (len < 0) or (off + len > Length(data)) then begin reason := 'bad range'; Exit; end;
+  if lk.kind = kmDecode then begin reason := 'bad link'; Exit; end;
   j := TJ2k.Create(True);
+  j.lk := lk;
+  if lk.kind = kmDump then begin lk.dump.WriteByte(Ord('S')); lk.dump.WriteQWord(QWord(len)); end;
   try
     try
       j.cs := data; j.csOff := off; j.csLen := len;
       j.Structure;
       used := TileList(j);
-      for i := 0 to High(used) do
-        if used[i] <> 0 then j.Tile(i);
+      nu := 0;
+      for i := 0 to High(used) do nu := nu + used[i];
+      { the slices, with a model }
+      j.nslice := 0;
+      if lk.kind <> kmNone then
+        j.nslice := Max64(1, Min64(Min64(nu, len div SliceBytes), J2K_MAX_SLICES));
+      if lk.kind = kmEncode then begin
+        { each slice on its own TJ2k, on the workers, then put together: the
+          streams one after the other, where each slice's start, the
+          tile-parts' packets }
+        sd := TSliced.Create;
+        try
+          sd.main := j; sd.data := data; sd.off := off; sd.len := len;
+          SetLength(sd.tiles, nu); SetLength(sd.sliceOf, Length(used)); SetLength(sd.parts, j.nslice);
+          SetLength(j.slFirst, j.nslice); SetLength(j.slHb, j.nslice); SetLength(j.slPos, j.nslice);
+          t := 0; k := 0;
+          for i := 0 to High(used) do begin
+            sd.sliceOf[i] := -1;
+            if used[i] <> 0 then begin
+              if (k + 1 < j.nslice) and (t = Int64(k + 1) * nu div j.nslice) then Inc(k);
+              sd.tiles[t] := i; sd.sliceOf[i] := k; Inc(t);
+            end;
+          end;
+          for k := 0 to j.nslice - 1 do j.slFirst[k] := Int64(k) * nu div j.nslice;
+          RunSlices(j.nslice, lk.threads, @sd.Analyse);
+          for k := 0 to j.nslice - 1 do begin
+            for i := SH_LAY to SH_HDRX do begin
+              j.slPos[k][i] := j.sw[i].n;
+              j.sw[i].PutN(sd.parts[k].sw[i].d, 0, sd.parts[k].sw[i].n);
+            end;
+            j.slHb[k] := sd.parts[k].slHb[k];
+            for i := 0 to High(j.tps) do
+              if sd.sliceOf[j.tps[i].isot] = k then j.tps[i] := sd.parts[k].tps[i];
+            AddStats(j.st, sd.parts[k].st);
+            FreeAndNil(sd.parts[k]);
+          end;
+        finally
+          sd.Free;
+        end;
+      end else begin
+        k := 0; t := 0;
+        for i := 0 to High(used) do
+          if used[i] <> 0 then begin
+            if (k < j.nslice) and (t = Int64(k) * nu div j.nslice) then begin j.StartSlice(k, t); Inc(k); end;
+            j.Tile(i);
+            Inc(t);
+          end;
+      end;
       j.WriteHeaders;
       w := Default(TBW);
-      w.Put(BLOB_VERSION);
+      w.Put(BLOB_VERSION + Ord(lk.kind = kmEncode));
       for i := 0 to J2K_NSTREAMS - 1 do w.V(j.sw[i].n);
       for i := 0 to J2K_NSTREAMS - 1 do w.PutN(j.sw[i].d, 0, j.sw[i].n);
+      if lk.kind = kmEncode then begin
+        w.V(j.nslice);
+        for k := 0 to j.nslice - 1 do begin
+          if k > 0 then w.V(j.slFirst[k]);
+          w.Put(j.slHb[k]);
+          if k > 0 then for i := SH_LAY to SH_HDRX do w.V(j.slPos[k][i]);
+        end;
+      end;
       blob := w.Bytes;
-      { checked: the blob alone gives the codestream back }
-      if not J2kRebuildInto(blob, back, why) then Refuse('verify: ' + why);
-      if (Length(back) <> len) or ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
+      { checked: the blob alone gives the codestream back (with a model, the
+        caller decodes the whole stream instead) }
+      if (lk.kind = kmNone) and not J2kRebuildInto(blob, NOLINK, back, why) then Refuse('verify: ' + why);
+      if (lk.kind = kmNone) and ((Length(back) <> len) or ((len > 0) and not CompareMem(@back[0], @data[off], len))) then begin
         k := 0;
         while (k < Length(back)) and (k < len) and (back[k] = data[off + k]) do Inc(k);
         Refuse('verify: differs at ' + IntToStr(k) + ' of ' + IntToStr(len) + ' (' + IntToStr(Length(back)) + ')');
       end;
-      Inc(st.codestreams); st.tiles := st.tiles + j.st.tiles; st.packets := st.packets + j.st.packets;
-      st.hdrExceptions := st.hdrExceptions + j.st.hdrExceptions; st.treeOverrides := st.treeOverrides + j.st.treeOverrides;
-      st.lbNonMinimal := st.lbNonMinimal + j.st.lbNonMinimal; st.cbs := st.cbs + j.st.cbs; st.cbRaw := st.cbRaw + j.st.cbRaw;
-      st.segs := st.segs + j.st.segs; st.rawSegs := st.rawSegs + j.st.rawSegs; st.bounds := st.bounds + j.st.bounds;
-      st.tails := st.tails + j.st.tails; st.tailBits := st.tailBits + j.st.tailBits; st.decisions := st.decisions + j.st.decisions;
-      for i := 0 to 15 do st.rule[i] := st.rule[i] + j.st.rule[i];
-      for i := 0 to 3 do st.brule[i] := st.brule[i] + j.st.brule[i];
+      Inc(st.codestreams);
+      AddStats(st, j.st);
       for i := 0 to J2K_NSTREAMS - 1 do st.side[i] := st.side[i] + j.sw[i].n;
       Result := True;
     except

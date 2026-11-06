@@ -1,8 +1,8 @@
 #!/bin/sh
 # The C part of PJA (stream version 7's model, pjav7c.c, and the helpers
-# around it, pjasysc.c; JPEG 2000's tier-1, pjaj2kt1.c) as objects for
+# around it, pjasysc.c; JPEG 2000's tier-1, pjaj2kt1.c, and stream version 8's model, pjaj2kmc.c) as objects for
 # FreePascal to link: pjav7.pas takes them with {$L pjav7c.o} and
-# {$L pjasysc.o}, pjaj2kcs.pas with {$L pjaj2kt1.o}, found through -Fo<dir>.
+# {$L pjasysc.o}, pjaj2kcs.pas with {$L pjaj2kt1.o} and {$L pjaj2kmc.o}, found through -Fo<dir>.
 #
 #   pas/build_c.sh <out dir> [extra C flags]
 #
@@ -44,3 +44,5 @@ $CC $FLAGS "$@" -c "$HERE/pjav7c.c" -o "$OUT/pjav7c.o"
 $CC $FLAGS "$@" -c "$HERE/pjasysc.c" -o "$OUT/pjasysc.o"
 # shellcheck disable=SC2086
 $CC $FLAGS "$@" -c "$HERE/pjaj2kt1.c" -o "$OUT/pjaj2kt1.o"
+# shellcheck disable=SC2086
+$CC $FLAGS "$@" -c "$HERE/pjaj2kmc.c" -o "$OUT/pjaj2kmc.o"

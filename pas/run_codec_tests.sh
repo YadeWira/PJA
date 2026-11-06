@@ -78,6 +78,13 @@ echo "-- stream version 8 (the JPEG 2000 family): the codestreams found, every s
 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
 echo "-- JPEG 2000 stage B: each codestream taken apart, put back together from the blob alone, and damaged copies"
 "$OUT/test_j2kcs" -q -min 14 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
+echo "-- JPEG 2000 stage C: stream version 8's mode 1, the same stream on 1 and 4 threads, in slices too, and damaged"
+"$OUT/test_j2kcs" -q -min 14 -mode1 "$PJA/tests/j2k" | grep -E '^mode 1'
+m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 1 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 4 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+[ -n "$m1" ] && [ "$m1" = "$m4" ] || { echo "FAIL: mode 1 in slices differs on 1 and 4 threads ($m1, $m4)"; exit 1; }
+echo "mode 1 in slices of 1500 bytes: the same streams on 1 and 4 threads ($m1)"
+PJA_J2K_SLICE=1500 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
 echo "-- what a later release writes: FutureVersion (codec byte 0 from 9 to 255, PATCH, version 8, .pja)"
 "$OUT/test_versions" "$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" | tail -2
 
@@ -90,13 +97,15 @@ $FPC -O2 -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/dump_st
 # version 7 with the C part built without SSE2 (and so without its SSE4.1 copy)
 $FPC -O3 -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/cplain" -FU"$PLAIN" -FE"$PLAIN" "$PAS/tests/dump_streams.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" ${dirs[@]+"${dirs[@]}"} "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
+SRC_DIRS=("$PJA/tests/jpg" "$PJA/tests/jls" "$PJA/tests/j2k" "slices:$PJA/tests/j2k" ${dirs[@]+"${dirs[@]}"} "fast:$PJA/tests/jpg" "v7:$PJA/tests/jpg")
 for d in ${dirs[@]+"${dirs[@]}"}; do SRC_DIRS+=("v7:$d"); done
 for d in "${SRC_DIRS[@]}"; do
   # fast:DIR = the same, with the fast model; v7:DIR, with stream version 7's
-  unset PJA_TEST_FAST PJA_TEST_V7; tag=
+  unset PJA_TEST_FAST PJA_TEST_V7 PJA_J2K_SLICE; tag=
   if [ "${d#fast:}" != "$d" ]; then d=${d#fast:}; export PJA_TEST_FAST=1; tag=" (fast model)"; fi
   if [ "${d#v7:}" != "$d" ]; then d=${d#v7:}; export PJA_TEST_V7=1; tag=" (version 7)"; fi
+  # slices:DIR, JPEG 2000 codestreams cut in slices of 1500 bytes (mode 1)
+  if [ "${d#slices:}" != "$d" ]; then d=${d#slices:}; export PJA_J2K_SLICE=1500; tag=" (mode 1 in slices)"; fi
   [ -d "$d" ] || continue
   R=$OUT/streams_ref; F1=$OUT/streams_fast; F2=$OUT/streams_fast_noasm; F3=$OUT/streams_fast_t4
   rm -rf "$R" "$F1" "$F2" "$F3"; mkdir -p "$R" "$F1" "$F2" "$F3"

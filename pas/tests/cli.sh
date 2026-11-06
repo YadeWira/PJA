@@ -127,6 +127,9 @@ if [ -e "$W/in/plasma.jp2" ]; then
   check "a says JPEG 2000, list too, x gives it back as .jp2" bash -c "
     '$PJA' a -f '$W/in/plasma.jp2' -o '$W/j2k/p.pja' | grep -q 'JPEG 2000' && '$PJA' list '$W/j2k/p.pja' | grep -q 'as .jp2, JPEG 2000' &&
     '$PJA' x -q '$W/j2k/p.pja' -o '$W/j2k/x/' && cmp -s '$W/in/plasma.jp2' '$W/j2k/x/p.jp2'"
+  check "its codestream modelled (mode 1), not as bytes, and the .pja smaller than the file" bash -c "
+    '$PJA' a -f '$W/in/plasma.jp2' -o '$W/j2k/m.pja' > '$W/j2k/m.txt' && grep -q '(JPEG 2000)' '$W/j2k/m.txt' &&
+    ! grep -q 'as bytes' '$W/j2k/m.txt' && [ \$(wc -c < '$W/j2k/m.pja') -lt \$(wc -c < '$W/in/plasma.jp2') ]"
   check "an extension the format does not keep: .jp2, .j2k, .jpx, .mj2 by the content" bash -c "
     for f in plasma.jp2 plasma_cs.j2k two_codestreams.jpx two_frames.mj2; do
       cp '$W/in/'\$f '$W/j2k/odd.x y' && '$PJA' a -q -f '$W/j2k/odd.x y' -o '$W/j2k/odd.pja' &&
@@ -140,7 +143,7 @@ import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) // 2] ^= 8; 
   check "one bit in a version 8 stream: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bad.pja' 2>/dev/null && [ ! -e '$W/j2k/bad.jp2' ]"
   # p.pja keeps the extension jp2: its stream from byte 40, the first codestream's mode 18 bytes in
   python3 -I -c "
-import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 1; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 2; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
   check "a codestream mode of a later release: rc 1, says FutureVersion" bash -c "
     ! '$PJA' x '$W/j2k/mode.pja' 2> '$W/j2k/err.txt' && grep -q 'FutureVersion' '$W/j2k/err.txt' && [ ! -e '$W/j2k/mode.jp2' ]"
 fi

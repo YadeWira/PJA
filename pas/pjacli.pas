@@ -17,7 +17,7 @@ program pjacli;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjamodel, pjaj2k;
+  SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjamodel, pjaj2k;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -412,8 +412,10 @@ function BytesNote(const r: TPackResult): string;
 begin
   if r.codec.asBytes then Result := '  (as bytes: ' + r.codec.jpeg.Text + ')'
   else if r.codec.repaired then Result := '  (repaired: ' + r.codec.jpeg.Text + ')'
-  { stage A of JPEG 2000: its codestreams are found, not yet modelled }
-  else if r.codec.j2k then Result := '  (JPEG 2000: as bytes for now)'
+  { JPEG 2000: its codestreams modelled (stream version 8's mode 1), or
+    none of them }
+  else if r.codec.j2k and (r.codec.j2kModelled > 0) then Result := '  (JPEG 2000)'
+  else if r.codec.j2k then Result := '  (JPEG 2000: as bytes)'
   else Result := '';
 end;
 
