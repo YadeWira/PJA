@@ -165,7 +165,7 @@ import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) // 2] ^= 8; 
   check "one bit in a version 8 stream: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bad.pja' 2>/dev/null && [ ! -e '$W/j2k/bad.jp2' ]"
   # p.pja keeps the extension jp2: its stream from byte 40, the first codestream's mode 18 bytes in
   python3 -I -c "
-import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 3; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
+import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[40 + 18] = 5; open(sys.argv[2], 'wb').write(d)" "$W/j2k/p.pja" "$W/j2k/mode.pja"
   check "a codestream mode of a later release: rc 1, says FutureVersion" bash -c "
     ! '$PJA' x '$W/j2k/mode.pja' 2> '$W/j2k/err.txt' && grep -q 'FutureVersion' '$W/j2k/err.txt' && [ ! -e '$W/j2k/mode.jp2' ]"
 fi
@@ -182,6 +182,29 @@ if [ -e "$W/in/bitonal.j2k" ]; then
   python3 -I -c "
 import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[len(d) - 20] ^= 16; open(sys.argv[2], 'wb').write(d)" "$W/j2k/b.pja" "$W/j2k/bbad.pja"
   check "one bit in a mode 2 stream's pixels: rc 1, nothing written" bash -c "! '$PJA' x '$W/j2k/bbad.pja' 2>/dev/null && [ ! -e '$W/j2k/bbad.j2k' ]"
+fi
+if [ -e "$W/in/ht_ojph_tiles.j2c" ]; then
+  # h.pja keeps the extension j2c: its stream from byte 40, the codestream's mode 18 bytes in
+  check "an HTJ2K codestream modelled (mode 3): JPEG 2000, smaller than the file, back byte for byte" bash -c "
+    '$PJA' a -f '$W/in/ht_ojph_tiles.j2c' -o '$W/j2k/h.pja' > '$W/j2k/h.txt' && grep -q '(JPEG 2000)' '$W/j2k/h.txt' &&
+    [ \$(wc -c < '$W/j2k/h.pja') -lt \$(wc -c < '$W/in/ht_ojph_tiles.j2c') ] &&
+    python3 -I -c 'import sys; sys.exit(open(sys.argv[1], \"rb\").read()[40 + 18] != 3)' '$W/j2k/h.pja' &&
+    '$PJA' x -q '$W/j2k/h.pja' -o '$W/j2k/hx/' && cmp -s '$W/in/ht_ojph_tiles.j2c' '$W/j2k/hx/h.j2c'"
+  check "a lossless HTJ2K file (JPH) as its pixels (mode 4), back byte for byte" bash -c "
+    '$PJA' a -q -f '$W/in/ht_grk_lossless.jph' -o '$W/j2k/hp.pja' &&
+    python3 -I -c 'import sys; sys.exit(open(sys.argv[1], \"rb\").read()[40 + 18] != 4)' '$W/j2k/hp.pja' &&
+    '$PJA' x -q '$W/j2k/hp.pja' -o '$W/j2k/hpx/' && cmp -s '$W/in/ht_grk_lossless.jph' '$W/j2k/hpx/hp.jph'"
+  python3 -I -c "
+import sys
+for a, b in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
+    d = bytearray(open(a, 'rb').read()); d[len(d) - 30] ^= 4; open(b, 'wb').write(d)" \
+    "$W/j2k/h.pja" "$W/j2k/hbad.pja" "$W/j2k/hp.pja" "$W/j2k/hpbad.pja"
+  check "one bit in a mode 3 stream, and in a mode 4 stream: rc 1, nothing written" bash -c "
+    ! '$PJA' x '$W/j2k/hbad.pja' 2>/dev/null && [ ! -e '$W/j2k/hbad.j2c' ] &&
+    ! '$PJA' x '$W/j2k/hpbad.pja' 2>/dev/null && [ ! -e '$W/j2k/hpbad.jph' ]"
+  check "info --estimate on an HTJ2K codestream: mode 3, its code-blocks modelled" bash -c "
+    o=\$('$PJA' info --estimate '$W/in/ht_ojph_tiles.j2c') && grep -q 'pja: mode 3 (HTJ2K, modelled): 2501 B -> ' <<< \"\$o\" &&
+    grep -q 'B of HTJ2K codestreams modelled (mode 3)' <<< \"\$o\""
 fi
 
 echo "--- existing outputs"
@@ -480,12 +503,13 @@ if [ -e "$W/in/two_codestreams.jpx" ]; then
     grep -q 'tile_grid: 2x2' <<< \"\$o\" && grep -q 'tile 1 part 0 at ' <<< \"\$o\" && grep -q 'tiles_present: 4' <<< \"\$o\" &&
     grep -q 'markers: SOC, SIZ, COD, TLM, PLT x36, QCD, COM, SOT x36, SOD x36, EOC' <<< \"\$o\" &&
     grep -q 'progression: PCRL' <<< \"\$o\" && grep -q 'eoc: true' <<< \"\$o\""
-  # the code-block style's HT bit set in the COD (byte 63): HTJ2K, which PJA keeps as bytes
+  # the code-block style's HT bit set in the COD (byte 63): an HTJ2K codestream whose code-blocks are not HT
+  # ones, which mode 3 keeps as bytes, its stream no smaller: mode 0
   python3 -I -c "
 import sys; d = bytearray(open(sys.argv[1], 'rb').read()); d[63] = 0x40; open(sys.argv[2], 'wb').write(d)" "$W/in/plasma_cs.j2k" "$W/j2ki/ht.j2k"
   check "info --estimate on an HTJ2K codestream: ht true, mode 0 and the analysis's reason" bash -c "
     o=\$('$PJA' info --estimate '$W/j2ki/ht.j2k') && grep -q 'code-blocks 64x64 (HT)' <<< \"\$o\" && grep -q '  ht: true' <<< \"\$o\" &&
-    grep -q 'pja: mode 0 (as bytes): HTJ2K' <<< \"\$o\" && grep -q 'no codestream modelled: all as bytes (mode 0)' <<< \"\$o\""
+    grep -q 'pja: mode 0 (as bytes): mode 3: ' <<< \"\$o\" && grep -q 'no codestream modelled: all as bytes (mode 0)' <<< \"\$o\""
   check "info on it (no --estimate): the headers' verdict, HTJ2K for both modes, nothing coded" bash -c "
     o=\$('$PJA' info '$W/j2ki/ht.j2k') &&
     grep -q 'pja: not estimated (pja info --estimate codes it): mode 2: not eligible: HTJ2K; mode 1: not analysable: HTJ2K' <<< \"\$o\" &&

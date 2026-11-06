@@ -42,8 +42,16 @@
   codestream of more is not taken and a stream that says more is refused
   before anything is decoded.
 
+  Mode 4 (since 0.9.6, doc/CODEC.md, "JPEG 2000, stage F"): the same for
+  an HTJ2K codestream. Its stream's layout is mode 2's; the side
+  information is mode 3's blob (version 4: pjaj2kcs with lk.ht), and the
+  coefficients are the HT code-blocks' values (pjaj2kht.c), made from them
+  and back to them. Taken when every code-block's values are whole: its
+  cleanup at plane 0, or at plane 1 with both refinement passes (Kakadu's
+  lossless code-blocks); a code-block kept as its bytes is not taken.
+
   This unit links C (pjaj2kcs's tier-1 and pjaj2kpm.c): a program without
-  it reads mode 2 as FutureVersion (pjacodec's hooks, set here). }
+  it reads modes 2 and 4 as FutureVersion (pjacodec's hooks, set here). }
 unit pjaj2kpx;
 
 {$I pja.inc}
@@ -92,6 +100,14 @@ function J2kMode2SizWhy(const siz: TBytes; len: Int64): string;
 { A mode 2 stream back to its codestream, which must be len bytes. }
 function J2kMode2Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode2Result;
 function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
+  out why: string): TMode2Result;
+{ Mode 4: an HTJ2K codestream's pixels, as mode 2's; mode3Floor: what mode
+  3's stream would be at the least (the side information and 7 / 10 of the
+  coded bytes: mode 3 saves 30% at best) }
+function J2kMode4Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode3Floor: Int64): TMode2Result;
+function J2kMode4Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode2Result;
+function J2kMode4DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
   out why: string): TMode2Result;
 
 implementation
@@ -155,6 +171,7 @@ type
 
   TPx = class
     encoding: Boolean;
+    ht: Boolean;                       { mode 4: HTJ2K's code-blocks (CbHt) }
     siz: TSiz;
     planes: array of array of Word;
     workers: array of TPxWorker;
@@ -169,6 +186,7 @@ type
     function Cb(km: Pointer; band, x0, y0, w, h, sty, npass, zbp: Integer; sym: PByte; n, cap: Int64;
       passend: PLongInt): Int64;
     function TileEnd(km: Pointer): string;
+    function CbHt(km: Pointer; band, x0, y0, w, h, np, B: Integer; q: PLongInt): Boolean;
   end;
 
 destructor TPxWorker.Destroy;
@@ -387,6 +405,34 @@ begin
     Result := pjaj2kp_cb_sym(wk.t1, w, h, wk.tile.bands[band].orient, sty, npass, P, at, wk.cw[c], sym, cap, passend);
 end;
 
+{ mode 4: an HT code-block's values are its coefficients when its cleanup
+  is at plane 0 (one pass), or at plane 1 with both refinement passes:
+  pjaj2kht.c's values are then in units of plane 0 }
+function TPx.CbHt(km: Pointer; band, x0, y0, w, h, np, B: Integer; q: PLongInt): Boolean;
+var wk: TPxWorker; c, x, y: Integer; base: Int64; v: LongInt;
+begin
+  Result := False;
+  wk := TPxWorker(km);
+  if (band < 0) or (band > High(wk.tile.bands)) or (x0 < 0) or (y0 < 0) or (w < 1) or (h < 1) or
+     (x0 + Int64(w) > wk.bw[band]) or (y0 + Int64(h) > wk.bh[band]) or (np < 1) or (np > 3) then Exit;
+  if (np = 2) or (B - Ord(np > 1) <> 0) then begin
+    { a plane left out: a lossy code-block, whose pixels are not the image's }
+    if encoding then truncated := True;
+    Exit;
+  end;
+  c := wk.tile.bands[band].comp;
+  base := wk.boff[band] + Int64(y0) * wk.cw[c] + x0;
+  for y := 0 to h - 1 do
+    for x := 0 to w - 1 do
+      if encoding then wk.buf[base + Int64(y) * wk.cw[c] + x] := q[y * w + x]
+      else begin
+        v := wk.buf[base + Int64(y) * wk.cw[c] + x];
+        if (v > 1 shl 29) or (v < -(1 shl 29)) then Exit;
+        q[y * w + x] := v;
+      end;
+  Result := True;
+end;
+
 function TPx.TileEnd(km: Pointer): string;
 var wk: TPxWorker; c: Integer;
 begin
@@ -517,10 +563,11 @@ begin
   Result := Default(TJ2kModelLink);
   Result.kind := kind; Result.slice := @px.Slice; Result.sliceEnd := @px.SliceEnd; Result.threads := threads;
   Result.pixTile := @px.Tile; Result.pixCb := @px.Cb; Result.pixEnd := @px.TileEnd;
+  Result.ht := px.ht; Result.pixCbHt := @px.CbHt;
 end;
 
 function DecodeIn(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
-  out why: string): TMode2Result;
+  out why: string; ht: Boolean): TMode2Result;
 var p, side, bound: Int64; cd: TCoder; blob, raw: TBytes; px: TPx; c, hb, nw: Integer; o: TOut;
 begin
   cs := nil; why := '';
@@ -542,6 +589,7 @@ begin
   { the planes from its SIZ, within the bounds, before they are decoded }
   if not J2kBlobSiz(blob, raw) then Exit(m2Bad);
   px := TPx.Create(False);
+  px.ht := ht;
   try
     why := ParseSiz(raw, px.siz);
     if why <> '' then Exit(m2Bad);
@@ -572,7 +620,7 @@ function J2kMode2DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; o
   out why: string): TMode2Result;
 begin
   try
-    Result := DecodeIn(stream, len, threads, cs, why);
+    Result := DecodeIn(stream, len, threads, cs, why, False);
   except
     on E: EOutOfMemory do begin cs := nil; why := 'memory'; Result := m2TooLarge; end;
     on E: Exception do begin cs := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Bad; end;
@@ -583,6 +631,23 @@ function J2kMode2Decode(const stream: TBytes; len: Int64; threads: Integer; out 
 var why: string;
 begin
   Result := J2kMode2DecodeWhy(stream, len, threads, cs, why);
+end;
+
+function J2kMode4DecodeWhy(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes;
+  out why: string): TMode2Result;
+begin
+  try
+    Result := DecodeIn(stream, len, threads, cs, why, True);
+  except
+    on E: EOutOfMemory do begin cs := nil; why := 'memory'; Result := m2TooLarge; end;
+    on E: Exception do begin cs := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Bad; end;
+  end;
+end;
+
+function J2kMode4Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode2Result;
+var why: string;
+begin
+  Result := J2kMode4DecodeWhy(stream, len, threads, cs, why);
 end;
 
 {$ifdef PJA_PX_DUMP}
@@ -611,7 +676,7 @@ end;
 {$endif}
 
 function EncodeIn(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
-  out why: string; out mode1Floor: Int64): TMode2Result;
+  out why: string; out mode1Floor: Int64; ht: Boolean): TMode2Result;
 var px: TPx; raw, blob, side, back: TBytes; st: TJ2kStats; cd: TCoder; o: TOut; c, hb, nw: Integer;
   p: SizeInt; total: Int64; why2: string; colour: Boolean; was: TStage;
 begin
@@ -621,6 +686,7 @@ begin
      (Be16(data, off + 4) + 2 > len - 2) then begin why := 'no SIZ'; Exit(m2Refused); end;
   raw := Copy(data, off + 2, Be16(data, off + 4) + 2);
   px := TPx.Create(True);
+  px.ht := ht;
   try
     why := ParseSiz(raw, px.siz);
     if why <> '' then Exit(m2Refused);
@@ -648,7 +714,8 @@ begin
     if total >= High(LongInt) then begin why := 'too large'; Exit(m2Refused); end;
     { not kept: not decoded either }
     if total >= limit then begin why := 'not smaller'; Exit(m2Refused); end;
-    mode1Floor := Length(side) + (len - Length(blob)) div 2;
+    if ht then mode1Floor := Length(side) + (len - Length(blob)) * 7 div 10
+    else mode1Floor := Length(side) + (len - Length(blob)) div 2;
     SetLength(stream, total);
     stream[0] := LAYOUT;
     p := 1; PutU32(stream, p, Check(data, off, len));
@@ -663,7 +730,10 @@ begin
   { checked: the stream alone gives the codestream back (--stats: the
     verify, pjastage) }
   was := StageEnter(stVerify);
-  if (J2kMode2DecodeWhy(stream, len, threads, back, why2) <> m2Ok) or (Length(back) <> len) or
+  if ht then begin
+    if J2kMode4DecodeWhy(stream, len, threads, back, why2) <> m2Ok then back := nil;
+  end else if J2kMode2DecodeWhy(stream, len, threads, back, why2) <> m2Ok then back := nil;
+  if (back = nil) or (Length(back) <> len) or
      ((len > 0) and not CompareMem(@back[0], @data[off], len)) then begin
     StageEnter(was);
     stream := nil; why := 'verify: ' + why2;
@@ -678,7 +748,7 @@ function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; l
 begin
   mode1Floor := 0;
   try
-    Result := EncodeIn(data, off, len, threads, limit, stream, why, mode1Floor);
+    Result := EncodeIn(data, off, len, threads, limit, stream, why, mode1Floor, False);
   except
     on E: EOutOfMemory do begin stream := nil; why := 'memory'; Result := m2Refused; end;
     on E: Exception do begin stream := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Refused; end;
@@ -691,6 +761,36 @@ function J2kMode2Encode(const data: TBytes; off, len: Int64; threads: Integer; o
 var f: Int64;
 begin
   Result := J2kMode2Encode(data, off, len, threads, High(Int64), stream, why, f);
+end;
+
+function J2kMode4Encode(const data: TBytes; off, len: Int64; threads: Integer; limit: Int64; out stream: TBytes;
+  out why: string; out mode3Floor: Int64): TMode2Result;
+begin
+  mode3Floor := 0;
+  try
+    Result := EncodeIn(data, off, len, threads, limit, stream, why, mode3Floor, True);
+  except
+    on E: EOutOfMemory do begin stream := nil; why := 'memory'; Result := m2Refused; end;
+    on E: Exception do begin stream := nil; why := 'exception ' + E.ClassName + ': ' + E.Message; Result := m2Refused; end;
+  end;
+  if Result <> m2Ok then mode3Floor := 0;
+end;
+
+function Mode4Enc(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out mode3Floor: Int64): Boolean;
+var why: string;
+begin
+  Result := J2kMode4Encode(data, off, len, threads, len, stream, why, mode3Floor) = m2Ok;
+end;
+
+function Mode4Dec(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TCodecError;
+begin
+  case J2kMode4Decode(stream, len, threads, cs) of
+    m2Ok: Result := ceOk;
+    m2Future: Result := ceFutureVersion;
+    m2TooLarge: Result := ceTooLarge;
+    else Result := ceBadStream;
+  end;
 end;
 
 { pjacodec's hook: only a stream shorter than the codestream }
@@ -714,4 +814,6 @@ end;
 initialization
   J2kMode2Enc := @Mode2Enc;
   J2kMode2Dec := @Mode2Dec;
+  J2kMode4Enc := @Mode4Enc;
+  J2kMode4Dec := @Mode4Dec;
 end.

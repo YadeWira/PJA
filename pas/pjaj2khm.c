@@ -24,6 +24,18 @@
    Build with -fwrapv (pas/build_c.sh). */
 #include <stdint.h>
 #include "pjaj2km_tab.h"
+#ifdef HM_STATS
+/* tuning only: the bits each kind of event costs, printed at the end of each slice */
+#include <stdio.h>
+#include <math.h>
+static double hm_cost[16]; static long hm_n[16]; static int hm_kind;
+#define HM_COST(p16, bit) do { double pp = (p16) / 65536.0; if (pp < 1e-9) pp = 1e-9; if (pp > 1 - 1e-9) pp = 1 - 1e-9; \
+  hm_cost[hm_kind] += (bit) ? -log2(pp) : -log2(1 - pp); hm_n[hm_kind]++; } while (0)
+#define HM_KIND(k) (hm_kind = (k))
+#else
+#define HM_COST(p16, bit) ((void)0)
+#define HM_KIND(k) ((void)0)
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #define HM_INLINE static inline __attribute__((always_inline))
@@ -234,6 +246,7 @@ HM_INLINE int mix_code(hm_t *m, const int dec, int bit, const uint32_t *v, int s
   pa2 = (t2[lo] * (4096 - fr) + t2[lo + 1] * fr) >> 12;
   pf = (pm + pa0 + pa1 + pa2) >> 2;
   bit = ac_code(&m->ac, (uint32_t)pf, bit, dec);
+  if (m->enc) HM_COST(pf < 1 ? 1 : pf > 65535 ? 65535 : pf, bit);
   ea = ((bit << 16) - (int32_t)J2KM_SQ[da + 3072]) >> 4;
   eb = ((bit << 16) - (int32_t)J2KM_SQ[db + 3072]) >> 4;
   la = m->lr[m->ca[sa] >> 6]; lb = m->lr[m->cb[sb] >> 6];
@@ -262,7 +275,9 @@ HM_INLINE int mix_code(hm_t *m, const int dec, int bit, const uint32_t *v, int s
 HM_INLINE int code_low(hm_t *m, const int dec, int bit, int j)
 {
   ctr_t *c = &m->low[j];
+  HM_KIND(7);
   bit = ac_code(&m->ac, CP(c->p), bit, dec);
+  if (m->enc) HM_COST(CP(c->p) < 1 ? 1 : CP(c->p), bit);
   learn(c, bit);
   return bit;
 }
@@ -280,7 +295,7 @@ HM_INLINE void features(const hm_t *m, int x, int y, feat_t *f)
   uint32_t W_ = ab(R[i - 1]), N_ = ab(R[i - rw]), NW_ = ab(R[i - rw - 1]), NE_ = ab(R[i - rw + 1]);
   uint32_t WW = ab(R[i - 2]), NN = ab(R[i - 2 * rw]), E_ = ab(R[i + 1]), S_ = ab(R[i + rw]);
   uint32_t mx = W_ > N_ ? W_ : N_;
-  uint64_t s = 2 * ((uint64_t)W_ + N_) + NW_ + NE_ + E_ + S_;
+  uint64_t s = 2 * ((uint64_t)W_ + N_) + NW_ + NE_ + E_ + S_ + ((uint64_t)WW + NN) / 2;
   if (NW_ > mx) mx = NW_;
   if (NE_ > mx) mx = NE_;
   f->lnI = lgI(s, R_LN);
@@ -298,13 +313,15 @@ HM_INLINE void features(const hm_t *m, int x, int y, feat_t *f)
 HM_INLINE int event(hm_t *m, const int dec, int bit, int k, int aux, const feat_t *f)
 {
   uint32_t v[NC], K = (uint32_t)k, A = (uint32_t)aux; int j, orl = m->orient * 16 + m->lvl;
+  HM_KIND(k);
   v[0] = (A * R_LN + f->lnI) * 5 + f->nsig;
   v[1] = ((A * R_W + clampi(f->wI, 0, R_W - 1)) * R_W + clampi(f->nI, 0, R_W - 1)) * 4 + m->orient;
   v[2] = ((A * R_LN + f->lnI) * R_LP + f->lpI) * R_LP + f->lxI;
   v[3] = ((A * R_LN + f->lnI) * 34 + f->ln2I) * 4 + m->orient;
   v[4] = (((A * R_LN + f->lnI) * R_DEP + m->dep) * R_ORL + orl) * R_CMP + m->comp;
   v[5] = ((A * 5 + f->nsig) * R_LP + f->lpI) * R_DEP + m->dep;
-  v[6] = ((A * 128 + f->pat) * 11 + (f->mxI >> 2)) * 4 + m->orient;
+  if (k == K_L || k == K_M) v[6] = ((uint32_t)clampi(2 * (k == K_L ? aux : (aux & 15)) - f->lnI + 30, 0, 63) * R_K + A) * 4 + m->orient;
+  else v[6] = ((A * 128 + f->pat) * 11 + (f->mxI >> 2)) * 4 + m->orient;
   v[7] = ((A * R_LN + f->mxI) * R_LP + f->lpI) * R_DEP + m->dep;
   for (j = 0; j < NC; j++) v[j] += K * (uint32_t)PK[j];
   return mix_code(m, dec, bit, v, (k * 42 + f->lnI) * 24 + m->dep, (k * 32 + aux) * 18 + f->lpI,
@@ -320,6 +337,7 @@ HM_INLINE int event_sign(hm_t *m, const int dec, int bit, int x, int y, const fe
   int a = (sw * 3 + sn) * 3 + se;         /* 27 */
   int b = (snw * 3 + sne) * 3 + ss;       /* 27 */
   uint32_t v[NC], K = K_S; int j, orl = m->orient * 16 + m->lvl;
+  HM_KIND(K_S);
   v[0] = (uint32_t)(a * 27 + b) * 4 + m->orient;
   v[1] = ((uint32_t)a * 3 + f->sP) * 3 + f->sX;
   v[2] = (((uint32_t)sw * 3 + sn) * 3 + f->sP) * R_ORL + orl;
@@ -477,6 +495,10 @@ int32_t pjaj2khm_init(void *mem, int64_t size, int32_t hb, int32_t encoding, hm_
 void pjaj2khm_finish(void *mem)
 {
   hm_t *m = M(mem); int k;
+#ifdef HM_STATS
+  { static const char *nm[8] = { "zero", "length", "mantissa", "sign", "sigprop", "magref", "-", "low" };
+    for (k = 0; k < 8; k++) if (hm_n[k]) fprintf(stderr, "HMSTAT %s %ld %.0f\n", nm[k], hm_n[k], hm_cost[k] / 8); }
+#endif
   for (k = 0; k < 4; k++) {
     m->ac.buf[m->ac.n++] = (uint8_t)(m->ac.x1 >> 24);
     if (m->ac.n == EBUF) { m->ac.put(m->ac.pctx, m->ac.buf, EBUF); m->ac.n = 0; }

@@ -441,18 +441,22 @@ begin
     n.Str('repaired', r.codec.jpeg.Text);
     why := ', repaired: ' + r.codec.jpeg.Text;
   end else if r.codec.j2k then begin
-    { the bytes in codestreams of mode 1 (modelled), of mode 2 (pixels)
-      and of mode 3 (HTJ2K, modelled); the rest as bytes }
+    { the bytes in codestreams of mode 1 (modelled), of mode 2 (pixels),
+      of mode 3 (HTJ2K, modelled) and of mode 4 (HTJ2K's pixels); the rest
+      as bytes }
     n.Num('j2k_modelled_bytes', r.codec.j2kModelled);
     n.Num('j2k_pixels_bytes', r.codec.j2kPixels);
     n.Num('j2k_ht_bytes', r.codec.j2kHt);
-    if r.codec.j2kModelled - r.codec.j2kPixels - r.codec.j2kHt > 0 then
-      why := ', ' + IntToStr(r.codec.j2kModelled - r.codec.j2kPixels - r.codec.j2kHt) +
+    n.Num('j2k_ht_pixels_bytes', r.codec.j2kHtPixels);
+    if r.codec.j2kModelled - r.codec.j2kPixels - r.codec.j2kHt - r.codec.j2kHtPixels > 0 then
+      why := ', ' + IntToStr(r.codec.j2kModelled - r.codec.j2kPixels - r.codec.j2kHt - r.codec.j2kHtPixels) +
              ' B of codestreams modelled (mode 1)';
     if r.codec.j2kPixels > 0 then
       why := why + ', ' + IntToStr(r.codec.j2kPixels) + ' B of codestreams as pixels (mode 2)';
     if r.codec.j2kHt > 0 then
       why := why + ', ' + IntToStr(r.codec.j2kHt) + ' B of HTJ2K codestreams modelled (mode 3)';
+    if r.codec.j2kHtPixels > 0 then
+      why := why + ', ' + IntToStr(r.codec.j2kHtPixels) + ' B of HTJ2K codestreams as pixels (mode 4)';
     if r.codec.j2kModelled = 0 then why := ', no codestream modelled: all as bytes (mode 0)';
   end;
   line := 'takes it: stream ' + StreamWords(pja) + ', ' + IntToStr(Length(d)) + ' B -> ' +

@@ -4,7 +4,7 @@
   compared byte for byte. J2kAnalyze checks it too before it says yes; this
   does it again on a copy of the blob, after the analysis is gone.
 
-    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-mode1] [-mode2] [-mode3] [-m3fuzz N] [-dumpcb file]
+    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-mode1] [-mode2] [-mode3] [-mode4] [-m3fuzz N] [-dumpcb file]
       [-l list] <file or directory>...
 
   A directory is walked (files of the JPEG 2000 family by their first
@@ -49,6 +49,14 @@
   an exception) and N / 4 damaged copies of its codestream taken as mode
   3 (refused, or a stream that gives them back).
 
+  -mode4 (with -mode3): each HTJ2K codestream also as mode 4 (pjaj2kpx,
+  its pixels) when it can be, decoded and compared: a line MODE4 file #i
+  length stream side encode-s decode-s, or MODE4REFUSED file #i why; the
+  totals, and the choice of pjacodec (mode 4 if smaller than the
+  codestream, mode 3 if that is smaller still and mode 4's stream is above
+  mode 3's floor, else mode 0); with -m3fuzz N, N damaged copies of each
+  mode 4 stream decoded too.
+
   -dumpcb file: what stream version 8's model is given for each codestream
   taken (pjaj2kcs's kmDump), to tune the model outside PJA.
 
@@ -80,6 +88,11 @@ var
   tM3e, tM3d: Double;
   st3: TJ2kStats;
   m3Reasons: TStringList;
+  mode4: Boolean;
+  m4Digest: QWord;
+  m4Cs, m4Bytes, m4Fail, m4Ref, m4Ok, m4FzRuns, m4FzOk: Int64; tM4e, tM4d: Double;
+  c4Cs, c4Bytes, c4M0, c4M3, c4M4, last3: Int64;
+  m4Reasons: TStringList;
   m2Fuzz: Integer;
   m2Digest: QWord;
   m2Cs, m2Bytes, m2Side, m2Fail, m2Ref, m2FzRuns, m2FzOk, m2FzCs, m2FzCsOk, m2Caps: Int64; tM2e, tM2d: Double;
@@ -525,6 +538,7 @@ procedure Mode3One(const d: TBytes; off, len: Int64; const f: string; ci: Intege
 var m, back, b2: TBytes; why: string; t0: TDateTime; r: TMode1Result; side: Int64; te, td: Double; s: TJ2kStats;
   k: Integer;
 begin
+  last3 := -1;
   s := Default(TJ2kStats);
   t0 := Now;
   r := J2kMode3Encode(d, off, len, m1Threads, m, why, s);
@@ -550,6 +564,7 @@ begin
     Inc(m3Fail); Writeln('MODE3 FAIL ', f, ' #', ci, ': read as mode 1'); Exit;
   end;
   Inc(m3Ok);
+  last3 := Length(m);
   side := Int64(m[9 + 4 * Int64(m[5])]) or (Int64(m[10 + 4 * Int64(m[5])]) shl 8) or
     (Int64(m[11 + 4 * Int64(m[5])]) shl 16) or (Int64(m[12 + 4 * Int64(m[5])]) shl 24);
   m3Digest := m3Digest xor Fnv(m);
@@ -593,6 +608,72 @@ begin
   end;
 end;
 
+{ -mode4: the HT codestream as mode 4 (its pixels), and the choice }
+procedure Mode4One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
+var m, back, b2: TBytes; why: string; t0: TDateTime; r: TMode2Result; side, floor3, best: Int64; te, td: Double;
+  k, chosen, i: Integer;
+begin
+  t0 := Now;
+  r := J2kMode4Encode(d, off, len, m1Threads, High(Int64), m, why, floor3);
+  te := MilliSecondsBetween(Now, t0) / 1000;
+  if r <> m2Ok then begin
+    if (Pos('verify', why) = 1) or (Pos('exception', why) = 1) or (Pos('internal', why) = 1) then begin
+      Inc(m4Fail); Writeln('MODE4 FAIL ', f, ' #', ci, ': ', why);
+    end else begin
+      Inc(m4Ref);
+      if not quiet then Writeln('MODE4REFUSED ', ExtractFileName(f), ' #', ci, ' ', why);
+    end;
+    if Pos('pixels: ', why) = 1 then why := Copy(why, 9, 60);
+    i := m4Reasons.IndexOf(why);
+    if i < 0 then m4Reasons.AddObject(why, TObject(PtrInt(1)))
+    else m4Reasons.Objects[i] := TObject(PtrInt(m4Reasons.Objects[i]) + 1);
+    m := nil;
+  end else begin
+    t0 := Now;
+    r := J2kMode4Decode(m, len, m1Threads, back);
+    td := MilliSecondsBetween(Now, t0) / 1000;
+    if (r <> m2Ok) or (Length(back) <> len) or not CompareMem(@back[0], @d[off], len) then begin
+      Inc(m4Fail); Writeln('MODE4 FAIL ', f, ' #', ci, ': decode'); Exit;
+    end;
+    { a mode 4 stream is not a mode 2 stream }
+    if J2kMode2Decode(m, len, m1Threads, back) = m2Ok then begin
+      Inc(m4Fail); Writeln('MODE4 FAIL ', f, ' #', ci, ': read as mode 2'); Exit;
+    end;
+    Inc(m4Ok);
+    side := Int64(m[5]) or (Int64(m[6]) shl 8) or (Int64(m[7]) shl 16) or (Int64(m[8]) shl 24);
+    m4Digest := m4Digest xor Fnv(m);
+    m4Cs := m4Cs + len; m4Bytes := m4Bytes + Length(m);
+    tM4e := tM4e + te; tM4d := tM4d + td;
+    Writeln('MODE4 ', ExtractFileName(f), ' #', ci, ' ', len, ' ', Length(m), ' ', side, ' ',
+      FormatFloat('0.000', te), ' ', FormatFloat('0.000', td));
+    for k := 1 to m3Fuzz do begin
+      b2 := Copy(m);
+      Damage(b2, Length(b2));
+      Inc(m4FzRuns);
+      try
+        if J2kMode4Decode(b2, len, m1Threads, back) = m2Ok then begin
+          Inc(m4FzOk);
+          if (Length(back) <> len) or not CompareMem(@back[0], @d[off], len) then begin
+            Inc(m4Fail); Writeln('MODE4 FUZZ FAIL ', f, ' #', ci, ' variant ', k, ': another codestream');
+          end;
+        end;
+      except
+        on E: Exception do begin
+          Inc(m4Fail); Writeln('MODE4 FUZZ FAIL ', f, ' #', ci, ' variant ', k, ': ', E.ClassName, ' ', E.Message);
+        end;
+      end;
+    end;
+  end;
+  { the choice, as pjacodec.CompressJ2k makes it }
+  best := len; chosen := 0;
+  if (m <> nil) and (Length(m) < best) then begin best := Length(m); chosen := 4; end;
+  if (last3 >= 0) and (last3 < best) and ((chosen = 0) or (best > floor3)) then begin best := last3; chosen := 3; end;
+  c4Cs := c4Cs + len; c4Bytes := c4Bytes + best;
+  case chosen of 0: Inc(c4M0); 3: Inc(c4M3); else Inc(c4M4); end;
+  Writeln('CHOICE3 ', ExtractFileName(f), ' #', ci, ' ', len, ' mode3 ', last3, ' mode4 ', Length(m), ' -> mode ',
+    chosen, ' ', best);
+end;
+
 procedure OneFile(const f: string);
 var d, blob, back, blob2: TBytes; cs: TJ2kCodestreams; i: Integer; why: string; t0: TDateTime; ok: Boolean;
   s0, s1: TJ2kStats; sz: Int64; lkd: TJ2kModelLink;
@@ -601,10 +682,11 @@ begin
   if not J2kCodestreams(d, cs) then Exit;
   Inc(nfiles);
   for i := 0 to High(cs) do begin
-    if mode3 then begin
-      if not J2kIsHt(d, cs[i].off, cs[i].len) then Continue;
+    { -mode3: an HTJ2K codestream here (the others as before) }
+    if mode3 and J2kIsHt(d, cs[i].off, cs[i].len) then begin
       Ht0One(d, cs[i].off, cs[i].len, f, i);
       Mode3One(d, cs[i].off, cs[i].len, f, i);
+      if mode4 then Mode4One(d, cs[i].off, cs[i].len, f, i);
       Continue;
     end;
     Inc(ncs);
@@ -680,6 +762,7 @@ begin
   reasons := TStringList.Create;
   m2Reasons := TStringList.Create;
   m3Reasons := TStringList.Create;
+  m4Reasons := TStringList.Create;
   st := Default(TJ2kStats); st3 := Default(TJ2kStats);
   i := 1;
   while i <= ParamCount do begin
@@ -689,6 +772,7 @@ begin
     else if ParamStr(i) = '-mode1' then mode1 := True
     else if ParamStr(i) = '-mode2' then mode2 := True
     else if ParamStr(i) = '-mode3' then mode3 := True
+    else if ParamStr(i) = '-mode4' then begin mode3 := True; mode4 := True; end
     else if ParamStr(i) = '-m3fuzz' then begin Inc(i); m3Fuzz := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-m2fuzz' then begin Inc(i); m2Fuzz := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-threads' then begin Inc(i); m1Threads := StrToInt(ParamStr(i)); end
@@ -769,6 +853,19 @@ begin
       m3FzCs, ' damaged codestreams (', m3FzCsOk, ' taken and given back)');
     nfail := nfail + m3Fail + h3Fail;
   end;
+  if mode4 then begin
+    Write('mode 4: ', m4Ok, ' codestreams, ', m4Cs, ' bytes -> ', m4Bytes);
+    if m4Cs > 0 then Write(' (', FormatFloat('0.000', 100.0 * m4Bytes / m4Cs), '%; ',
+      FormatFloat('0.000', m4Cs / 1048576 / Max(tM4e, 0.001)), ' MB/s encoding (with its check), ',
+      FormatFloat('0.000', m4Cs / 1048576 / Max(tM4d, 0.001)), ' MB/s decoding)');
+    Writeln('; refused ', m4Ref, ', failed ', m4Fail, '; streams digest ', IntToHex(m4Digest, 16));
+    for i := 0 to m4Reasons.Count - 1 do Writeln('  mode 4 refused: ', PtrInt(m4Reasons.Objects[i]), ' x ', m4Reasons[i]);
+    if m3Fuzz > 0 then Writeln('mode 4 fuzz: ', m4FzRuns, ' damaged streams (', m4FzOk, ' gave the codestream)');
+    if c4Cs > 0 then
+      Writeln('choice HT: ', c4Cs, ' bytes of codestream -> ', c4Bytes, ' (saves ', FormatFloat('0.000',
+        100.0 - 100.0 * c4Bytes / c4Cs), '%); codestreams in mode 0 ', c4M0, ', mode 3 ', c4M3, ', mode 4 ', c4M4);
+    nfail := nfail + m4Fail;
+  end;
   if fuzz > 0 then
     Writeln('fuzz: ', fzRuns, ' damaged codestreams (', fzOk, ' taken and given back), ', fzBlob, ' damaged blobs (',
       fzBlobOk, ' gave a codestream), FAILED ', fzFail);
@@ -790,6 +887,7 @@ begin
   reasons.Free;
   m2Reasons.Free;
   m3Reasons.Free;
+  m4Reasons.Free;
   dumpS.Free;
   if nfail > 0 then Halt(1);
 end.

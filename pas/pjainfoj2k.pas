@@ -587,6 +587,20 @@ begin
     if m3 = '' then begin
       it.Str('mode3', 'eligible');
       words := words + '; mode 3: eligible by its headers (HTJ2K)';
+      { mode 4: the same, and reversible (whether every code-block's values
+        are whole only --estimate tells) }
+      if vd.notRev = '' then begin
+        if sizRaw = nil then m2 := 'no SIZ' else m2 := J2kMode2SizWhy(sizRaw, len);
+        if (m2 = '') and vd.rgn then m2 := 'RGN';
+      end else m2 := vd.notRev;
+      if m2 = '' then begin
+        it.Str('mode4', 'eligible');
+        words := words + '; mode 4: eligible by its headers (lossless HTJ2K: its pixels)';
+      end else begin
+        it.Str('mode4', 'not eligible');
+        it.Str('mode4_reason', m2);
+        words := words + '; mode 4: not eligible: ' + m2;
+      end;
     end else begin
       it.Str('mode3', 'not eligible');
       it.Str('mode3_reason', m3);
@@ -604,9 +618,28 @@ begin
   end;
   { as CompressJ2k: an HTJ2K codestream in mode 3 or nothing }
   if J2kIsHt(d, off, len) then begin
+    { mode 4 first, then mode 3 unless mode 4 is below what mode 3 could
+      reach; the smaller }
+    floor1 := 0;
+    r2 := J2kMode4Encode(d, off, len, InfoThreads, len, s2, why2, floor1);
+    ok2 := r2 = m2Ok;
+    if ok2 then it.Num('mode4_stream_bytes', Length(s2))
+    else begin
+      if why2 = '' then why2 := 'refused';
+      it.Str('mode4_reason', why2);
+    end;
     st3 := Default(TJ2kStats);
-    r := J2kMode3Encode(d, off, len, InfoThreads, stream, why, st3);
-    if (r = m1Ok) and (Length(stream) < len) then begin
+    if ok2 and (Length(s2) <= floor1) then begin
+      r := m1Refused; why := 'not tried: mode 4''s stream is below what mode 3 could reach'; stream := nil;
+    end else r := J2kMode3Encode(d, off, len, InfoThreads, stream, why, st3);
+    if ok2 and ((r <> m1Ok) or (Length(s2) <= Length(stream))) then begin
+      it.Num('mode', 4);
+      it.Num('stream_bytes', Length(s2));
+      it.Fixed('saving_percent', 100 * (len - Length(s2)) / len);
+      it.line := 'mode 4 (HTJ2K, pixels): ' + IntToStr(len) + ' B -> ' + IntToStr(Length(s2)) + ' B, ' +
+                 DotNumber(100 * (len - Length(s2)) / len, 2) + '% less; mode 3: ';
+      if r = m1Ok then it.line := it.line + IntToStr(Length(stream)) + ' B' else it.line := it.line + why;
+    end else if (r = m1Ok) and (Length(stream) < len) then begin
       it.Num('mode', 3);
       it.Num('stream_bytes', Length(stream));
       it.Fixed('saving_percent', 100 * (len - Length(stream)) / len);
@@ -614,7 +647,8 @@ begin
       it.Num('ht_code_blocks_as_bytes', st3.cbRaw);
       it.line := 'mode 3 (HTJ2K, modelled): ' + IntToStr(len) + ' B -> ' + IntToStr(Length(stream)) + ' B, ' +
                  DotNumber(100 * (len - Length(stream)) / len, 2) + '% less; ' + IntToStr(st3.htCbs) +
-                 ' code-blocks modelled, ' + IntToStr(st3.cbRaw) + ' kept as bytes';
+                 ' code-blocks modelled, ' + IntToStr(st3.cbRaw) + ' kept as bytes; mode 4: ';
+      if ok2 then it.line := it.line + IntToStr(Length(s2)) + ' B' else it.line := it.line + why2;
     end else begin
       if r = m1Ok then why := 'its stream would not be smaller (' + IntToStr(Length(stream)) + ' B)'
       else if why = '' then why := 'refused';
