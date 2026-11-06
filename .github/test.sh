@@ -116,9 +116,10 @@ echo "$(wc -l < "$OUT/streams_j2k.txt" | tr -d ' ') JPEG 2000 streams, SHA-256 o
 echo "== JPEG 2000 stages B and C: each codestream taken apart and put back together"
 # the side information and the decisions in pjaj2kcs's blob, rebuilt from
 # the blob alone (its digest should be the same on every platform), and
-# each codestream as stream version 8's mode 1, decoded and compared
+# each codestream as stream version 8's mode 1 and (when it can be) mode 2,
+# decoded and compared, and damaged mode 2 streams
 mkdir -p "$OUT/uj"
 $FPC -O3 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/uj" -o"$OUT/test_j2kcs$EXE" pas/tests/test_j2kcs.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
-"$OUT/test_j2kcs$EXE" -q -min 14 -fuzz 20 -mode1 tests/j2k > "$OUT/j2kcs.txt" || { cat "$OUT/j2kcs.txt"; echo "FAIL: test_j2kcs"; exit 1; }
-grep -E '^(files|fuzz|blobs|mode 1)' "$OUT/j2kcs.txt"
+"$OUT/test_j2kcs$EXE" -q -min 16 -fuzz 20 -mode1 -mode2 -m2fuzz 100 tests/j2k > "$OUT/j2kcs.txt" || { cat "$OUT/j2kcs.txt"; echo "FAIL: test_j2kcs"; exit 1; }
+grep -E '^(files|fuzz|blobs|mode 1|mode 2|choice)' "$OUT/j2kcs.txt"

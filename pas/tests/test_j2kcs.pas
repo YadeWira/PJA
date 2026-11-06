@@ -4,7 +4,7 @@
   compared byte for byte. J2kAnalyze checks it too before it says yes; this
   does it again on a copy of the blob, after the analysis is gone.
 
-    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-mode1] [-dumpcb file] [-l list] <file or directory>...
+    test_j2kcs [-q] [-min N] [-fuzz N] [-side prefix] [-mode1] [-mode2] [-dumpcb file] [-l list] <file or directory>...
 
   A directory is walked (files of the JPEG 2000 family by their first
   bytes; the rest ignored); -l takes the names from a file, one a line.
@@ -24,6 +24,17 @@
   (a line MODE1 file #i length stream side encode-s decode-s), the totals;
   -threads N: its slices on N threads.
 
+  -mode2: each codestream taken also as stream version 8's mode 2
+  (pjaj2kpx, the pixels) when it can be, decoded and compared: a line
+  MODE2 file #i length stream side encode-s decode-s, or MODE2REFUSED
+  file #i why; the totals, those refused by reason, and (with -mode1)
+  what each codestream would be given as by the choice of pjacodec (mode
+  2 if it is smaller than the codestream, mode 1 if that is smaller still
+  and mode 2 did not take it to half its bytes, else mode 0); with
+  -m2fuzz N, N damaged copies of each mode 2 stream decoded (an error or
+  the codestream, never an exception), and N / 4 damaged copies of its
+  codestream taken as mode 2 (refused, or a stream that gives them back).
+
   -dumpcb file: what stream version 8's model is given for each codestream
   taken (pjaj2kcs's kmDump), to tune the model outside PJA.
 
@@ -39,7 +50,7 @@
   side checked). }
 program test_j2kcs;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaj2k, pjaj2kcs, pjaj2km;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, DateUtils, Math, pjaj2k, pjaj2kcs, pjaj2km, pjaj2kpx;
 
 var
   quiet: Boolean;
@@ -47,7 +58,14 @@ var
   digest: QWord = QWord($CBF29CE484222325);
   sidePrefix: string;
   dumpS: TFileStream;
-  mode1: Boolean;
+  mode1, mode2: Boolean;
+  m2Fuzz: Integer;
+  m2Digest: QWord;
+  m2Cs, m2Bytes, m2Side, m2Fail, m2Ref, m2FzRuns, m2FzOk, m2FzCs, m2FzCsOk: Int64; tM2e, tM2d: Double;
+  m2Reasons: TStringList;
+  { the choice: per codestream, the smallest of the codestream, mode 1's and mode 2's streams }
+  chCs, chBytes, chM0, chM1, chM2, chM1Bytes, chBestCs: Int64;
+  lastM1: Int64;
   m1Threads: Integer = 1;
   m1Digest: QWord;
   m1Cs, m1Bytes, m1Side, m1Fail: Int64; tM1e, tM1d: Double;
@@ -205,10 +223,12 @@ end;
 procedure Mode1One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
 var m, back: TBytes; why: string; t0: TDateTime; r: TMode1Result; side: Int64; te, td: Double;
 begin
+  lastM1 := -1;
   t0 := Now;
   r := J2kMode1Encode(d, off, len, m1Threads, m, why);
   te := MilliSecondsBetween(Now, t0) / 1000;
   if r <> m1Ok then begin Inc(m1Fail); Writeln('MODE1 FAIL ', f, ' #', ci, ': ', why); Exit; end;
+  lastM1 := Length(m);
   t0 := Now;
   r := J2kMode1Decode(m, len, m1Threads, back);
   td := MilliSecondsBetween(Now, t0) / 1000;
@@ -226,6 +246,118 @@ begin
   tM1e := tM1e + te; tM1d := tM1d + td;
   Writeln('MODE1 ', ExtractFileName(f), ' #', ci, ' ', len, ' ', Length(m), ' ', side, ' ',
     FormatFloat('0.000', te), ' ', FormatFloat('0.000', td));
+end;
+
+procedure Count2(const why: string);
+var i: Integer; key: string;
+begin
+  key := why;
+  if Pos('pixels: ', key) = 1 then key := Copy(key, 9, 60);
+  i := m2Reasons.IndexOf(key);
+  if i < 0 then m2Reasons.AddObject(key, TObject(PtrInt(1)))
+  else m2Reasons.Objects[i] := TObject(PtrInt(m2Reasons.Objects[i]) + 1);
+end;
+
+{ -m2fuzz: damaged copies of a mode 2 stream decoded: an error or the
+  codestream, never an exception; and damaged copies of its codestream
+  (one in four) taken as mode 2: refused, or a stream that gives them back
+  (J2kMode2Encode decodes and compares), never an exception nor a stream
+  that does not come back (verify) }
+procedure Mode2Fuzz(const m: TBytes; len: Int64; const f: string; ci: Integer; const d: TBytes; off: Int64);
+var k, j, n: Integer; b2, back, cs2: TBytes; p: QWord; r: TMode2Result; why: string;
+begin
+  for k := 1 to m2Fuzz div 4 do begin
+    cs2 := Copy(d, off, len);
+    n := 1 + Rand(4);
+    case Rand(5) of
+      0: for j := 1 to n do begin p := Rand(len); cs2[p] := cs2[p] xor (1 shl Rand(8)); end;
+      1: for j := 1 to n do begin p := Rand(Min(len, 512)); cs2[p] := cs2[p] xor (1 shl Rand(8)); end;
+      2: for j := 1 to n do begin p := Rand(len); if Rand(2) = 0 then cs2[p] := $FF else cs2[p] := 0; end;
+      3: SetLength(cs2, Rand(len));
+      else begin p := Rand(Min(len, 512)); cs2[p] := Rand(256); SetLength(cs2, len - Rand(Min(len, 64))); end;
+    end;
+    Inc(m2FzCs);
+    try
+      r := J2kMode2Encode(cs2, 0, Length(cs2), m1Threads, b2, why);
+      if r = m2Ok then Inc(m2FzCsOk)
+      else if (Pos('verify', why) = 1) or (Pos('exception', why) = 1) or (Pos('internal', why) = 1) then begin
+        Inc(m2Fail); Writeln('MODE2 FUZZ FAIL codestream ', f, ' #', ci, ' variant ', k, ': ', why);
+      end;
+    except
+      on E: Exception do begin
+        Inc(m2Fail); Writeln('MODE2 FUZZ FAIL codestream ', f, ' #', ci, ' variant ', k, ': ', E.ClassName, ' ', E.Message);
+      end;
+    end;
+  end;
+  for k := 1 to m2Fuzz do begin
+    b2 := Copy(m);
+    n := 1 + Rand(4);
+    case Rand(4) of
+      0: SetLength(b2, Rand(Length(b2)));
+      1: for j := 1 to n do begin p := Rand(Min(Length(b2), 64)); b2[p] := b2[p] xor (1 shl Rand(8)); end;
+      else for j := 1 to n do begin p := Rand(Length(b2)); b2[p] := b2[p] xor (1 shl Rand(8)); end;
+    end;
+    Inc(m2FzRuns);
+    try
+      r := J2kMode2DecodeWhy(b2, len, m1Threads, back, why);
+      if r = m2Ok then Inc(m2FzOk);
+      if Pos('exception', why) = 1 then begin
+        Inc(m2Fail); Writeln('MODE2 FUZZ FAIL ', f, ' #', ci, ' variant ', k, ': ', why);
+      end;
+    except
+      on E: Exception do begin
+        Inc(m2Fail); Writeln('MODE2 FUZZ FAIL ', f, ' #', ci, ' variant ', k, ': ', E.ClassName, ' ', E.Message);
+      end;
+    end;
+  end;
+end;
+
+{ -mode2: the codestream as stream version 8's mode 2 (pjaj2kpx), decoded
+  again and compared; and with -mode1, the choice }
+procedure Mode2One(const d: TBytes; off, len: Int64; const f: string; ci: Integer);
+var m, back: TBytes; why: string; t0: TDateTime; r: TMode2Result; side, best: Int64; te, td: Double;
+  chosen: Integer;
+begin
+  t0 := Now;
+  r := J2kMode2Encode(d, off, len, m1Threads, m, why);
+  te := MilliSecondsBetween(Now, t0) / 1000;
+  if r <> m2Ok then begin
+    if (Pos('verify', why) = 1) or (Pos('exception', why) = 1) or (Pos('internal', why) = 1) then begin
+      Inc(m2Fail); Writeln('MODE2 FAIL ', f, ' #', ci, ': ', why);
+    end else begin
+      Inc(m2Ref);
+      if not quiet then Writeln('MODE2REFUSED ', ExtractFileName(f), ' #', ci, ' ', why);
+    end;
+    Count2(why);
+    m := nil;
+  end else begin
+    t0 := Now;
+    r := J2kMode2Decode(m, len, m1Threads, back);
+    td := MilliSecondsBetween(Now, t0) / 1000;
+    if (r <> m2Ok) or (Length(back) <> len) or not CompareMem(@back[0], @d[off], len) then begin
+      Inc(m2Fail); Writeln('MODE2 FAIL ', f, ' #', ci, ': decode'); Exit;
+    end;
+    side := Int64(m[5]) or (Int64(m[6]) shl 8) or (Int64(m[7]) shl 16) or (Int64(m[8]) shl 24);
+    m2Digest := m2Digest xor Fnv(m);
+    m2Cs := m2Cs + len; m2Bytes := m2Bytes + Length(m); m2Side := m2Side + side;
+    tM2e := tM2e + te; tM2d := tM2d + td;
+    Writeln('MODE2 ', ExtractFileName(f), ' #', ci, ' ', len, ' ', Length(m), ' ', side, ' ',
+      FormatFloat('0.000', te), ' ', FormatFloat('0.000', td));
+    if m2Fuzz > 0 then Mode2Fuzz(m, len, f, ci, d, off);
+  end;
+  if mode1 then begin
+    { the choice, as pjacodec.CompressJ2k makes it }
+    best := len; chosen := 0;
+    if (m <> nil) and (Length(m) < best) then begin best := Length(m); chosen := 2; end;
+    if (lastM1 >= 0) and (lastM1 < best) and ((chosen = 0) or (2 * best > len)) then begin
+      best := lastM1; chosen := 1;
+    end;
+    chCs := chCs + len; chBytes := chBytes + best;
+    if lastM1 >= 0 then chM1Bytes := chM1Bytes + Min(lastM1, len) else chM1Bytes := chM1Bytes + len;
+    case chosen of 0: Inc(chM0); 1: Inc(chM1); else Inc(chM2); end;
+    Writeln('CHOICE ', ExtractFileName(f), ' #', ci, ' ', len, ' mode1 ', lastM1, ' mode2 ', Length(m), ' -> mode ',
+      chosen, ' ', best);
+  end;
 end;
 
 procedure OneFile(const f: string);
@@ -251,7 +383,9 @@ begin
       if fuzz > 0 then FuzzOne(d, cs[i].off, cs[i].len, nil, f, i);
       Continue;
     end;
+    lastM1 := -1;
     if mode1 then Mode1One(d, cs[i].off, cs[i].len, f, i);
+    if mode2 then Mode2One(d, cs[i].off, cs[i].len, f, i);
     if dumpS <> nil then begin
       lkd.kind := kmDump; lkd.slice := nil; lkd.dump := dumpS;
       s1 := Default(TJ2kStats);
@@ -304,6 +438,7 @@ var i, k: Integer; lst: TStringList;
 begin
   J2kTestSlicesFromEnv;
   reasons := TStringList.Create;
+  m2Reasons := TStringList.Create;
   st := Default(TJ2kStats);
   i := 1;
   while i <= ParamCount do begin
@@ -311,6 +446,8 @@ begin
     else if ParamStr(i) = '-fuzz' then begin Inc(i); fuzz := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-side' then begin Inc(i); sidePrefix := ParamStr(i); end
     else if ParamStr(i) = '-mode1' then mode1 := True
+    else if ParamStr(i) = '-mode2' then mode2 := True
+    else if ParamStr(i) = '-m2fuzz' then begin Inc(i); m2Fuzz := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-threads' then begin Inc(i); m1Threads := StrToInt(ParamStr(i)); end
     else if ParamStr(i) = '-dumpcb' then begin Inc(i); dumpS := TFileStream.Create(ParamStr(i), fmCreate); end
     else if ParamStr(i) = '-min' then begin Inc(i); minOk := StrToInt(ParamStr(i)); end
@@ -353,6 +490,21 @@ begin
       FormatFloat('0.000', m1Cs / 1048576 / Max(tM1d, 0.001)), ' MB/s decoding; streams digest ',
       IntToHex(m1Digest, 16));
   if m1Fail > 0 then nfail := nfail + m1Fail;
+  if mode2 then begin
+    Write('mode 2: ', m2Cs, ' bytes of codestream taken -> ', m2Bytes);
+    if m2Cs > 0 then Write(' (', FormatFloat('0.000', 100.0 * m2Bytes / m2Cs), '%, side ', m2Side, ' = ',
+      FormatFloat('0.000', 100.0 * m2Side / m2Cs), '%; ', FormatFloat('0.000', m2Cs / 1048576 / Max(tM2e, 0.001)),
+      ' MB/s encoding (with its check), ', FormatFloat('0.000', m2Cs / 1048576 / Max(tM2d, 0.001)), ' MB/s decoding)');
+    Writeln('; refused ', m2Ref, ', failed ', m2Fail, '; streams digest ', IntToHex(m2Digest, 16));
+    for i := 0 to m2Reasons.Count - 1 do Writeln('  mode 2 refused: ', PtrInt(m2Reasons.Objects[i]), ' x ', m2Reasons[i]);
+    if m2Fuzz > 0 then Writeln('mode 2 fuzz: ', m2FzRuns, ' damaged streams (', m2FzOk, ' gave the codestream), ',
+      m2FzCs, ' damaged codestreams (', m2FzCsOk, ' taken and given back)');
+    if mode1 and (chCs > 0) then
+      Writeln('choice: ', chCs, ' bytes of codestream -> ', chBytes, ' (saves ', FormatFloat('0.000',
+        100.0 - 100.0 * chBytes / chCs), '%; mode 1 alone ', FormatFloat('0.000', 100.0 - 100.0 * chM1Bytes / chCs),
+        '%); codestreams in mode 0 ', chM0, ', mode 1 ', chM1, ', mode 2 ', chM2);
+  end;
+  if m2Fail > 0 then nfail := nfail + m2Fail;
   if fuzz > 0 then
     Writeln('fuzz: ', fzRuns, ' damaged codestreams (', fzOk, ' taken and given back), ', fzBlob, ' damaged blobs (',
       fzBlobOk, ' gave a codestream), FAILED ', fzFail);
@@ -372,6 +524,7 @@ begin
   Write(' fzruns=', fzRuns, ' fzok=', fzOk, ' fzblob=', fzBlob, ' fzblobok=', fzBlobOk, ' fzfail=', fzFail);
   Writeln;
   reasons.Free;
+  m2Reasons.Free;
   dumpS.Free;
   if nfail > 0 then Halt(1);
 end.

@@ -77,14 +77,24 @@ echo "-- stream version 8 (the JPEG 2000 family): the codestreams found, every s
 "$OUT/test_codec" "$PJA/tests/j2k" 7 | tail -2
 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
 echo "-- JPEG 2000 stage B: each codestream taken apart, put back together from the blob alone, and damaged copies"
-"$OUT/test_j2kcs" -q -min 14 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
+"$OUT/test_j2kcs" -q -min 16 -fuzz 100 "$PJA/tests/j2k" | grep -E '^(files|fuzz|blobs)'
 echo "-- JPEG 2000 stage C: stream version 8's mode 1, the same stream on 1 and 4 threads, in slices too, and damaged"
-"$OUT/test_j2kcs" -q -min 14 -mode1 "$PJA/tests/j2k" | grep -E '^mode 1'
-m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 1 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
-m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 14 -mode1 -threads 4 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+"$OUT/test_j2kcs" -q -min 16 -mode1 "$PJA/tests/j2k" | grep -E '^mode 1'
+m1=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode1 -threads 1 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode1 -threads 4 "$PJA/tests/j2k" | grep '^mode 1' | sed 's/.*digest //')
 [ -n "$m1" ] && [ "$m1" = "$m4" ] || { echo "FAIL: mode 1 in slices differs on 1 and 4 threads ($m1, $m4)"; exit 1; }
 echo "mode 1 in slices of 1500 bytes: the same streams on 1 and 4 threads ($m1)"
 PJA_J2K_SLICE=1500 "$OUT/test_codec_corrupt" "$PJA/tests/j2k" 128 | tail -1
+echo "-- JPEG 2000 stage D: mode 2 (the pixels), the same stream on 1 and 4 threads, in slices too, and damaged streams"
+r=$("$OUT/test_j2kcs" -q -min 16 -mode1 -mode2 -m2fuzz 300 "$PJA/tests/j2k" | grep -E '^(mode 2|choice)')
+echo "$r"
+echo "$r" | grep -q 'mode 2 fuzz: 1800 damaged streams' || { echo "FAIL: mode 2 fuzz"; exit 1; }
+echo "$r" | grep -q 'mode 0 0, mode 1 14, mode 2 2' || { echo "FAIL: mode 2 not chosen for the two lossless samples"; exit 1; }
+m1=$("$OUT/test_j2kcs" -q -min 16 -mode2 -threads 1 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+m4=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 4 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+m5=$(PJA_J2K_SLICE=1500 "$OUT/test_j2kcs" -q -min 16 -mode2 -threads 1 "$PJA/tests/j2k" | grep '^mode 2:' | sed 's/.*digest //')
+[ -n "$m4" ] && [ "$m4" = "$m5" ] || { echo "FAIL: mode 2 in slices differs on 1 and 4 threads ($m4, $m5)"; exit 1; }
+echo "mode 2: streams $m1; in slices of 1500 bytes, the same on 1 and 4 threads ($m4)"
 # small codestreams that ask much work: 65535 tiles of 2 tile-parts each
 # (1.9 MB, taken), 2 million code-blocks in 111 bytes (refused at the
 # entries' bound); seconds, not the minutes the work grew to before

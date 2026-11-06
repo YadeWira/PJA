@@ -96,4 +96,13 @@ put back together), five raw codestreams with what the others lack, each
 | `bypass_layers.j2k` | `-M 1 -r 24,12,6,3 -n 3 -b 16,16`: BYPASS alone, its raw segments cut by four layers |
 | `rpcl_sop_eph.j2k` | `-p RPCL -c [32,32],[16,16] -n 4 -SOP -EPH -r 30,10 -b 8,8`: RPCL, precincts, SOP and EPH markers |
 | `pcrl_tiles_plt_tlm.j2k` | `-p PCRL -t 48,40 -TP R -PLT -TLM -n 3 -r 20,8 -b 16,16`: PCRL, four tiles, a tile-part per resolution, PLT and TLM |
-| `cprl_poc.j2k` | `-p CPRL -POC T1=0,0,1,3,2,CPRL/T1=0,0,2,4,3,LRCP -n 4 -M 8 -r 12,4,1 -b 16,16`: CPRL, a POC in the tile's header, CAUSAL, a lossless last layer |
+| `cprl_poc.j2k` | `-p CPRL -POC T1=0,0,1,3,2,CPRL/T1=0,0,2,4,3,LRCP -n 4 -M 8 -r 12,4,1 -b 16,16`: CPRL, a POC in the tile's header, CAUSAL, three layers (the last at rate 1, which still leaves passes out: not lossless, every pixel differs) |
+
+For stage D (stream version 8's mode 2: a reversible codestream kept as
+its pixels), two lossless ones that mode 2 takes and keeps (its stream
+is smaller than mode 1's):
+
+| file | made with |
+|---|---|
+| `bitonal.j2k` | `color_plasma.jpg` decoded with `djpeg -pnm`, to gray and thresholded at 50% (ImageMagick, `convert -colorspace Gray -threshold 50%`), one byte 0 or 1 a pixel (a `.raw`) → `opj_compress -F 320,240,1,1,u`: a 1-bit codestream (Ssiz 0), lossless (the PBM and PGM readers of `opj_compress` make 8-bit ones) |
+| `rgb_tiles53.j2k` | `baseline_color.jpg` (64x64, `djpeg -pnm`) → `opj_compress -b 8,8 -t 40,36 -d 5,3 -n 3`: lossless RGB with the reversible colour transform, four tiles on an image offset by (5, 3), so that the wavelet's signals start at odd places |

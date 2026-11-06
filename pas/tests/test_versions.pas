@@ -11,17 +11,18 @@
   - a version 6 stream with parts whose first part's stream starts with 9
     to 255: FutureVersion, not BadStream;
   - a version 8 stream with a flag set, or a codestream of a mode this
-    release does not know (2 to 255): FutureVersion; a codestream of mode 1
-    (modelled, pjaj2km) whose stream's layout byte is 1 to 255:
-    FutureVersion; and mode 1 read by a program without pjaj2km (the
-    zpaq-std plugin: pjacodec's hooks nil): FutureVersion;
+    release does not know (3 to 255): FutureVersion; a codestream of mode 1
+    (modelled, pjaj2km) or 2 (the pixels, pjaj2kpx) whose stream's layout
+    byte is 1 to 255: FutureVersion; and mode 1 read by a program without
+    pjaj2km, mode 2 by one without pjaj2kpx (the zpaq-std plugin:
+    pjacodec's hooks nil): FutureVersion;
   - a .pja whose codec stream starts with 9 to 255: Unpack gives
     Codec(FutureVersion); a .pja of version 5 to 255: Format(FutureVersion).
 
     test_versions <directory>... }
 program test_versions;
 {$I ../pja.inc}
-uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjapack, pjaformat, pjablake3, pjav7, pjaj2km;
+uses {$ifdef unix} cthreads, {$endif} SysUtils, Classes, pjacodec, pjapack, pjaformat, pjablake3, pjav7, pjaj2km, pjaj2kpx;
 
 const
   J2K_ENTRY = 13;
@@ -77,7 +78,7 @@ end;
 var
   files: TStringList; sr: TSearchRec; i, d, b, k, p, e: Integer; data, st, pja, m, back: TBytes;
   r: TCodecResult; pr: TPackResult; h: THash16; seen: array[0..8] of Integer; patch, v8, inparts: Integer;
-  mode1: Integer; enc1: TJ2kMode1Enc; dec1: TJ2kMode1Dec;
+  mode1, mode2: Integer; enc1: TJ2kMode1Enc; dec1: TJ2kMode1Dec;
   raised: Boolean; name: string; pjas: Integer;
 begin
   files := TStringList.Create; files.Sorted := True;
@@ -86,7 +87,7 @@ begin
       repeat if (sr.Attr and faDirectory) = 0 then files.Add(ParamStr(d) + '/' + sr.Name); until FindNext(sr) <> 0;
       FindClose(sr);
     end;
-  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0; inparts := 0; mode1 := 0;
+  cells := 0; failures := 0; patch := 0; v8 := 0; pjas := 0; inparts := 0; mode1 := 0; mode2 := 0;
   FillChar(seen, SizeOf(seen), 0);
   { hand-made }
   RandSeed := 8;
@@ -130,7 +131,16 @@ begin
         Sweep(st, 1, name + ' (flags)', 1);
         p := 6 + J2K_ENTRY * Integer(GetU32(st, 2));
         for e := 0 to Integer(GetU32(st, 2)) - 1 do begin
-          Sweep(st, 6 + J2K_ENTRY * e + 12, name + ' (mode)', 2);
+          Sweep(st, 6 + J2K_ENTRY * e + 12, name + ' (mode)', 3);
+          if st[6 + J2K_ENTRY * e + 12] = 2 then begin
+            { mode 2: its stream's layout byte, and a program without mode 2 }
+            Sweep(st, p, name + ' (mode 2 layout)', 1);
+            enc1 := J2kMode2Enc; dec1 := J2kMode2Dec;
+            J2kMode2Enc := nil; J2kMode2Dec := nil;
+            Check(Verdict(st, raised) = ceFutureVersion, name + ': mode 2 without pjaj2kpx is not FutureVersion');
+            J2kMode2Enc := enc1; J2kMode2Dec := dec1;
+            Inc(mode2);
+          end;
           if st[6 + J2K_ENTRY * e + 12] = 1 then begin
             { mode 1: its stream's layout byte, and a program without mode 1 }
             Sweep(st, p, name + ' (mode 1 layout)', 1);
@@ -173,10 +183,10 @@ begin
       Inc(pjas);
     end;
   end;
-  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d (codestreams of mode 1: %d); PATCH %d, with parts %d, .pja %d',
-                 [seen[5], seen[6], seen[7], seen[8], mode1, patch, inparts, pjas]));
+  Writeln(Format('  streams by version: 5: %d, 6: %d, 7: %d, 8: %d (codestreams of mode 1: %d, of mode 2: %d); PATCH %d, with parts %d, .pja %d',
+                 [seen[5], seen[6], seen[7], seen[8], mode1, mode2, patch, inparts, pjas]));
   { each kind met, so that none of the sweeps above ran empty }
-  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (inparts > 0) and (v8 > 0) and (mode1 > 0) and (pjas > 0),
+  Check((seen[5] > 0) and (seen[6] > 0) and (seen[7] > 0) and (seen[8] > 0) and (patch > 0) and (inparts > 0) and (v8 > 0) and (mode1 > 0) and (mode2 > 0) and (pjas > 0),
         'every kind of stream among the samples');
   Writeln(files.Count, ' files, ', cells, ' cells, ', failures, ' failures');
   if (failures > 0) or (cells < 10000) then Halt(1);
