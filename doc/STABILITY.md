@@ -62,7 +62,11 @@ side information as mode 1's, the bitonal tables' size byte, the colour
 byte, the planes' arithmetic stream), the planes as the SIZ gives them,
 the integer 5/3 wavelet, the reversible colour transform and the level
 shift that turn them into coefficients, the rules that turn those into
-decisions, and the two pixel models (1 bit; 2 to 16 bits), bit for bit.
+decisions, the two pixel models (1 bit, with its seven templates; 2 to 16
+bits), bit for bit, and the bounds a reader holds a stream to before it
+decodes a plane (the planes at most 2^27 samples and max(2^20, 1,024 x
+the codestream's bytes), a plane of 2 bits or more at most 2^20 samples
+wide): a later release may only widen them.
 Later stages (HTJ2K, DICOM fragments) come only as new codestream mode
 values, a new layout byte of mode 1 or 2 (1 is meant for a codestream
 coded on from the file's previous one: MJ2 frames), or new flags, in this
