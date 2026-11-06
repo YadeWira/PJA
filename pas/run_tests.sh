@@ -14,6 +14,12 @@ mkdir -p "$OUT"
 echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 python3 "$PAS/results.py" "$PAS"
+# the 7-Zip plugin's module version (major << 16 | minor, minor = the release's
+# two digits, 0.9.5 -> 0.95) follows PJA_VERSION
+v=$(sed -n "s/^  PJA_VERSION = '\([0-9.]*\)';.*/\1/p" "$PAS/pjacodec.pas")
+m=$(echo "$v" | awk -F. '{printf "(%du << 16) | %du;", $1, $2*10+$3}')
+grep -qF "$m" "$PAS/lib/pja7z.c" || { echo "pja7z.c: M_VERSION is not $m (PJA_VERSION $v)"; exit 1; }
+echo "7-Zip module version follows PJA_VERSION $v"
 
 echo "== build"
 "$PAS/build_c.sh" "$OUT/c"
