@@ -397,6 +397,13 @@ begin
   if dryRun then Exit(True);
   if keepCorrupt then om := omKeep else om := omDelete;
   r := WriteVerified(path, data, expected, om, force, o);
+  { in place and whole, but its name may not survive a power cut }
+  if r.error = feNotSynced then begin
+    Fail(o.path + ': written, but its directory could not be flushed to the disk: ' +
+         SysErrorMessage(r.code) + ' (' + r.Text + ')');
+    if o.kind = ocKept then Fail(path + ': does not verify; kept as ' + o.path);
+    Exit;
+  end;
   if not r.Ok then begin
     { the system's own words for its error, and its number }
     if r.code >= 0 then Fail(path + ': could not write it: ' + SysErrorMessage(r.code) + ' (' + r.Text + ')')

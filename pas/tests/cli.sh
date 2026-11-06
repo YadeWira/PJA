@@ -231,6 +231,27 @@ if [ "$HOLD" = 1 ]; then how="held at its fsync"; else how="strace not here: rac
 check "SIGINT while a temporary is written: deleted, rc 130 ($how)" sigcheck SIGINT 130
 check "SIGTERM: the same, rc 143" sigcheck SIGTERM 143
 check "SIGHUP: the same, rc 129" sigcheck SIGHUP 129
+check "SIGPIPE: the same, rc 141" sigcheck SIGPIPE 141
+# the real way to get it: the reader of the listing goes away (| head)
+cat > "$W/pipe.py" <<'EOF2'
+import glob, os, subprocess, sys
+pja, d = sys.argv[1], sys.argv[2]
+out = os.path.join(d, 'p')
+bad = 0
+for _ in range(3):
+    subprocess.run(['rm', '-rf', out])
+    r, w = os.pipe()
+    os.close(r)                               # nobody reads: the first line written gets SIGPIPE
+    p = subprocess.Popen([pja, 'x', '-f', '-th', '8'] + sorted(glob.glob(os.path.join(d, 'c*.pja'))) + ['-o', out + '/'],
+                         stdout=w, preexec_fn=lambda: __import__('signal').signal(13, __import__('signal').SIG_DFL))
+    os.close(w)
+    rc = p.wait()
+    rc = 128 - rc if rc < 0 else rc
+    left = glob.glob(os.path.join(out, '.pja-tmp-*'))
+    if left or rc not in (0, 141): bad += 1; print(rc, left)
+sys.exit(1 if bad else 0)
+EOF2
+check "  the reader of its output gone (pja x | head): no temporary left, 3 runs" python3 -I "$W/pipe.py" "$PJA" "$W/sig"
 if [ "$HOLD" = 1 ]; then
   check "a SIGINT ignored by whoever started it (nohup) stays ignored: rc 0" bash -c "
     r=\$(python3 -I '$W/sig.py' '$PJA' '$W/sig' SIGINT 1 1) && [ \"\$r\" = '0 seen 0' ] && [ -e '$W/sig/o/c1.jpg' ]"
@@ -242,6 +263,15 @@ if [ "$HOLD" = 1 ]; then
     strace -f -qq -o '$W/sync2.txt' -e trace=fsync,rename,renameat2 '$PJA' x -q -f '$W/sync.pja' -o '$W/sync.jpg' &&
     grep -oE '^[0-9]+ +(fsync|rename|renameat2)\(' '$W/sync2.txt' | sed -E 's/^[0-9]+ +//; s/renameat2/rename/' | tr -d '(' |
       tr '\n' ' ' | grep -qx 'fsync rename fsync ' && cmp -s '$W/sync.jpg' '$W/in/grayscale.jpg'"
+  check "the directory flush fails: rc 1, and the message says the file is there" bash -c "
+    rm -f '$W/sync4.pja'
+    ! strace -f -qq -o /dev/null -e trace=fsync -e inject=fsync:error=EIO:when=2 '$PJA' a -q '$W/in/grayscale.jpg' -o '$W/sync4.pja' 2> '$W/sync4.txt' &&
+    grep -q 'sync4.pja: written, but its directory could not be flushed to the disk' '$W/sync4.txt' &&
+    ! grep -q 'could not write it' '$W/sync4.txt' && [ -s '$W/sync4.pja' ]"
+  check "  the data flush fails: rc 1, nothing left, not even a temporary" bash -c "
+    rm -rf '$W/sync5'; mkdir '$W/sync5'
+    ! strace -f -qq -o /dev/null -e trace=fsync -e inject=fsync:error=EIO:when=1 '$PJA' a -q '$W/in/grayscale.jpg' -o '$W/sync5/g.pja' 2> '$W/sync5.txt' &&
+    grep -q 'could not write it' '$W/sync5.txt' && [ -z \"\$(ls -A '$W/sync5')\" ]"
   check "--no-sync: no fsync at all, and the file comes back" bash -c "
     strace -f -qq -o '$W/sync3.txt' -e trace=fsync,fdatasync '$PJA' a -q -f --no-sync '$W/in/grayscale.jpg' -o '$W/sync3.pja' &&
     ! grep -qE 'fsync|fdatasync' '$W/sync3.txt' && '$PJA' x -q -f '$W/sync3.pja' -o '$W/sync3.jpg' && cmp -s '$W/sync3.jpg' '$W/in/grayscale.jpg'"

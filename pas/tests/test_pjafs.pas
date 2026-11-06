@@ -201,6 +201,8 @@ begin
   {$ifndef MSWINDOWS}
   PutText(d + '/victim', 'kept');
   MakeLink(d + '/victim', d + '/' + dead + '3');
+  { pid 1 is alive (init; in a container it may be pja itself) }
+  PutOld(d + '/.pja-tmp-1-0', 2 * LEFTOVER_AGE);
   {$endif}
   note := CheckLeftovers(d + '/out.jpg', True);
   Check(Pos('deleted 2 leftover temporaries', note) > 0, 'asked: an old one of a dead pid and an old-pattern one: ' + note);
@@ -210,6 +212,7 @@ begin
   Check(DirectoryExists(d + '/' + dead + '2'), '  a directory with the name stays');
   {$ifndef MSWINDOWS}
   Check(IsLink(d + '/' + dead + '3') and (ReadText(d + '/victim') = 'kept'), '  a link with the name stays, its target too');
+  Check(Exists(d + '/.pja-tmp-1-0'), '  nor one of pid 1, which is alive');
   {$endif}
 
   { --- Defects measured on 2026-10-09 in the previous Rust version. }

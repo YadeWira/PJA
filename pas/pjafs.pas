@@ -18,7 +18,7 @@
   Since 0.9.5 a write is also durable and leaves nothing behind when it is
   interrupted: the data reaches the disk (fsync, FlushFileBuffers) before
   the temporary takes the output's name, and the directory after it (Unix;
-  on Windows the move is write-through); SIGINT, SIGTERM and SIGHUP (Ctrl-C
+  Windows has no such call); SIGINT, SIGTERM, SIGHUP and SIGPIPE (Ctrl-C
   and closing the console on Windows) delete the temporaries still being
   written; and what a SIGKILL or a crash leaves (.pja-tmp-<pid>-<n>) is
   reported by the next run that writes in that directory, and deleted when
@@ -50,7 +50,11 @@ type
               feIo,
               { The hash did not match, keeping was requested, and it could
                 not be renamed. The file was deleted. }
-              feCouldNotKeep);
+              feCouldNotKeep,
+              { Written and given its name (outcome.path), but the directory
+                could not be flushed after: the file is there and whole, but
+                a power cut may still lose its name. Not a success either. }
+              feNotSynced);
   TFsResult = record
     error: TFsError;
     { errno on Unix, GetLastError on Windows; -1 if the error did not come
@@ -75,7 +79,7 @@ function WriteVerified(const fileName: RawByteString; const data: TBytes; const 
 
 var
   { Each file reaches the disk before it takes its name, and the directory
-    after (Windows: the move is write-through). False (pja --no-sync) leaves
+    after (Unix). False (pja --no-sync) leaves
     both to the system: faster on a real disk, but a power cut may leave an
     output empty or missing. Set once, before any write. }
   SyncToDisk: Boolean = True;
@@ -83,7 +87,7 @@ var
 { Exposed for the tests. Path::parent; False at the root or with an empty path. }
 function Parent(const p: RawByteString; out q: RawByteString): Boolean;
 
-{ SIGINT, SIGTERM and SIGHUP (on Windows Ctrl-C, Ctrl-Break and closing the
+{ SIGINT, SIGTERM, SIGHUP and SIGPIPE (on Windows Ctrl-C, Ctrl-Break and closing the
   console) delete the temporaries this process is still writing, and end
   it as the signal would have (130 for SIGINT; STATUS_CONTROL_C_EXIT on
   Windows). A signal ignored when the program started (nohup) stays
@@ -118,7 +122,7 @@ uses
 
 function TFsResult.Ok: Boolean; begin Result := error = feNone; end;
 function TFsResult.Text: string;
-const N: array[TFsError] of string = ('None', 'Io', 'CouldNotKeep');
+const N: array[TFsError] of string = ('None', 'Io', 'CouldNotKeep', 'NotSynced');
 begin
   Result := N[error];
   if error <> feNone then
@@ -166,8 +170,11 @@ begin Result := CreateDirectoryW(PWideChar(W(p)), nil); end;
 function DeleteEntry(const p: RawByteString): Boolean;
 begin Result := DeleteFileW(PWideChar(W(p))); end;
 const
-  { not in FPC's Windows unit: the move returns once it is on the disk (the
-    directory entry, what fsync of the directory is on Unix) }
+  { not in FPC's Windows unit. Microsoft documents it only for a move done
+    as a copy and a delete (another volume), which these never are: kept
+    for that case, it does not make a rename on the same volume durable.
+    There the data is on the disk before the move (SyncFile), so the output
+    is whole or absent; its name is left to the file system's journal. }
   MOVEFILE_WRITE_THROUGH_ = $8;
 function WriteThrough: DWORD;
 begin if SyncToDisk then Result := MOVEFILE_WRITE_THROUGH_ else Result := 0; end;
@@ -213,11 +220,12 @@ begin
   Result := FlushFileBuffers(f);
   if not Result then begin
     e := GetLastError;
-    Result := (e = ERROR_INVALID_FUNCTION) or (e = ERROR_NOT_SUPPORTED) or (e = ERROR_INVALID_HANDLE);
+    Result := (e = ERROR_INVALID_FUNCTION) or (e = ERROR_NOT_SUPPORTED);
     if not Result then SetLastError(e);
   end;
 end;
-{ The moves are write-through (MOVEFILE_WRITE_THROUGH): nothing left to do }
+{ No directory to flush on Windows: Win32 has no fsync of a directory (see
+  MOVEFILE_WRITE_THROUGH_ above). }
 function SyncDir(const dir: RawByteString; out code: LongInt): Boolean;
 begin code := 0; Result := True; end;
 function OwnPid: Int64; begin Result := GetCurrentProcessId; end;
@@ -350,10 +358,13 @@ begin
 end;
 function OwnPid: Int64; begin Result := fpGetPid; end;
 { kill(pid, 0): ESRCH is the only "gone"; EPERM is a live process of
-  another user. }
+  another user. pid 1 is asked too: in a container pja itself may be it.
+  It answers for this pid namespace only: a directory shared with another
+  machine or container is judged against the wrong table (the age is then
+  the only guard). }
 function PidAlive(pid: Int64): Boolean;
 begin
-  if (pid <= 1) or (pid > High(LongInt)) then Exit(False);
+  if (pid <= 0) or (pid > High(LongInt)) then Exit(False);
   if fpKill(TPid(pid), 0) = 0 then Exit(True);
   Result := fpgeterrno <> ESysESRCH;
 end;
@@ -500,8 +511,9 @@ begin
 end;
 
 { -1 when the table is full: the name is written as before, only without
-  the handler's help. }
-function RegisterLive(const path: RawByteString): Integer;
+  the handler's help. `created`: the file is already there, made by this
+  thread; if the handler may have passed the slot, it is deleted here. }
+function RegisterLive(const path: RawByteString; created: Boolean): Integer;
 var i: Integer; n: SizeInt; {$ifdef MSWINDOWS} u: UnicodeString; {$endif}
 begin
   {$ifdef MSWINDOWS} u := W(path); n := Length(u); {$else} n := Length(path); {$endif}
@@ -519,7 +531,10 @@ begin
       live[i].name[n] := #0;
       InterlockedExchange(live[i].state, 2);
       { the handler started meanwhile, and may have passed this slot }
-      if InterlockedCompareExchange(dying, 0, 0) <> 0 then AwaitDeath;
+      if InterlockedCompareExchange(dying, 0, 0) <> 0 then begin
+        if created then DeleteEntry(path);
+        AwaitDeath;
+      end;
       Exit(i);
     end;
   Result := -1;
@@ -585,7 +600,8 @@ begin
 end;
 
 procedure InstallInterruptCleanup;
-const SIGS: array[0..2] of cint = (SIGINT, SIGTERM, SIGHUP);
+  { SIGPIPE: `pja x ... | head`, the reader gone while workers write }
+const SIGS: array[0..3] of cint = (SIGINT, SIGTERM, SIGHUP, SIGPIPE);
 var act, old: SigActionRec; i: Integer;
 begin
   FillChar(act, SizeOf(act), 0);
@@ -618,14 +634,14 @@ function CreateAndWrite(const path: RawByteString; const data: TBytes; temp: Boo
 var f: TFileHandle;
 begin
   code := 0; slot := -1;
-  if temp then slot := RegisterLive(path);
+  if temp then slot := RegisterLive(path, False);
   { If it could not be created there is nothing of ours to delete. }
   if not CreateNew(path, f) then begin
     code := LastError;
     ReleaseLive(slot); slot := -1;
     Exit(False);
   end;
-  if not temp then slot := RegisterLive(path);
+  if not temp then slot := RegisterLive(path, True);
   if not WriteAll(f, data) or not SyncFile(f) then begin
     code := LastError;
     if code = 0 then code := -1;
@@ -638,14 +654,14 @@ begin
   Result := True;
 end;
 
-{ A file that is not a temporary: written, flushed, and its name in the
-  directory flushed too. }
+{ A file that is not a temporary: written and flushed, in place. False
+  when nothing is left; the caller flushes the directory once it is there. }
 function WriteFinal(const path: RawByteString; const data: TBytes; out code: LongInt): Boolean;
 var slot: Integer;
 begin
   if not CreateAndWrite(path, data, False, slot, code) then Exit(False);
   ReleaseLive(slot);
-  Result := SyncDir(DirPrefix(path), code);
+  Result := True;
 end;
 
 function TempName(n: Integer): RawByteString;
@@ -723,6 +739,7 @@ begin
       if not WriteFinal(other, data, code) then Exit(FsFail(feCouldNotKeep, code));
     end;
     outcome.kind := ocKept; outcome.path := other;
+    if not SyncDir(DirPrefix(other), code) then Exit(FsFail(feNotSynced, code));
     Exit(FsFail(feNone, 0));
   end;
 
@@ -746,7 +763,8 @@ begin
       if not WriteFinal(fileName, data, code) then Exit(FsFail(feIo, code));
     end;
     outcome.path := fileName;
-    if not SyncDir(DirPrefix(fileName), code) then Exit(FsFail(feIo, code));
+    { the file is in place by now: a failure here is not "could not write" }
+    if not SyncDir(DirPrefix(fileName), code) then Exit(FsFail(feNotSynced, code));
     Exit(FsFail(feNone, 0));
   end;
 
@@ -765,7 +783,7 @@ begin
   end;
   ReleaseLive(slot);
   outcome.path := fileName;
-  if not SyncDir(DirPrefix(fileName), code) then Exit(FsFail(feIo, code));
+  if not SyncDir(DirPrefix(fileName), code) then Exit(FsFail(feNotSynced, code));
   Result := FsFail(feNone, 0);
 end;
 
@@ -879,7 +897,7 @@ begin
   end;
   gone := 0; failed := ''; code := 0;
   for i := 0 to High(names) do
-    if DeleteEntry(names[i]) then Inc(gone)
+    if DeleteEntry(names[i]) or (LastError = E_NOT_FOUND) then Inc(gone)  { gone: another run cleaned it }
     else if failed = '' then begin code := LastError; failed := names[i]; end;
   Result := 'deleted ' + Count(gone) + ' of an interrupted run';
   if dir <> '' then Result := Result + ' in ' + dir;

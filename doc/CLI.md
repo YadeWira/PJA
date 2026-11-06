@@ -38,9 +38,14 @@ stderr.
 - Writing creates the file without following links, always as a temporary
   in the same directory (`.pja-tmp-PID-N`) that takes the output's name
   only once it is complete **and on the disk** (`fsync`; `FlushFileBuffers`
-  on Windows), and the directory is flushed after the name is given (on
-  Windows the move is write-through): after a power cut the output is
-  either whole or not there, never empty or partial under its name. A run
+  on Windows), and on Unix the directory is flushed after the name is
+  given: after a power cut the output is either whole or not there, never
+  empty or partial under its name. (Windows has no call to flush a
+  directory: the name is left to the file system's journal, so a power
+  cut just after a run may lose a name, never give it a partial file.) If
+  only that last flush fails, the run fails (rc 1) with `written, but its
+  directory could not be flushed to the disk`: the output is in place and
+  whole, and a rerun needs `-f`. A run
   cut short (Ctrl-C, a kill, a full disk) never leaves a truncated file
   under the output's name. Without `-f` the name is only taken if it is
   still free; with `-f` the temporary is renamed on top: what was there is
@@ -50,11 +55,12 @@ stderr.
 
 ## Interrupted runs
 
-- **Ctrl-C, `kill`, a closed terminal**: SIGINT, SIGTERM and SIGHUP (on
-  Windows Ctrl-C, Ctrl-Break and closing the console) delete the
-  temporaries the run is still writing, and it ends as the signal would
-  have ended it (exit status 130 for SIGINT, 143 for SIGTERM, 129 for
-  SIGHUP; `STATUS_CONTROL_C_EXIT` on Windows). Outputs already written stay:
+- **Ctrl-C, `kill`, a closed terminal, a closed pipe**: SIGINT, SIGTERM,
+  SIGHUP and SIGPIPE (`pja x ... | head`; on Windows Ctrl-C, Ctrl-Break
+  and closing the console) delete the temporaries the run is still
+  writing, and it ends as the signal would have ended it (exit status 130
+  for SIGINT, 143 for SIGTERM, 129 for SIGHUP, 141 for SIGPIPE;
+  `STATUS_CONTROL_C_EXIT` on Windows). Outputs already written stay:
   each one verified. A signal ignored by whoever started `pja` (`nohup`, a
   background job of a script) stays ignored.
 - **`kill -9`, a crash, a power cut**: nothing can run then, so a
@@ -65,6 +71,12 @@ stderr.
   own pattern count, only regular files (a link or a directory with that
   name is left alone), only older than an hour, and never one whose process
   (the PID in its name) is still running. With `-n` they are only named.
+  The notice is a warning on stderr, shown even with `-q`. The PID is
+  checked in this machine's process table (`kill(pid, 0)`; `OpenProcess`
+  on Windows): in a directory shared with another machine or container
+  (NFS, a bind mount) another run's temporary cannot be told alive, and
+  the hour of age is the only guard, so do not use `--clean-temps` there
+  while another machine may be writing.
 - **What flushing costs**: on 151 photos (76 MB) with `-th 8`, writing to
   a SATA SSD took 3.7 to 4.8% longer for `a` and 4.4 to 7.1% longer for
   `x` than 0.9.0, which did not flush (medians of two series of 5 runs);
