@@ -43,6 +43,11 @@
     its name has without the 8 (pja7, ..., pjalsxz) with the same streams,
     H and functions, and its ZPAQL compiled with zpaqlc's opt=3, 3 to 8%
     smaller (v8zpaql.inc).
+  - The JPEG 2000 codec (30, 0.9.6; its name PROVISIONAL, pjazsj2k's
+    PJK_NAME, until the owner approves it): a file of the JPEG 2000 family
+    as stream version 8, each codestream in mode 1 where its ZPAQL
+    (j2kzpaql.inc, comp 0 0 $3 $4 0: H and M from the query) rebuilds it
+    within its limits, else in mode 0 (pjazsj2k).
   - zpaqstd_detect_v1: 1 if the codec named takes the file, looking only at
     its bytes: only what its ZPAQL decoder covers. pja: a JPEG, Huffman or
     arithmetic, sequential or progressive, that PJA's layer 1 rebuilds byte
@@ -73,7 +78,7 @@ library pja_zpaqstd;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
-  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3;
+  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3, pjazsj2k;
 
 {$I lzzpaql.inc}
 {$I ozpaql.inc}
@@ -546,6 +551,58 @@ begin
   end;
 end;
 
+{ the JPEG 2000 codec (pjazsj2k): a version 8 stream, modes 0 and 1 }
+function PjkCompressFn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt; level: LongInt): Int64; cdecl;
+var stream: TBytes; t: Integer;
+begin
+  if (n > MAX_BLOCK) or (level <> LEVEL_FULL) then Exit(ZS_ERR_DATA);
+  t := Enter;
+  try
+    try
+      if not PjkCompress(Bytes(src, n), stream, t) or (SizeUInt(Length(stream)) > cap) then Exit(ZS_ERR_DATA);
+      Move(stream[0], dst^, Length(stream));
+      Result := Length(stream);
+    except
+      on EOutOfMemory do Result := ZS_ERR_MEMORY;
+      on Exception do Result := ZS_ERR_DATA;
+    end;
+  finally
+    Leave;
+  end;
+end;
+
+function PjkDecompressFn(src: Pointer; n: SizeUInt; dst: Pointer; cap: SizeUInt; param: LongInt): Int64; cdecl;
+var data: TBytes; t: Integer;
+begin
+  if (n > MAX_BLOCK) or (cap > MAX_BLOCK) then Exit(ZS_ERR_DATA);
+  t := Enter;
+  try
+    try
+      if not PjkDecompress(Bytes(src, n), SizeInt(cap), t, data) then Exit(ZS_ERR_DATA);
+      if Length(data) > 0 then Move(data[0], dst^, Length(data));
+      Result := Length(data);
+    except
+      on EOutOfMemory do Result := ZS_ERR_MEMORY;
+      on Exception do Result := ZS_ERR_DATA;
+    end;
+  finally
+    Leave;
+  end;
+end;
+
+{ $3 (H) in bits 0-7 and $4 (M) in bits 8-15 }
+function PjkQuery(what: LongInt; src: Pointer; n: SizeUInt): Int64; cdecl;
+begin
+  Result := -1;
+  if what = ZS_QUERY_SEGMENTS then Exit(1);
+  if (what <> ZS_QUERY_ZPAQL_ARGS) or (n > MAX_BLOCK) then Exit;
+  try
+    Result := PjkArgs(Bytes(src, n));
+  except
+    Result := -1;
+  end;
+end;
+
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
 var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt; h: THash16; v: TVerdict;
 begin
@@ -581,6 +638,8 @@ begin
       Exit(zpaqstd_detect_v1(@base[0], src, n));
     Exit;
   end;
+  { the JPEG 2000 codec }
+  if StrComp(codecName, PJK_NAME) = 0 then Exit(Ord(PjkDetect(src, n)));
   try
     if (StrComp(codecName, 'pja') = 0) or (StrComp(codecName, 'pjax') = 0) or (StrComp(codecName, 'pjall') = 0) or
        (StrComp(codecName, 'pja7') = 0) or (StrComp(codecName, 'pjax7') = 0) then begin
@@ -716,6 +775,7 @@ begin
 end;
 
 var
+  InfoPjk: AnsiString;
   InfoZ, InfoLsZ, InfoXZ, InfoLlZ, InfoLsxZ: AnsiString;
   Info7, InfoX7, Info7Z, InfoX7Z: AnsiString;
   InfoLsO, InfoLlO, InfoLsxO, InfoLsZO, InfoLlZO, InfoLsxZO: AnsiString;
@@ -763,6 +823,11 @@ begin
     if size <> nil then size^ := 0;
     Result := nil;
   end;
+end;
+
+function PjkData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
+begin
+  Result := DataOf(PJK_ZPAQL, InfoPjk, what, size);
 end;
 
 function XData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
@@ -1138,6 +1203,13 @@ const
     bound: @CodecBound; compress_: @LsxCompress; decompress_: @CodecDecompress;
     query: @LsxQuery; data: @LsxZ8Data);
 
+  { the JPEG 2000 codec (0.9.6) }
+  ZsCodecPjk: TZsCodec = (
+    abi: ZS_CODEC_ABI; name: PJK_NAME; library_: 'pja stream v8 jpeg 2000 (YadeWira/PJA)';
+    min_level: LEVEL_FULL; max_level: LEVEL_FULL;
+    bound: @CodecBound; compress_: @PjkCompressFn; decompress_: @PjkDecompressFn;
+    query: @PjkQuery; data: @PjkData);
+
 function zpaqstd_codec_v1: PZsCodec; cdecl;
 begin
   Result := @ZsCodec;
@@ -1176,6 +1248,7 @@ begin
     27: Result := @ZsCodecLsZ8;
     28: Result := @ZsCodecLlZ8;
     29: Result := @ZsCodecLsxZ8;
+    30: Result := @ZsCodecPjk;
   else Result := nil;
   end;
 end;
@@ -1200,6 +1273,16 @@ exports
 begin
   IsMultiThread := True;
   InitCriticalSection(VerdictLock);
+  InfoPjk := 'name=' + PJK_NAME + #10 +
+    'version=' + PJA_VERSION + ' (stream v8)'#10 +
+    'author=Yade Bravo (YadeWira)'#10 +
+    'repo=https://github.com/YadeWira/PJA'#10 +
+    'license=MIT'#10 +
+    'commit=' + {$I %PJA_COMMIT%} + #10 +
+    'format=PJA codec stream v8 of a JPEG 2000 file (JP2, J2K, J2C, JPX, JPM, MJ2, JPH): each codestream modelled ' +
+    '(mode 1) or as bytes (mode 0), the rest through the raw bytes'' model'#10 +
+    'notes=lossless: the original rebuilt byte for byte; Part 1 codestreams (not HTJ2K nor Part 2); ZPAQL config ' +
+    'comp 0 0 $3 $4 0 (H and M from the query)'#10;
   InfoZ := ZCard('pjaz', 'pja', 'stream v5 full');
   InfoLsZ := ZCard('pjalsz', 'pjals', 'stream v5');
   InfoXZ := ZCard('pjaxz', 'pjax', 'stream v6');

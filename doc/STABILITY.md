@@ -32,7 +32,7 @@ plugins carry for each file:
 | 5 | the zpaq-std codecs pja, pjals, pjall, pjalsx and their z and o and 8 | a JPEG or JPEG-LS file; model byte 0 (full) and 1 (fast, read only) |
 | 6 | pjax, pjax7 and their z and 8 | a JPEG with JPEGs inside it (MPO, Ultra HDR), 12-bit JPEG, DNL |
 | 7 | the command and the library since 0.1.0; pja7, pjax7 and their z and 8 | the coefficients through version 7's model |
-| 8 | the command and `pja_compress` since 0.9.5 | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled, 2 as its pixels; since 0.9.6, for HTJ2K, 3 modelled and 4 as its pixels), and the other bytes through the raw bytes' model |
+| 8 | the command and `pja_compress` since 0.9.5; the zpaq-std JPEG 2000 codec (0.9.6, modes 0 and 1) | a file of the JPEG 2000 family: its codestreams' places, each with a mode (0 raw, 1 modelled, 2 as its pixels; since 0.9.6, for HTJ2K, 3 modelled and 4 as its pixels), and the other bytes through the raw bytes' model |
 
 With them, the parts stream, the PATCH stream (a repaired JPEG) and the
 bytes stream (a file stored as it is), as `doc/CODEC.md` describes them.
@@ -146,8 +146,12 @@ decoder, even for the same stream, is a new codec.
 | 24 to 29 | `pjals8`, `pjall8`, `pjalsx8`, `pjalsz8`, `pjallz8`, `pjalsxz8` | as 14 to 19 | 22,430, 13,901, 24,611, 23,046, 14,517, 25,244 | 0.8.0 |
 
 ZPAQL in bytes of PCOMP. zpaq-std's `-sa` uses the newest of each family;
-the others stay to read older archives. No codec takes JPEG 2000 yet: one
-would come at index 30 or after.
+the others stay to read older archives.
+
+JPEG 2000 comes at index 30 in 0.9.6 (`doc/CODEC.md`, "JPEG 2000 for
+zpaq-std (stage E)"): stream version 8 with codestream modes 0 and 1, its
+ZPAQL 51,521 bytes. Its name is `pja2k`; it joins the table above, frozen like the others (name, index,
+stream, what it takes, ZPAQL), when 0.9.6 ships, and not before.
 
 ## Left as they are
 

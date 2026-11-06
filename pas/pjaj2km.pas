@@ -48,6 +48,11 @@ function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; o
   CompressJ2k checks the one it keeps) }
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
   out why: string): TMode1Result; overload;
+{ The same, with the analysis' statistics (the zpaq-std plugin's: its ZPAQL's
+  limits and memory, pjaj2kcs.TJ2kStats) and the side information's length
+  (the blob, before the raw bytes' model) }
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
 { A mode 1 stream back to its codestream, which must be len bytes. }
 function J2kMode1Decode(const stream: TBytes; len: Int64; threads: Integer; out cs: TBytes): TMode1Result;
 { Mode 3 (doc/CODEC.md, "JPEG 2000, stage F"): an HTJ2K codestream, its
@@ -228,17 +233,18 @@ end;
 
 { mode 1's stream, or mode 3's when ht; decoded and compared when decodeIt }
 function EncodeWith(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
-  out why: string; ht: Boolean; var st: TJ2kStats): TMode1Result;
+  out why: string; ht: Boolean; var st: TJ2kStats; out blobLen: Int64): TMode1Result;
 var sl: TSlices; lk: TJ2kModelLink; blob, side, back: TBytes; cd: TCoder; k, s: Integer;
   p: SizeInt; total: Int64; was: TStage;
 begin
-  stream := nil; why := '';
+  stream := nil; why := ''; blobLen := 0;
   sl := TSlices.Create(True, ht, threads);
   try
     lk := Default(TJ2kModelLink);
     lk.kind := kmEncode; lk.slice := @sl.Slice; lk.sliceEnd := @sl.SliceEnd; lk.threads := threads; lk.ht := ht;
     if not J2kAnalyzeWith(data, off, len, lk, blob, why, st) then Exit(m1Refused);
     if Length(blob) > J2kSideBound(len) then begin why := 'side information too large'; Exit(m1Refused); end;
+    blobLen := Length(blob);
     s := sl.nAsked;
     if (s < 1) or (s > J2K_MAX_SLICES) then begin why := 'internal: slices'; Exit(m1Refused); end;
     for k := 0 to s - 1 do
@@ -286,10 +292,17 @@ end;
 
 function J2kMode1Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
   out why: string): TMode1Result;
-var st: TJ2kStats;
+var st: TJ2kStats; blobLen: Int64;
 begin
   st := Default(TJ2kStats);
-  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, False, st);
+  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, False, st, blobLen);
+end;
+
+function J2kMode1EncodeSt(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
+  out why: string; out st: TJ2kStats; out blobLen: Int64): TMode1Result;
+begin
+  st := Default(TJ2kStats);
+  Result := EncodeWith(data, off, len, threads, True, stream, why, False, st, blobLen);
 end;
 
 function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; out stream: TBytes;
@@ -300,8 +313,9 @@ end;
 
 function J2kMode3Encode(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes;
   out why: string; var st: TJ2kStats): TMode1Result;
+var blobLen: Int64;
 begin
-  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, True, st);
+  Result := EncodeWith(data, off, len, threads, decodeIt, stream, why, True, st, blobLen);
 end;
 
 function Mode1Enc(const data: TBytes; off, len: Int64; threads: Integer; decodeIt: Boolean; out stream: TBytes): Boolean;

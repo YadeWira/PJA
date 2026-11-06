@@ -8,6 +8,14 @@
 #   pas/plugin/build.sh <out dir>   -> <out dir>/pja.so, pja.dll, pja32.dll
 #
 # zpaq-std looks for codecs/pja.so (or codecs\pja.dll) next to its binary.
+#
+# What it is built from (a vendored copy, zpaq-std's compressors/pja, needs
+# all of it; doc/CODEC.md, "JPEG 2000 for zpaq-std (stage E)"): pas/build_c.sh,
+# pja.inc, pjaarith.pas, pjablake3.pas, pjacodec.pas, pjacoef.inc, pjaheap.pas,
+# pjaj2k.pas, pjaj2kcs.pas, pjaj2km.pas, pjaj2km_tab.h, pjaj2kmc.c, pjaj2kpm.c,
+# pjaj2kt1.c, pjaj2kt1.h, pjajls.pas, pjajpeg.pas, pjamodel.pas, pjastage.pas,
+# pjasysc.c, pjathread.pas, pjav7.pas, pjav7c.c, pjav7c_loop.h, and here
+# pja_zpaqstd.pas, pjazpaqlargs.pas, pjazsj2k.pas and the *zpaql.inc files.
 set -euo pipefail
 FPC=${FPC:-fpc}
 PAS=$(cd "$(dirname "$0")/.." && pwd); OUT=${1:?usage: build.sh <out dir>}

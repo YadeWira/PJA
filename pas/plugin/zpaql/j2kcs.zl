@@ -1,0 +1,2184 @@
+"""A JPEG 2000 codestream put back together from its side information and
+its decisions, for ZPAQL: pjaj2kcs.pas's rebuild path (TJ2k with kmDecode),
+line by line. The side information (stage C's blob, version 2) is in H, a
+byte a word; the codestream's pieces in M."""
+
+KMAXNL = 32
+KMAXPASSES = 120
+KZBPLIMIT = 128
+KTAILMAX = 16777216
+KINF = 2147483647
+KNONE = 4294967295
+KMAPCAP = 134217728
+KSLICES = 64
+# how a segment ends (the T1R stream)
+KR_FLUSH = 0
+KR_ERTERM = 1
+KR_MINF = 2
+KR_MINE = 3
+KR_TAILE = 4
+KR_TAILF = 5
+KR_RAW = 6
+KR_EMPTY = 7
+KR_PAD0 = 10
+KR_PAD2 = 12
+KR_RAWB = 13
+# the side information's streams
+SH_HDR = 0
+SH_LAY = 1
+SH_T2 = 2
+SH_ZBP = 3
+SH_TREE = 4
+SH_LB = 5
+SH_T1R = 6
+SH_T1X = 7
+SH_HDRX = 8
+SH_BLOB = 10
+# records in H, their fields
+KI = 7                   # a marker segment: kind, code, its bytes' place and length, z, st, cnt
+I_KIND = 0
+I_CODE = 1
+I_POS = 2
+I_LEN = 3
+I_Z = 4
+I_ST = 5
+I_CNT = 6
+KT = 14                  # a tile-part
+T_ISOT = 0
+T_TPSOT = 1
+T_TNSOT = 2
+T_PMODE = 3
+T_PSOT = 4
+T_NITEMS = 5
+T_ITEMS = 6
+T_NPK = 7
+T_PK0 = 8
+T_GAPPOS = 9
+T_GAPLEN = 10
+T_BYTES = 11
+T_BLEN = 12
+T_NEXT = 13
+KCOD = 44                # COD or COC
+C_HAVE = 0
+C_SCOD = 1
+C_PROG = 2
+C_LAYERS = 3
+C_MCT = 4
+C_NL = 5
+C_XCB = 6
+C_YCB = 7
+C_STY = 8
+C_TR = 9
+C_PREC = 10
+C_PP = 11
+KQNT = 100               # QCD or QCC
+Q_STYLE = 0
+Q_GUARD = 1
+Q_N = 2
+Q_EX = 3
+KCS = 9                  # a component of the tile
+O_DX = 0
+O_DY = 1
+O_X0 = 2
+O_Y0 = 3
+O_X1 = 4
+O_Y1 = 5
+O_NRES = 6
+O_RES0 = 7
+O_STY = 8
+KRS = 13                 # a resolution
+R_X0 = 0
+R_Y0 = 1
+R_X1 = 2
+R_Y1 = 3
+R_PPX = 4
+R_PPY = 5
+R_PW = 6
+R_PH = 7
+R_PRBASE = 8
+R_NB = 9
+R_BAND = 10
+KB = 22                  # a band (with what the model needs)
+B_ORIENT = 0
+B_X0 = 1
+B_Y0 = 2
+B_X1 = 3
+B_Y1 = 4
+B_CBW = 5
+B_CBH = 6
+B_GX0 = 7
+B_GY0 = 8
+B_NCBX = 9
+B_NCBY = 10
+B_BASE = 11
+B_MB = 12
+B_COMP = 13
+B_RES = 14
+B_NRES = 15
+B_W = 16
+B_H = 17
+B_COARSER = 18
+B_CROSS0 = 19
+B_CROSS1 = 20
+B_MAP = 21
+KCBS = 14                # a code-block
+CB_BAND = 0
+CB_FIRST = 1
+CB_ZBP = 2
+CB_PASSES = 3
+CB_NSEG = 4
+CB_SEGHAVE = 5
+CB_SEGMAX = 6
+CB_HEAD = 7
+CB_TAIL = 8
+CB_PB = 9
+CB_LEAF = 10
+CB_ELB = 11
+CB_DOFF = 12
+CB_CUR = 13
+KPBS = 7                 # a precinct's band
+P_CW = 0
+P_CH = 1
+P_LX = 2
+P_LY = 3
+P_BAND = 4
+P_NODE = 5
+P_NN = 6
+KNS = 4                  # a tag tree node
+N_PAR = 0
+N_ELOW = 1
+N_EVAL = 2
+N_EKNOWN = 3
+KIE = 6                  # a code-block's entry in a packet
+E_CB = 0
+E_FLAGS = 1
+E_NP = 2
+E_PC0 = 3
+E_PCN = 4
+E_NEXT = 5
+KPC = 4                  # a piece of a segment
+Q_SEG = 0
+Q_NP = 1
+Q_NEXT = 2
+Q_LEN = 3
+KGS = 8                  # a packet
+G_C = 0
+G_R = 1
+G_P = 2
+G_L = 3
+G_FL = 4
+G_NSOP = 5
+G_IE0 = 6
+G_IEN = 7
+KPOC = 6
+P_RS = 0
+P_CS = 1
+P_LYE = 2
+P_RE = 3
+P_CE = 4
+P_PRG = 5
+
+KSB = array(11)          # the streams: where each starts, is, ends
+KSP = array(11)
+KSE = array(11)
+KSLFIRST = array(64)
+KSLHB = array(64)
+KSLPOS = array(640)
+KSTK = array(64)
+KSEGPASS = array(512)
+KSEGP0 = array(512)
+KNPLH = array(41)
+KNPLV = array(41)
+
+# M: the bytes this program makes, above the segment
+kmp = 0
+kmsize = 0
+# the codestream
+kcslen = 0
+kmain = 0
+knmain = 0
+ktps = 0
+kntp = 0
+ktailpos = 0
+ktaillen = 0
+kxsiz = 0
+kysiz = 0
+kxosiz = 0
+kyosiz = 0
+kxtsiz = 0
+kytsiz = 0
+kxtosiz = 0
+kytosiz = 0
+kncomp = 0
+knxt = 0
+knyt = 0
+kcdx = 0
+kcdy = 0
+kcsiz = 0
+kmaincod = 0
+kmaincoc = 0
+kmainqcd = 0
+kmainqcc = 0
+khasppm = 0
+khasrgn = 0
+ktphead = 0
+kstg = 0
+kstgn = 0
+# the tile
+ktile = 0
+ktx0 = 0
+kty0 = 0
+ktx1 = 0
+kty1 = 0
+kgcod = 0
+kpcod = 0
+kpqnt = 0
+kpocs = 0
+knpoc = 0
+kpacked = 0
+kcomps = 0
+kress = 0
+kcb = 0
+kncb = 0
+knprec = 0
+kprnext = 0
+kprpb = 0
+kpbaddr = 0
+knpb = 0
+kbandz = 0
+kpk = 0
+knpk = 0
+knpktarget = 0
+knsoplast = 0
+klastie = 0
+kto = 0
+kton = 0
+kcbd = 0
+kcbdn = 0
+ktilepk = 0
+kbwbuf = 0
+kbwct = 0
+ktmark = 0
+
+
+def kbe16(a):
+    return (H[a] << 8) | H[a + 1]
+
+
+def kbe32(a):
+    return (H[a] << 24) | (H[a + 1] << 16) | (H[a + 2] << 8) | H[a + 3]
+
+
+def kmin(a, b):
+    if a < b:
+        return a
+    return b
+
+
+def kmax(a, b):
+    if a > b:
+        return a
+    return b
+
+
+def ksmax(a, b):
+    if sgt(a, b):
+        return a
+    return b
+
+
+def kfdivp2(a, n):
+    if slt(a, 0):
+        return -((-a + (1 << n) - 1) >> n)
+    return a >> n
+
+
+def kcdivp2(a, n):
+    return -kfdivp2(-a, n)
+
+
+def kcdiv(a, b):
+    return (a + b - 1) // b
+
+
+def kflog2(x):
+    n = 0
+    while x > 1:
+        x = x >> 1
+        n += 1
+    return n
+
+
+def ksat(v, n):
+    """v << n, or 2^31 when that is 2^31 or more"""
+    if n >= 31:
+        return 2147483648
+    if v >> (31 - n):
+        return 2147483648
+    return v << n
+
+
+def kzero(a, n):
+    for i in range(n):
+        H[a + i] = 0
+
+
+def krelease(m):
+    """H back to m: what was taken above it zero again"""
+    global hp
+    kzero(m, hp - m)
+    hp = m
+
+
+def kmalloc(n):
+    global kmp
+    r = kmp
+    kmp += n
+    if kmp > kmsize or kmp < r:
+        error()
+    return r
+
+
+def kcopym(dst, src, n):
+    """bytes of the blob (H) into M"""
+    for i in range(n):
+        M[dst + i] = H[src + i]
+
+
+# ---------------------------------------------------------------- the streams
+
+def kget(s):
+    p = KSP[s]
+    if p >= KSE[s]:
+        error()
+    KSP[s] = p + 1
+    return H[p]
+
+
+def kv(s):
+    r = 0
+    sh = 0
+    while True:
+        b = kget(s)
+        if sh > 28 or (sh == 28 and (b & 127) > 15):
+            error()
+        r = r | ((b & 127) << sh)
+        sh += 7
+        if b < 128:
+            return r
+
+
+def kvi(s, mx):
+    v = kv(s)
+    if v > mx:
+        error()
+    return v
+
+
+def ksi(s, lo, hi):
+    x = kv(s)
+    v = x >> 1
+    if x & 1:
+        v = -v - 1
+    if slt(v, lo) or sgt(v, hi):
+        error()
+    return v
+
+
+def krest(s):
+    return KSE[s] - KSP[s]
+
+
+def ktake(s, n):
+    """n bytes of stream s: where they are"""
+    p = KSP[s]
+    if n > KSE[s] - p:
+        error()
+    KSP[s] = p + n
+    return p
+
+
+# ---------------------------------------------------------------- headers
+
+def kparsecod(p, e, coc):
+    r = alloc(KCOD)
+    if coc:
+        if p + 1 > e:
+            error()
+        s = H[p]
+        p += 1
+        if s & 254:
+            error()
+    else:
+        if p + 5 > e:
+            error()
+        s = H[p]
+        H[r + C_SCOD] = s
+        H[r + C_PROG] = H[p + 1]
+        H[r + C_LAYERS] = kbe16(p + 2)
+        H[r + C_MCT] = H[p + 4]
+        p += 5
+        if (s & 248) or H[r + C_PROG] > 4 or H[r + C_LAYERS] == 0:
+            error()
+        H[r + C_HAVE] = 1
+    if p + 5 > e:
+        error()
+    nl = H[p]
+    H[r + C_NL] = nl
+    H[r + C_XCB] = H[p + 1] + 2
+    H[r + C_YCB] = H[p + 2] + 2
+    sty = H[p + 3]
+    H[r + C_STY] = sty
+    H[r + C_TR] = H[p + 4]
+    p += 5
+    if nl > KMAXNL or H[r + C_XCB] > 10 or H[r + C_YCB] > 10 or H[r + C_XCB] + H[r + C_YCB] > 12 or (sty & 192):
+        error()
+    H[r + C_PREC] = s & 1
+    for i in range(nl + 1):
+        if s & 1:
+            if p + 1 > e:
+                error()
+            pp = H[p]
+            p += 1
+            if i > 0 and ((pp & 15) == 0 or (pp >> 4) == 0):
+                error()
+            H[r + C_PP + i] = pp
+        else:
+            H[r + C_PP + i] = 255
+    return r
+
+
+def kparseqnt(p, e):
+    r = alloc(KQNT)
+    if p + 1 > e:
+        error()
+    st = H[p] & 31
+    H[r + Q_STYLE] = st
+    H[r + Q_GUARD] = H[p] >> 5
+    p += 1
+    if st == 0:
+        n = kmin(e - p, 97)
+        for i in range(n):
+            H[r + Q_EX + i] = H[p + i] >> 3
+    elif st == 1 or st == 2:
+        n = kmin((e - p) // 2, 97)
+        for i in range(n):
+            H[r + Q_EX + i] = H[p + 2 * i] >> 3
+    else:
+        error()
+    H[r + Q_N] = n
+    return r
+
+
+def kparsemain(code, pos, ln):
+    global kmaincod, kmainqcd, khasppm, khasrgn, kxsiz, kysiz, kxosiz, kyosiz, kxtsiz, kytsiz, kxtosiz, kytosiz
+    global kncomp, knxt, knyt, kcdx, kcdy, kcsiz, kmaincoc, kmainqcc
+    p = pos + 4
+    e = pos + ln
+    if code == 65362:
+        kmaincod = kparsecod(p, e, 0)
+    elif code == 65363 or code == 65373:
+        if p + 1 > e:
+            error()
+        c = H[p]
+        if c >= kncomp:
+            error()
+        if code == 65363:
+            H[kmaincoc + c] = kparsecod(p + 1, e, 1)
+        else:
+            H[kmainqcc + c] = kparseqnt(p + 1, e)
+    elif code == 65372:
+        kmainqcd = kparseqnt(p, e)
+    elif code == 65375:
+        kpocscan(pos, ln, 0)
+    elif code == 65360:
+        if ln >= 8 and (kbe32(pos + 4) & 131072):
+            error()
+    elif code == 65376:
+        khasppm = 1
+    elif code == 65374:
+        khasrgn = 1
+    elif code == 65394 or code == 65395:
+        error()
+    elif code == 65361:
+        if ln < 42:
+            error()
+        kxsiz = kbe32(pos + 6)
+        kysiz = kbe32(pos + 10)
+        kxosiz = kbe32(pos + 14)
+        kyosiz = kbe32(pos + 18)
+        kxtsiz = kbe32(pos + 22)
+        kytsiz = kbe32(pos + 26)
+        kxtosiz = kbe32(pos + 30)
+        kytosiz = kbe32(pos + 34)
+        kncomp = kbe16(pos + 38)
+        if kncomp < 1 or kncomp > 256 or ln < 40 + 3 * kncomp:
+            error()
+        if (kxsiz | kysiz | kxosiz | kyosiz | kxtsiz | kytsiz | kxtosiz | kytosiz) >= 1073741824:
+            error()
+        if kxtsiz == 0 or kytsiz == 0 or kxsiz <= kxosiz or kysiz <= kyosiz or kxtosiz > kxosiz or \
+                kytosiz > kyosiz or kxtosiz + kxtsiz <= kxosiz or kytosiz + kytsiz <= kyosiz:
+            error()
+        knxt = kcdiv(kxsiz - kxtosiz, kxtsiz)
+        knyt = kcdiv(kysiz - kytosiz, kytsiz)
+        if knxt * knyt > 65535 or knxt > 65535 or knyt > 65535:
+            error()
+        kcdx = alloc(kncomp)
+        kcdy = alloc(kncomp)
+        kcsiz = alloc(kncomp)
+        kmaincoc = alloc(kncomp)
+        kmainqcc = alloc(kncomp)
+        for i in range(kncomp):
+            H[kcsiz + i] = H[pos + 40 + 3 * i]
+            H[kcdx + i] = H[pos + 41 + 3 * i]
+            H[kcdy + i] = H[pos + 42 + 3 * i]
+            if H[kcdx + i] == 0 or H[kcdy + i] == 0:
+                error()
+
+
+def kpocscan(pos, ln, dst):
+    """a POC marker segment's progressions (AddPocs): written from dst
+    (KPOC words each) when dst; how many"""
+    p = pos + 4
+    e = pos + ln
+    n = 0
+    while p + 7 <= e:
+        if H[p + 6] > 4:
+            error()
+        if dst:
+            a = dst + n * KPOC
+            H[a + P_RS] = H[p]
+            H[a + P_CS] = H[p + 1]
+            H[a + P_LYE] = kbe16(p + 2)
+            H[a + P_RE] = H[p + 4]
+            H[a + P_CE] = H[p + 5]
+            H[a + P_PRG] = H[p + 6]
+        n += 1
+        p += 7
+    return n
+
+
+def kbare(m):
+    return m >= 65328 and m <= 65343
+
+
+def kitem(s, it, kind):
+    """a marker segment as it is (kind 0)"""
+    ln = kvi(s, 65537)
+    pos = ktake(s, ln)
+    if ln < 2 or H[pos] != 255 or (ln < 4 and not kbare(kbe16(pos))):
+        error()
+    H[it + I_KIND] = 0
+    H[it + I_CODE] = kbe16(pos)
+    H[it + I_POS] = pos
+    H[it + I_LEN] = ln
+
+
+def kreadheaders():
+    global kmain, knmain, ktps, kntp, ktailpos, ktaillen, kncomp
+    kncomp = 0
+    n = kvi(SH_HDR, kmin(1048576, krest(SH_HDR)))
+    kmain = alloc(n * KI)
+    knmain = n
+    for i in range(n):
+        it = kmain + i * KI
+        kind = kget(SH_HDR)
+        if kind == 1:
+            H[it + I_KIND] = 1
+            H[it + I_CODE] = 65365
+            H[it + I_Z] = kget(SH_HDR)
+            H[it + I_ST] = kget(SH_HDR)
+            H[it + I_CNT] = kvi(SH_HDR, 65535 * 256)
+        elif kind == 0:
+            kitem(SH_HDR, it, 0)
+            if i == 0 and H[it + I_CODE] != 65361:
+                error()
+            kparsemain(H[it + I_CODE], H[it + I_POS], H[it + I_LEN])
+        else:
+            error()
+    if n == 0 or kmaincod == 0 or kmainqcd == 0:
+        error()
+    n = kvi(SH_HDR, kmin(65535 * 256, krest(SH_HDR) // 5))
+    ktps = alloc(n * KT)
+    kntp = n
+    for i in range(n):
+        t = ktps + i * KT
+        H[t + T_ISOT] = kvi(SH_HDR, knxt * knyt - 1)
+        H[t + T_TPSOT] = kget(SH_HDR)
+        H[t + T_TNSOT] = kget(SH_HDR)
+        pm = kget(SH_HDR)
+        if pm > 2:
+            error()
+        H[t + T_PMODE] = pm
+        if pm == 2:
+            H[t + T_PSOT] = kv(SH_HDR)
+        ni = kvi(SH_HDR, kmin(1048576, krest(SH_HDR)))
+        H[t + T_NITEMS] = ni
+        its = alloc(ni * KI)
+        H[t + T_ITEMS] = its
+        for q in range(ni):
+            it = its + q * KI
+            kind = kget(SH_HDR)
+            if kind == 2:
+                H[it + I_KIND] = 2
+                H[it + I_CODE] = 65368
+                H[it + I_Z] = kget(SH_HDR)
+                H[it + I_CNT] = kvi(SH_HDR, 33554432)
+            elif kind == 0:
+                kitem(SH_HDR, it, 0)
+            else:
+                error()
+    if n == 0:
+        error()
+    ktaillen = kvi(SH_HDR, 2147483647)
+    ktailpos = ktake(SH_HDR, ktaillen)
+
+
+# ---------------------------------------------------------------- one tile's parameters
+
+def ktileparams():
+    """TileParams: what holds for the tile (its tile-parts are the list
+    from KTPHEAD)"""
+    global kgcod, kpcod, kpqnt, kpocs, knpoc, kpacked
+    tg = 0
+    tqcd = 0
+    tcoc = alloc(kncomp)
+    tqcc = alloc(kncomp)
+    kpacked = khasppm
+    trgn = khasrgn
+    tpoc = 0
+    t = H[ktphead + ktile]
+    while t:
+        its = H[t + T_ITEMS]
+        for q in range(H[t + T_NITEMS]):
+            it = its + q * KI
+            if H[it + I_KIND] == 0:
+                code = H[it + I_CODE]
+                pos = H[it + I_POS]
+                ln = H[it + I_LEN]
+                p = pos + 4
+                e = pos + ln
+                if code == 65362:
+                    tg = kparsecod(p, e, 0)
+                elif code == 65363 or code == 65373:
+                    if p + 1 > e:
+                        error()
+                    c = H[p]
+                    if c >= kncomp:
+                        error()
+                    if code == 65363:
+                        H[tcoc + c] = kparsecod(p + 1, e, 1)
+                    else:
+                        H[tqcc + c] = kparseqnt(p + 1, e)
+                elif code == 65372:
+                    tqcd = kparseqnt(p, e)
+                elif code == 65375:
+                    tpoc += kpocscan(pos, ln, 0)
+                elif code == 65374:
+                    trgn = 1
+                elif code == 65377:
+                    if khasppm or ln < 5:
+                        error()
+                    kpacked = 1
+                elif code == 65394 or code == 65395:
+                    error()
+        t = H[t + T_NEXT]
+    kgcod = kmaincod
+    if tg:
+        kgcod = tg
+    kpcod = alloc(kncomp)
+    kpqnt = alloc(kncomp)
+    for c in range(kncomp):
+        v = kmaincod
+        if H[kmaincoc + c]:
+            v = H[kmaincoc + c]
+        if tg:
+            v = tg
+        if H[tcoc + c]:
+            v = H[tcoc + c]
+        H[kpcod + c] = v
+        v = kmainqcd
+        if H[kmainqcc + c]:
+            v = H[kmainqcc + c]
+        if tqcd:
+            v = tqcd
+        if H[tqcc + c]:
+            v = H[tqcc + c]
+        H[kpqnt + c] = v
+    # the progressions: the tile's, else the main header's
+    knpoc = 0
+    if tpoc:
+        kpocs = alloc(tpoc * KPOC)
+        t = H[ktphead + ktile]
+        while t:
+            its = H[t + T_ITEMS]
+            for q in range(H[t + T_NITEMS]):
+                it = its + q * KI
+                if H[it + I_KIND] == 0 and H[it + I_CODE] == 65375:
+                    knpoc += kpocscan(H[it + I_POS], H[it + I_LEN], kpocs + knpoc * KPOC)
+            t = H[t + T_NEXT]
+    else:
+        n = 0
+        for i in range(knmain):
+            it = kmain + i * KI
+            if H[it + I_KIND] == 0 and H[it + I_CODE] == 65375:
+                n += kpocscan(H[it + I_POS], H[it + I_LEN], 0)
+        kpocs = alloc(n * KPOC + 1)
+        for i in range(knmain):
+            it = kmain + i * KI
+            if H[it + I_KIND] == 0 and H[it + I_CODE] == 65375:
+                knpoc += kpocscan(H[it + I_POS], H[it + I_LEN], kpocs + knpoc * KPOC)
+    return trgn
+
+
+# ---------------------------------------------------------------- geometry
+
+def kgeometry():
+    global ktx0, kty0, ktx1, kty1, kcomps, kress, kbands, knb, kcb, kncb, knprec, kprnext, kprpb, kpbaddr, knpb
+    p = ktile % knxt
+    q = ktile // knxt
+    ktx0 = kmax(kxtosiz + p * kxtsiz, kxosiz)
+    kty0 = kmax(kytosiz + q * kytsiz, kyosiz)
+    ktx1 = kmin(kxtosiz + (p + 1) * kxtsiz, kxsiz)
+    kty1 = kmin(kytosiz + (q + 1) * kytsiz, kysiz)
+    if ktx0 >= ktx1 or kty0 >= kty1:
+        error()
+    nr = 0
+    for c in range(kncomp):
+        nr += H[H[kpcod + c] + C_NL] + 1
+    kcomps = alloc(kncomp * KCS)
+    kress = alloc(nr * KRS)
+    kbands = alloc((3 * nr) * KB)
+    cbs = 0
+    precs = 0
+    nb = 0
+    ix = 0
+    for c in range(kncomp):
+        cod = H[kpcod + c]
+        qn = H[kpqnt + c]
+        cg = kcomps + c * KCS
+        dx = H[kcdx + c]
+        dy = H[kcdy + c]
+        H[cg + O_DX] = dx
+        H[cg + O_DY] = dy
+        cx0 = kcdiv(ktx0, dx)
+        cy0 = kcdiv(kty0, dy)
+        cx1 = kcdiv(ktx1, dx)
+        cy1 = kcdiv(kty1, dy)
+        H[cg + O_X0] = cx0
+        H[cg + O_Y0] = cy0
+        H[cg + O_X1] = cx1
+        H[cg + O_Y1] = cy1
+        nl = H[cod + C_NL]
+        H[cg + O_NRES] = nl + 1
+        H[cg + O_RES0] = ix
+        H[cg + O_STY] = H[cod + C_STY]
+        for r in range(nl + 1):
+            rg = kress + ix * KRS
+            lv = nl - r
+            rx0 = kcdivp2(cx0, lv)
+            ry0 = kcdivp2(cy0, lv)
+            rx1 = kcdivp2(cx1, lv)
+            ry1 = kcdivp2(cy1, lv)
+            H[rg + R_X0] = rx0
+            H[rg + R_Y0] = ry0
+            H[rg + R_X1] = rx1
+            H[rg + R_Y1] = ry1
+            ppx = H[cod + C_PP + r] & 15
+            ppy = H[cod + C_PP + r] >> 4
+            H[rg + R_PPX] = ppx
+            H[rg + R_PPY] = ppy
+            pw = 0
+            if rx0 != rx1:
+                pw = kcdivp2(rx1, ppx) - kfdivp2(rx0, ppx)
+            ph = 0
+            if ry0 != ry1:
+                ph = kcdivp2(ry1, ppy) - kfdivp2(ry0, ppy)
+            H[rg + R_PW] = pw
+            H[rg + R_PH] = ph
+            if pw * ph + precs > 4194304 or pw > 4194304 or ph > 4194304:
+                error()
+            H[rg + R_PRBASE] = precs
+            precs += pw * ph
+            nbr = 3
+            if r == 0:
+                nbr = 1
+            H[rg + R_NB] = nbr
+            if r == 0:
+                cbw = kmin(H[cod + C_XCB], ppx)
+                cbh = kmin(H[cod + C_YCB], ppy)
+            else:
+                cbw = kmin(H[cod + C_XCB], ppx - 1)
+                cbh = kmin(H[cod + C_YCB], ppy - 1)
+            for b in range(nbr):
+                bg = kbands + nb * KB
+                H[bg + B_COMP] = c
+                H[bg + B_RES] = r
+                if r == 0:
+                    H[bg + B_ORIENT] = 0
+                    bx0 = rx0
+                    by0 = ry0
+                    bx1 = rx1
+                    by1 = ry1
+                    ebi = 0
+                else:
+                    n = nl - r + 1
+                    xo = (b != 1)
+                    yo = (b != 0)
+                    H[bg + B_ORIENT] = b + 1
+                    bx0 = kcdivp2(cx0 - (xo << (n - 1)), n)
+                    by0 = kcdivp2(cy0 - (yo << (n - 1)), n)
+                    bx1 = kcdivp2(cx1 - (xo << (n - 1)), n)
+                    by1 = kcdivp2(cy1 - (yo << (n - 1)), n)
+                    ebi = 1 + 3 * (r - 1) + b
+                H[bg + B_X0] = bx0
+                H[bg + B_Y0] = by0
+                H[bg + B_X1] = bx1
+                H[bg + B_Y1] = by1
+                H[bg + B_CBW] = cbw
+                H[bg + B_CBH] = cbh
+                if bx0 >= bx1 or by0 >= by1:
+                    H[bg + B_NCBX] = 0
+                    H[bg + B_NCBY] = 0
+                else:
+                    gx0 = bx0 >> cbw
+                    gy0 = by0 >> cbh
+                    H[bg + B_GX0] = gx0
+                    H[bg + B_GY0] = gy0
+                    ncx = kcdivp2(bx1, cbw) - gx0
+                    ncy = kcdivp2(by1, cbh) - gy0
+                    if ncx * ncy + cbs > 2097152 or ncx > 2097152 or ncy > 2097152:
+                        error()
+                    H[bg + B_NCBX] = ncx
+                    H[bg + B_NCBY] = ncy
+                H[bg + B_BASE] = cbs
+                cbs += H[bg + B_NCBX] * H[bg + B_NCBY]
+                ex0 = H[qn + Q_EX]
+                if H[qn + Q_STYLE] == 1:
+                    if ebi == 0:
+                        mb = H[qn + Q_GUARD] + ex0 - 1
+                    else:
+                        d = (ebi - 1) // 3
+                        mb = H[qn + Q_GUARD] - 1
+                        if ex0 > d:
+                            mb = mb + ex0 - d
+                elif ebi < H[qn + Q_N]:
+                    mb = H[qn + Q_GUARD] + H[qn + Q_EX + ebi] - 1
+                else:
+                    mb = H[qn + Q_GUARD] + 8
+                H[bg + B_MB] = mb
+                H[rg + R_BAND + b] = nb
+                nb += 1
+            ix += 1
+    knb = nb
+    kncb = cbs
+    knprec = precs
+    kcb = alloc(cbs * KCBS)
+    for b in range(nb):
+        bg = kbands + b * KB
+        n0 = H[bg + B_BASE]
+        for n in range(n0, n0 + H[bg + B_NCBX] * H[bg + B_NCBY]):
+            H[kcb + n * KCBS + CB_BAND] = b
+    for n in range(cbs):
+        a = kcb + n * KCBS
+        H[a + CB_FIRST] = KNONE
+        H[a + CB_ELB] = 3
+    kprnext = alloc(precs)
+    kprpb = alloc(precs)
+    kpbaddr = alloc(3 * precs + 1)
+    knpb = 0
+
+
+# ---------------------------------------------------------------- precincts and tag trees
+
+def knewnodes(cw, ch):
+    """two tag trees (inclusion, zero bit-planes) of cw x ch leaves; the
+    first node, and KNNODES their nodes each"""
+    global knnodes
+    KNPLH[0] = cw
+    KNPLV[0] = ch
+    lv = 0
+    nn = 0
+    while True:
+        n = KNPLH[lv] * KNPLV[lv]
+        KNPLH[lv + 1] = (KNPLH[lv] + 1) // 2
+        KNPLV[lv + 1] = (KNPLV[lv] + 1) // 2
+        nn += n
+        lv += 1
+        if n <= 1:
+            break
+    r = alloc(2 * nn * KNS)
+    for t in range(2):
+        b = r + t * nn * KNS
+        node = 0
+        pn = cw * ch
+        pn0 = pn
+        for i in range(lv - 1):
+            for j in range(KNPLV[i]):
+                k = KNPLH[i]
+                while k > 0:
+                    k -= 1
+                    H[b + node * KNS + N_PAR] = b + pn * KNS
+                    node += 1
+                    if k > 0:
+                        k -= 1
+                        H[b + node * KNS + N_PAR] = b + pn * KNS
+                        node += 1
+                    pn += 1
+                if (j & 1) or j == KNPLV[i] - 1:
+                    pn0 = pn
+                else:
+                    pn = pn0
+                    pn0 += KNPLH[i]
+        if node != nn - 1:
+            error()
+        H[b + node * KNS + N_PAR] = 0
+    knnodes = nn
+    return r
+
+
+knnodes = 0
+
+
+def kmakepb(c, r, p):
+    global knpb
+    rg = kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS
+    H[kprpb + H[rg + R_PRBASE] + p] = knpb + 1
+    pw = H[rg + R_PW]
+    pi = p % pw
+    pj = p // pw
+    sh = 0
+    if r > 0:
+        sh = 1
+    ppx = H[rg + R_PPX]
+    ppy = H[rg + R_PPY]
+    for b in range(H[rg + R_NB]):
+        bi = H[rg + R_BAND + b]
+        bg = kbands + bi * KB
+        sx = ((kfdivp2(H[rg + R_X0], ppx) + pi) << ppx) >> sh
+        ex = sx + (1 << (ppx - sh))
+        sy = ((kfdivp2(H[rg + R_Y0], ppy) + pj) << ppy) >> sh
+        ey = sy + (1 << (ppy - sh))
+        px0 = kmax(H[bg + B_X0], sx)
+        px1 = kmin(H[bg + B_X1], ex)
+        py0 = kmax(H[bg + B_Y0], sy)
+        py1 = kmin(H[bg + B_Y1], ey)
+        a = alloc(KPBS)
+        H[kpbaddr + knpb] = a
+        H[a + P_BAND] = bi
+        cw = 0
+        ch = 0
+        if px0 < px1 and py0 < py1 and H[bg + B_NCBX] != 0:
+            cbw = H[bg + B_CBW]
+            cbh = H[bg + B_CBH]
+            cx0 = px0 >> cbw
+            cy0 = py0 >> cbh
+            cw = kcdivp2(px1, cbw) - cx0
+            ch = kcdivp2(py1, cbh) - cy0
+            if cw > 65536 or ch > 65536:
+                error()
+            lx = cx0 - H[bg + B_GX0]
+            ly = cy0 - H[bg + B_GY0]
+            if slt(lx, 0) or slt(ly, 0) or lx + cw > H[bg + B_NCBX] or ly + ch > H[bg + B_NCBY]:
+                error()
+            H[a + P_LX] = lx
+            H[a + P_LY] = ly
+        H[a + P_CW] = cw
+        H[a + P_CH] = ch
+        if cw * ch > 0:
+            H[a + P_NODE] = knewnodes(cw, ch)
+            H[a + P_NN] = knnodes
+            for j in range(ch):
+                for i in range(cw):
+                    idx = H[bg + B_BASE] + (H[a + P_LY] + j) * H[bg + B_NCBX] + H[a + P_LX] + i
+                    H[kcb + idx * KCBS + CB_PB] = a
+                    H[kcb + idx * KCBS + CB_LEAF] = j * cw + i
+        knpb += 1
+
+
+def kpbof(c, r, p):
+    """the index of the precinct's first band record"""
+    idx = H[kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS + R_PRBASE] + p
+    if H[kprpb + idx] == 0:
+        kmakepb(c, r, p)
+    return H[kprpb + idx] - 1
+
+
+# ---------------------------------------------------------------- packets
+
+def knextseg(sty, cb):
+    a = kcb + cb * KCBS
+    mx = H[a + CB_SEGMAX]
+    if sty & 4:
+        mx = 1
+    elif sty & 1:
+        if H[a + CB_NSEG] == 0:
+            mx = 10
+        elif mx == 1 or mx == 10:
+            mx = 2
+        else:
+            mx = 1
+    else:
+        mx = 109
+    H[a + CB_SEGMAX] = mx
+    H[a + CB_SEGHAVE] = 0
+    H[a + CB_NSEG] = H[a + CB_NSEG] + 1
+
+
+def kderive(cb, np):
+    """the pieces of np new passes of cb (Derive): consecutive records"""
+    a = kcb + cb * KCBS
+    sty = H[kcomps + H[kbands + H[a + CB_BAND] * KB + B_COMP] * KCS + O_STY]
+    while np > 0:
+        if H[a + CB_NSEG] == 0 or H[a + CB_SEGHAVE] == H[a + CB_SEGMAX]:
+            knextseg(sty, cb)
+        take = H[a + CB_SEGMAX] - H[a + CB_SEGHAVE]
+        if take > np:
+            take = np
+        q = alloc(KPC)
+        H[q + Q_SEG] = H[a + CB_NSEG] - 1
+        H[q + Q_NP] = take
+        if H[a + CB_TAIL]:
+            H[H[a + CB_TAIL] + Q_NEXT] = q
+        else:
+            H[a + CB_HEAD] = q
+        H[a + CB_TAIL] = q
+        H[a + CB_SEGHAVE] = H[a + CB_SEGHAVE] + take
+        np -= take
+        H[a + CB_PASSES] = H[a + CB_PASSES] + take
+
+
+def kemit(c, r, p, l):
+    """EmitRebuild: 0 when the tile has all its packets"""
+    global knpk, knsoplast, klastie
+    if knpk >= knpktarget:
+        return 0
+    g = kpk + knpk * KGS
+    flags = kget(SH_T2)
+    if flags > 7:
+        error()
+    H[g + G_C] = c
+    H[g + G_R] = r
+    H[g + G_P] = p
+    H[g + G_L] = l
+    H[g + G_FL] = flags
+    pred = (knsoplast + 1) & 65535
+    if flags & 2:
+        knsoplast = pred + ksi(SH_T2, -pred, 65535 - pred)
+    else:
+        knsoplast = pred
+    H[g + G_NSOP] = knsoplast
+    nie = 0
+    klastie = 0
+    if flags & 1:
+        rg = kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS
+        for b in range(H[rg + R_NB]):
+            pb = H[kpbaddr + kpbof(c, r, p) + b]
+            cw = H[pb + P_CW]
+            ch = H[pb + P_CH]
+            if cw * ch == 0:
+                continue
+            bi = H[pb + P_BAND]
+            bg = kbands + bi * KB
+            for j in range(ch):
+                for i in range(cw):
+                    cb = H[bg + B_BASE] + (H[pb + P_LY] + j) * H[bg + B_NCBX] + H[pb + P_LX] + i
+                    ca = kcb + cb * KCBS
+                    ex = kget(SH_T2)
+                    if ex > 1:
+                        error()
+                    e = alloc(KIE)
+                    if klastie:
+                        H[klastie + E_NEXT] = e
+                    else:
+                        H[g + G_IE0] = e
+                    klastie = e
+                    nie += 1
+                    H[e + E_CB] = cb
+                    fl = ex
+                    if H[ca + CB_FIRST] != KNONE:
+                        fl = fl | 2
+                    H[e + E_FLAGS] = fl
+                    if ex == 0:
+                        continue
+                    if H[ca + CB_FIRST] == KNONE:
+                        zp = H[kbandz + bi] + ksi(SH_ZBP, -KZBPLIMIT, KZBPLIMIT)
+                        if slt(zp, 0) or sge(zp, KZBPLIMIT):
+                            error()
+                        H[kbandz + bi] = zp
+                        H[ca + CB_FIRST] = l
+                        H[ca + CB_ZBP] = zp
+                    pp = 3 * (H[bg + B_MB] - H[ca + CB_ZBP]) - 2 - H[ca + CB_PASSES]
+                    if slt(pp, 1):
+                        pp = 1
+                    np = pp - ksi(SH_T2, -1000, 1000)
+                    if slt(np, 1) or sgt(np, 164) or H[ca + CB_PASSES] + np > 4 * KMAXPASSES:
+                        error()
+                    H[e + E_NP] = np
+                    H[e + E_PC0] = hp
+                    n0 = hp
+                    kderive(cb, np)
+                    H[e + E_PCN] = (hp - n0) // KPC
+    H[g + G_IEN] = nie
+    knpk += 1
+    return 1
+
+
+# ---------------------------------------------------------------- the progression
+
+def klayers(c, r, pr, ly):
+    idx = H[kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS + R_PRBASE] + pr
+    ll = H[kprnext + idx]
+    while ll < ly:
+        H[kprnext + idx] = ll + 1
+        if kemit(c, r, pr, ll) == 0:
+            return 0
+        ll += 1
+    return 1
+
+
+def kprecat(c, r, xx, yy):
+    """the precinct at (xx, yy) of resolution r of component c, or KNONE"""
+    cg = kcomps + c * KCS
+    rg = kress + (H[cg + O_RES0] + r) * KRS
+    lv = H[cg + O_NRES] - 1 - r
+    rpx = H[rg + R_PPX] + lv
+    rpy = H[rg + R_PPY] + lv
+    if rpx >= 31 or rpy >= 31:
+        return KNONE
+    dxl = ksat(H[cg + O_DX], rpx)
+    dyl = ksat(H[cg + O_DY], rpy)
+    if not (yy % dyl == 0 or (yy == kty0 and ((H[rg + R_Y0] << lv) % (1 << rpy)) != 0)):
+        return KNONE
+    if not (xx % dxl == 0 or (xx == ktx0 and ((H[rg + R_X0] << lv) % (1 << rpx)) != 0)):
+        return KNONE
+    if H[rg + R_PW] == 0 or H[rg + R_PH] == 0:
+        return KNONE
+    if H[rg + R_X0] == H[rg + R_X1] or H[rg + R_Y0] == H[rg + R_Y1]:
+        return KNONE
+    prci = kfdivp2(kcdiv(xx, H[cg + O_DX] << lv), H[rg + R_PPX]) - kfdivp2(H[rg + R_X0], H[rg + R_PPX])
+    prcj = kfdivp2(kcdiv(yy, H[cg + O_DY] << lv), H[rg + R_PPY]) - kfdivp2(H[rg + R_Y0], H[rg + R_PPY])
+    if slt(prci, 0) or slt(prcj, 0) or prci >= H[rg + R_PW] or prcj >= H[rg + R_PH]:
+        return KNONE
+    return prci + prcj * H[rg + R_PW]
+
+
+kstepx = 0
+kstepy = 0
+
+
+def kminstep(c0, c1):
+    global kstepx, kstepy
+    kstepx = 0
+    kstepy = 0
+    for c in range(c0, c1):
+        cg = kcomps + c * KCS
+        for r in range(H[cg + O_NRES]):
+            rg = kress + (H[cg + O_RES0] + r) * KRS
+            l2 = H[cg + O_NRES] - 1 - r
+            if H[rg + R_PPX] + l2 < 40:
+                v = ksat(H[cg + O_DX], H[rg + R_PPX] + l2)
+                if kstepx == 0 or v < kstepx:
+                    kstepx = v
+            if H[rg + R_PPY] + l2 < 40:
+                v = ksat(H[cg + O_DY], H[rg + R_PPY] + l2)
+                if kstepy == 0 or v < kstepy:
+                    kstepy = v
+
+
+def kprog(prg, rs, re, cs0, ce, ly, dx, dy):
+    """one progression of the tile (or of a POC): 0 to stop"""
+    if prg == 0:
+        for l in range(ly):
+            for r in range(rs, re):
+                for c in range(cs0, ce):
+                    if r >= H[kcomps + c * KCS + O_NRES]:
+                        continue
+                    rg = kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS
+                    for pr in range(H[rg + R_PW] * H[rg + R_PH]):
+                        idx = H[rg + R_PRBASE] + pr
+                        if H[kprnext + idx] != l:
+                            continue
+                        H[kprnext + idx] = l + 1
+                        if kemit(c, r, pr, l) == 0:
+                            return 0
+    elif prg == 1:
+        for r in range(rs, re):
+            for l in range(ly):
+                for c in range(cs0, ce):
+                    if r >= H[kcomps + c * KCS + O_NRES]:
+                        continue
+                    rg = kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS
+                    for pr in range(H[rg + R_PW] * H[rg + R_PH]):
+                        idx = H[rg + R_PRBASE] + pr
+                        if H[kprnext + idx] != l:
+                            continue
+                        H[kprnext + idx] = l + 1
+                        if kemit(c, r, pr, l) == 0:
+                            return 0
+    elif prg == 2:
+        if dx == 0 or dy == 0:
+            error()
+        for r in range(rs, re):
+            y = kty0
+            while y < kty1:
+                x = ktx0
+                while x < ktx1:
+                    for c in range(cs0, ce):
+                        if r >= H[kcomps + c * KCS + O_NRES]:
+                            continue
+                        pr = kprecat(c, r, x, y)
+                        if pr == KNONE:
+                            continue
+                        if klayers(c, r, pr, ly) == 0:
+                            return 0
+                    x = x + dx - (x % dx)
+                y = y + dy - (y % dy)
+    elif prg == 3:
+        if dx == 0 or dy == 0:
+            error()
+        y = kty0
+        while y < kty1:
+            x = ktx0
+            while x < ktx1:
+                for c in range(cs0, ce):
+                    for r in range(rs, kmin(re, H[kcomps + c * KCS + O_NRES])):
+                        pr = kprecat(c, r, x, y)
+                        if pr == KNONE:
+                            continue
+                        if klayers(c, r, pr, ly) == 0:
+                            return 0
+                x = x + dx - (x % dx)
+            y = y + dy - (y % dy)
+    else:
+        for c in range(cs0, ce):
+            kminstep(c, c + 1)
+            ddx = kstepx
+            ddy = kstepy
+            if ddx == 0 or ddy == 0:
+                error()
+            y = kty0
+            while y < kty1:
+                x = ktx0
+                while x < ktx1:
+                    for r in range(rs, kmin(re, H[kcomps + c * KCS + O_NRES])):
+                        pr = kprecat(c, r, x, y)
+                        if pr == KNONE:
+                            continue
+                        if klayers(c, r, pr, ly) == 0:
+                            return 0
+                    x = x + ddx - (x % ddx)
+                y = y + ddy - (y % ddy)
+    return 1
+
+
+def kiterate():
+    maxres = 0
+    for c in range(kncomp):
+        maxres = kmax(maxres, H[kcomps + c * KCS + O_NRES])
+    layers = H[kgcod + C_LAYERS]
+    kminstep(0, kncomp)
+    dx = kstepx
+    dy = kstepy
+    if knpoc == 0:
+        kprog(H[kgcod + C_PROG], 0, maxres, 0, kncomp, layers, dx, dy)
+        return
+    for k in range(knpoc):
+        a = kpocs + k * KPOC
+        if kprog(H[a + P_PRG], H[a + P_RS], kmin(H[a + P_RE], maxres), H[a + P_CS], kmin(H[a + P_CE], kncomp),
+                 kmin(H[a + P_LYE], layers), dx, dy) == 0:
+            return
+
+
+# ---------------------------------------------------------------- tag tree values
+
+def ktrees():
+    for k in range(knpb):
+        pb = H[kpbaddr + k]
+        nn = H[pb + P_NN]
+        if nn == 0:
+            continue
+        bg = kbands + H[pb + P_BAND] * KB
+        for t in range(2):
+            b = H[pb + P_NODE] + t * nn * KNS
+            for i in range(nn):
+                H[b + i * KNS + N_EVAL] = KINF
+            for j in range(H[pb + P_CH]):
+                for i in range(H[pb + P_CW]):
+                    cb = H[bg + B_BASE] + (H[pb + P_LY] + j) * H[bg + B_NCBX] + H[pb + P_LX] + i
+                    ca = kcb + cb * KCBS
+                    if H[ca + CB_FIRST] != KNONE:
+                        v = H[ca + CB_ZBP]
+                        if t == 0:
+                            v = H[ca + CB_FIRST]
+                        H[b + (j * H[pb + P_CW] + i) * KNS + N_EVAL] = v
+            for i in range(nn):
+                n = b + i * KNS
+                k2 = H[n + N_PAR]
+                if k2 and H[n + N_EVAL] < H[k2 + N_EVAL]:
+                    H[k2 + N_EVAL] = H[n + N_EVAL]
+    nov = kvi(SH_TREE, 33554432)
+    if nov > 0 and knpb == 0:
+        error()
+    for i in range(nov):
+        pb = H[kpbaddr + kvi(SH_TREE, knpb - 1)]
+        t = kget(SH_TREE)
+        if t > 1 or H[pb + P_NN] == 0:
+            error()
+        k = kvi(SH_TREE, H[pb + P_NN] - 1)
+        v = kvi(SH_TREE, 16777216)
+        if v == 0:
+            v = KINF
+        else:
+            v = v - 1
+        H[H[pb + P_NODE] + (t * H[pb + P_NN] + k) * KNS + N_EVAL] = v
+
+
+# ---------------------------------------------------------------- tier-1, one code-block
+
+def kputcbd(v):
+    global kcbdn
+    if kcbd + kcbdn >= kmsize:
+        error()
+    M[kcbd + kcbdn] = v
+    kcbdn += 1
+
+
+def kshortest(so, sn, sym, sp, npe, reset):
+    """Kakadu: the shortest prefix near the bytes committed at pass sp that
+    decodes the passes so far, or KNONE"""
+    k = KKPV[3 * (sp - 1)]
+    l = 0
+    if k > 3:
+        l = k - 3
+    while l <= kmin(k + 8, sn):
+        if kmqrun(so, l, sym, KPEV[sp - 1], npe, reset):
+            return l
+        l += 1
+    return KNONE
+
+
+def kcbdims(cb):
+    """the code-block's place in its band: KCX0, KCY0, KCW, KCH"""
+    global kcx0, kcy0, kcw, kch
+    bg = kbands + H[kcb + cb * KCBS + CB_BAND] * KB
+    gx = (cb - H[bg + B_BASE]) % H[bg + B_NCBX]
+    gy = (cb - H[bg + B_BASE]) // H[bg + B_NCBX]
+    cbw = H[bg + B_CBW]
+    cbh = H[bg + B_CBH]
+    kcx0 = kmax(H[bg + B_X0], (H[bg + B_GX0] + gx) << cbw)
+    kcy0 = kmax(H[bg + B_Y0], (H[bg + B_GY0] + gy) << cbh)
+    kcw = kmin(H[bg + B_X1], (H[bg + B_GX0] + gx + 1) << cbw) - kcx0
+    kch = kmin(H[bg + B_Y1], (H[bg + B_GY0] + gy + 1) << cbh) - kcy0
+
+
+kcx0 = 0
+kcy0 = 0
+kcw = 0
+kch = 0
+kscr = 0
+kscrcap = 0
+
+
+def kdocb(cb):
+    global kcbdn
+    ca = kcb + cb * KCBS
+    bi = H[ca + CB_BAND]
+    bg = kbands + bi * KB
+    kcbdims(cb)
+    x0 = kcx0
+    y0 = kcy0
+    w = kcw
+    h = kch
+    sty = H[kcomps + H[bg + B_COMP] * KCS + O_STY]
+    reset = (sty & 2) != 0
+    npass = H[ca + CB_PASSES]
+    nseg = H[ca + CB_NSEG]
+    if nseg > 511:
+        error()
+    for k in range(nseg):
+        KSEGPASS[k] = 0
+    pc = H[ca + CB_HEAD]
+    while pc:
+        KSEGPASS[H[pc + Q_SEG]] = KSEGPASS[H[pc + Q_SEG]] + H[pc + Q_NP]
+        pc = H[pc + Q_NEXT]
+    KSEGP0[0] = 0
+    for k in range(1, nseg):
+        KSEGP0[k] = KSEGP0[k - 1] + KSEGPASS[k - 1]
+    H[ca + CB_DOFF] = kcbdn
+    if kget(SH_T1R) != 0:
+        # kept as its bytes
+        tot = 0
+        pc = H[ca + CB_HEAD]
+        while pc:
+            H[pc + Q_LEN] = kvi(SH_T1X, 2147483647)
+            tot += H[pc + Q_LEN]
+            pc = H[pc + Q_NEXT]
+        src = ktake(SH_T1X, tot)
+        for i in range(tot):
+            kputcbd(H[src + i])
+        return
+    if npass > KMAXPASSES or w > 1024 or h > 1024 or w * h > 4096:
+        error()
+    cap = npass * (2 * w * h + 3 * w * ((h + 3) // 4) + 8) + 64
+    if cap > kscrcap:
+        error()
+    sym = kscr
+    nsym = kmcb(bi, x0 - H[bg + B_X0], y0 - H[bg + B_Y0], w, h, sty, npass, H[ca + CB_ZBP], sym, cap)
+    kctxreset(base(KCTX))
+    pc = H[ca + CB_HEAD]
+    for k in range(nseg):
+        p0 = KSEGP0[k]
+        p1 = p0 + KSEGPASS[k]
+        a = 0
+        if p0 > 0:
+            a = KPASSEND[p0 - 1]
+        n = KPASSEND[p1 - 1] - a
+        so = kcbd + kcbdn          # the segment's bytes go here
+        sn = 0
+        israw = (sty & 1) and p0 >= 10 and (p0 - 1) % 3 < 2
+        npe = 0
+        fb = kscr + cap
+        if israw:
+            fcap = n // 7 + 16
+            rule = kget(SH_T1R)
+            if rule >= KR_PAD0 and rule <= KR_PAD2:
+                nb = krawpack(sym + a, n, rule - KR_PAD0, fb, fcap)
+                for i in range(nb):
+                    kputcbd(M[fb + i])
+                sn = nb
+            elif rule == KR_RAWB:
+                ln = kvi(SH_T1X, 2147483647)
+                src = ktake(SH_T1X, ln)
+                for i in range(ln):
+                    kputcbd(H[src + i])
+                sn = ln
+            else:
+                error()
+        else:
+            npe = p1 - 1 - p0
+            for i in range(npe):
+                KPEV[i] = KPASSEND[p0 + i] - a
+            for i in range(38):
+                KCTX0[i] = KCTX[i]
+            fcap = 3 * n + 64
+            eb = fb + fcap
+            kmqencode(sym + a, n, npe, reset, fb, eb, fcap)
+            if reset:
+                kctxreset(base(KCTX))
+            nf = kenf
+            ne = kene
+            kk = kekk
+            rule = kget(SH_T1R)
+            if rule == KR_EMPTY:
+                sn = 0
+            elif rule == KR_FLUSH or rule == KR_MINF:
+                sn = nf
+                if rule == KR_MINF:
+                    sn = kminprefix(fb + 1, nf, sym + a, n, npe, reset)
+                for i in range(sn):
+                    kputcbd(M[fb + 1 + i])
+            elif rule == KR_ERTERM or rule == KR_MINE:
+                sn = ne
+                if rule == KR_MINE:
+                    sn = kminprefix(eb + 1, ne, sym + a, n, npe, reset)
+                for i in range(sn):
+                    kputcbd(M[eb + 1 + i])
+            elif rule == KR_TAILF or rule == KR_TAILE:
+                if kk > nf:
+                    error()
+                on = kk + kvi(SH_T1X, KTAILMAX)
+                bitsn = 8 * (on - kk)
+                d = kvi(SH_T1X, bitsn)
+                for i in range(kk):
+                    kputcbd(M[fb + 1 + i])
+                for i in range(kk, on):
+                    v = 0
+                    if rule == KR_TAILF:
+                        if i < nf:
+                            v = M[fb + 1 + i]
+                    elif i < ne:
+                        v = M[eb + 1 + i]
+                    kputcbd(v)
+                if d < bitsn:
+                    q = so + kk + (d >> 3)
+                    M[q] = M[q] ^ (128 >> (d & 7))
+                    bb = 0
+                    w8 = 0
+                    i = d + 1
+                    while i < bitsn:
+                        if bb == 0:
+                            w8 = kget(SH_T1X)
+                            bb = 8
+                        bb -= 1
+                        q = so + kk + (i >> 3)
+                        if (w8 >> bb) & 1:
+                            M[q] = M[q] | (128 >> (i & 7))
+                        else:
+                            M[q] = M[q] & ~(128 >> (i & 7))
+                        i += 1
+                sn = on
+            elif rule == KR_RAW:
+                ln = kvi(SH_T1X, 2147483647)
+                src = ktake(SH_T1X, ln)
+                for i in range(ln):
+                    kputcbd(H[src + i])
+                sn = ln
+            else:
+                error()
+        # where the layers cut the segment
+        prev = 0
+        sp = 0
+        while pc and H[pc + Q_SEG] == k:
+            sp += H[pc + Q_NP]
+            nx = H[pc + Q_NEXT]
+            if nx == 0 or H[nx + Q_SEG] != k:
+                l = sn
+            else:
+                if israw:
+                    lo = krawpack(sym + a, KPASSEND[p0 + sp - 1] - a, 1, fb, fcap)
+                    lo = kmin(lo, sn)
+                else:
+                    lo = kmin(KKPV[3 * (sp - 1)] + 3, sn)
+                    if lo > 0 and M[so + lo - 1] == 255:
+                        lo -= 1
+                br = kget(SH_T1R)
+                if br == 0:
+                    l = lo
+                elif br == 1 and not israw:
+                    l = kshortest(so, sn, sym + a, sp, npe, reset)
+                elif br == 3 and not israw:
+                    l = kmqreach(so, sn, sym + a, KPEV[sp - 1], npe, reset)
+                elif br == 2:
+                    l = lo + ksi(SH_T1X, -sn - 1, sn + 1)
+                else:
+                    error()
+                if slt(l, prev) or sgt(l, sn):
+                    error()
+            H[pc + Q_LEN] = l - prev
+            prev = l
+            pc = nx
+
+
+# ---------------------------------------------------------------- packet headers written
+
+def kputto(v):
+    global kton
+    if kto + kton >= kmsize:
+        error()
+    M[kto + kton] = v
+    kton += 1
+
+
+ksink = 0
+
+
+def kputhdr(v):
+    if ksink == 0:
+        kputto(v)
+
+
+def kbitout(b):
+    global kbwbuf, kbwct
+    if kbwct == 0:
+        kbwbuf = (kbwbuf << 8) & 65535
+        kbwct = 8
+        if kbwbuf == 65280:
+            kbwct = 7
+        kputhdr(kbwbuf >> 8)
+    kbwct -= 1
+    kbwbuf = kbwbuf | (b << kbwct)
+
+
+def kbitsout(v, n):
+    while n > 0:
+        n -= 1
+        if n < 32:
+            kbitout((v >> n) & 1)
+        else:
+            kbitout(0)
+
+
+def kttencode(base_, leaf, thr):
+    sp = 0
+    nd = base_ + leaf * KNS
+    while H[nd + N_PAR]:
+        KSTK[sp] = nd
+        sp += 1
+        nd = H[nd + N_PAR]
+    low = 0
+    while True:
+        if low > H[nd + N_ELOW]:
+            H[nd + N_ELOW] = low
+        else:
+            low = H[nd + N_ELOW]
+        while low < thr:
+            if low >= H[nd + N_EVAL]:
+                if H[nd + N_EKNOWN] == 0:
+                    kbitout(1)
+                    H[nd + N_EKNOWN] = 1
+                break
+            kbitout(0)
+            low += 1
+        H[nd + N_ELOW] = low
+        if sp == 0:
+            break
+        sp -= 1
+        nd = KSTK[sp]
+
+
+def kpass3():
+    global kton, kbwbuf, kbwct, ksink
+    for i in range(kncb):
+        a = kcb + i * KCBS
+        H[a + CB_ELB] = 3
+        H[a + CB_CUR] = H[a + CB_DOFF]
+    kton = 0
+    for k in range(knpk):
+        g = kpk + k * KGS
+        H[ktilepk + k] = kton
+        fl = H[g + G_FL]
+        if fl & 2:
+            kputto(255)
+            kputto(145)
+            kputto(0)
+            kputto(4)
+            kputto(H[g + G_NSOP] >> 8)
+            kputto(H[g + G_NSOP] & 255)
+        if kpacked == 0:
+            ksink = kget(SH_HDRX)
+            if ksink > 1:
+                error()
+            kbwbuf = 0
+            kbwct = 8
+            kbitout(fl & 1)
+            e = H[g + G_IE0]
+            for q in range(H[g + G_IEN]):
+                cb = H[e + E_CB]
+                ca = kcb + cb * KCBS
+                pb = H[ca + CB_PB]
+                ef = H[e + E_FLAGS]
+                if (ef & 2) == 0:
+                    kttencode(H[pb + P_NODE], H[ca + CB_LEAF], H[g + G_L] + 1)
+                else:
+                    kbitout(ef & 1)
+                if ef & 1:
+                    if (ef & 2) == 0:
+                        kttencode(H[pb + P_NODE] + H[pb + P_NN] * KNS, H[ca + CB_LEAF], KZBPLIMIT)
+                        H[ca + CB_ELB] = 3
+                    np = H[e + E_NP]
+                    if np == 1:
+                        kbitout(0)
+                    elif np == 2:
+                        kbitsout(2, 2)
+                    elif np <= 5:
+                        kbitsout(12 | (np - 3), 4)
+                    elif np <= 36:
+                        kbitsout(480 | (np - 6), 9)
+                    else:
+                        kbitsout(65408 | (np - 37), 16)
+                    lb = H[ca + CB_ELB]
+                    need = 0
+                    pq = H[e + E_PC0]
+                    for j in range(H[e + E_PCN]):
+                        n = kflog2(H[pq + j * KPC + Q_LEN]) + 1 - (lb + kflog2(H[pq + j * KPC + Q_NP]))
+                        if sgt(n, need):
+                            need = n
+                    inc = need + kvi(SH_LB, 32)
+                    if lb + inc > 40:
+                        error()
+                    for j in range(inc):
+                        kbitout(1)
+                    kbitout(0)
+                    lb = lb + inc
+                    H[ca + CB_ELB] = lb
+                    for j in range(H[e + E_PCN]):
+                        kbitsout(H[pq + j * KPC + Q_LEN], lb + kflog2(H[pq + j * KPC + Q_NP]))
+                e = H[e + E_NEXT]
+            kbwbuf = (kbwbuf << 8) & 65535
+            kbwct = 8
+            if kbwbuf == 65280:
+                kbwct = 7
+            kputhdr(kbwbuf >> 8)
+            if kbwct == 7:
+                kbwbuf = (kbwbuf << 8) & 65535
+                kbwct = 8
+                kputhdr(kbwbuf >> 8)
+            if ksink:
+                ksink = 0
+                ln = kvi(SH_HDRX, 2147483647)
+                src = ktake(SH_HDRX, ln)
+                for i in range(ln):
+                    kputto(H[src + i])
+            if fl & 4:
+                kputto(255)
+                kputto(146)
+        e = H[g + G_IE0]
+        for q in range(H[g + G_IEN]):
+            if H[e + E_FLAGS] & 1:
+                ca = kcb + H[e + E_CB] * KCBS
+                pq = H[e + E_PC0]
+                for j in range(H[e + E_PCN]):
+                    ln = H[pq + j * KPC + Q_LEN]
+                    cur = H[ca + CB_CUR]
+                    if cur + ln > kcbdn:
+                        error()
+                    for i in range(ln):
+                        kputto(M[kcbd + cur + i])
+                    H[ca + CB_CUR] = cur + ln
+            e = H[e + E_NEXT]
+    H[ktilepk + knpk] = kton
+
+
+# ---------------------------------------------------------------- PLT and TLM, the tile-parts
+
+def kputstg(v):
+    global kstgn
+    if kstgn >= kcslen:
+        error()
+    M[kstg + kstgn] = v
+    kstgn += 1
+
+
+def kpltcount(pos, ln):
+    n = 0
+    for i in range(5, ln):
+        if (H[pos + i] & 128) == 0:
+            n += 1
+    return n
+
+
+def kpltbytes(z, pk0, cnt):
+    """a PLT marker segment of the lengths of packets pk0 .. pk0 + cnt"""
+    s = kstgn
+    kputstg(255)
+    kputstg(88)
+    kputstg(0)
+    kputstg(0)
+    kputstg(z)
+    for i in range(pk0, pk0 + cnt):
+        v = H[ktilepk + i + 1] - H[ktilepk + i]
+        k = 0
+        while True:
+            KSTK[k] = v & 127
+            v = v >> 7
+            k += 1
+            if v == 0 or k == 10:
+                break
+        while k > 0:
+            k -= 1
+            if k > 0:
+                kputstg(KSTK[k] | 128)
+            else:
+                kputstg(KSTK[k])
+    ln = kstgn - s - 2
+    if ln > 65535:
+        error()
+    M[kstg + s + 2] = ln >> 8
+    M[kstg + s + 3] = ln & 255
+
+
+def ktileparts():
+    t = H[ktphead + ktile]
+    while t:
+        s = kstgn
+        H[t + T_BYTES] = s
+        isot = H[t + T_ISOT]
+        kputstg(255)
+        kputstg(144)
+        kputstg(0)
+        kputstg(10)
+        kputstg(isot >> 8)
+        kputstg(isot & 255)
+        kputstg(0)
+        kputstg(0)
+        kputstg(0)
+        kputstg(0)
+        kputstg(H[t + T_TPSOT])
+        kputstg(H[t + T_TNSOT])
+        npk = H[t + T_NPK]
+        pk0 = H[t + T_PK0]
+        pi = 0
+        its = H[t + T_ITEMS]
+        for q in range(H[t + T_NITEMS]):
+            it = its + q * KI
+            if H[it + I_KIND] == 2:
+                if pi + H[it + I_CNT] > npk:
+                    error()
+                kpltbytes(H[it + I_Z], pk0 + pi, H[it + I_CNT])
+                pi += H[it + I_CNT]
+            else:
+                pos = H[it + I_POS]
+                for i in range(H[it + I_LEN]):
+                    kputstg(H[pos + i])
+                if H[it + I_CODE] == 65368:
+                    pi += kpltcount(pos, H[it + I_LEN])
+        kputstg(255)
+        kputstg(147)
+        for i in range(H[ktilepk + pk0], H[ktilepk + pk0 + npk]):
+            kputstg(M[kto + i])
+        gp = H[t + T_GAPPOS]
+        for i in range(H[t + T_GAPLEN]):
+            kputstg(H[gp + i])
+        ln = kstgn - s
+        v = ln
+        if H[t + T_PMODE] == 1:
+            v = 0
+        elif H[t + T_PMODE] == 2:
+            v = H[t + T_PSOT]
+        M[kstg + s + 6] = v >> 24
+        M[kstg + s + 7] = (v >> 16) & 255
+        M[kstg + s + 8] = (v >> 8) & 255
+        M[kstg + s + 9] = v & 255
+        H[t + T_BLEN] = ln
+        t = H[t + T_NEXT]
+
+
+def ktlmcount(pos, ln):
+    if ln < 6:
+        return 0
+    st = H[pos + 5]
+    if ((st >> 4) & 3) == 3:
+        return 0
+    esz = ((st >> 4) & 3) + 2 + 2 * ((st >> 6) & 1)
+    if (ln - 6) % esz:
+        return 0
+    return (ln - 6) // esz
+
+
+koutn = 0
+
+
+def kout(v):
+    global koutn
+    out(v)
+    koutn += 1
+
+
+def kassemble():
+    """the codestream out: SOC, the main header (its TLM made again), the
+    tile-parts in their order, what follows them"""
+    kout(255)
+    kout(79)
+    tli = 0
+    for i in range(knmain):
+        it = kmain + i * KI
+        if H[it + I_KIND] == 1:
+            cnt = H[it + I_CNT]
+            if tli + cnt > kntp:
+                error()
+            st = H[it + I_ST]
+            tsz = (st >> 4) & 3
+            psz = (st >> 6) & 1
+            ln = 4 + cnt * (tsz + 2 + 2 * psz)
+            if ln > 65535:
+                error()
+            kout(255)
+            kout(85)
+            kout(ln >> 8)
+            kout(ln & 255)
+            kout(H[it + I_Z])
+            kout(st)
+            for j in range(tli, tli + cnt):
+                t = ktps + j * KT
+                if tsz == 1:
+                    kout(H[t + T_ISOT] & 255)
+                elif tsz == 2:
+                    kout(H[t + T_ISOT] >> 8)
+                    kout(H[t + T_ISOT] & 255)
+                v = H[t + T_BLEN]
+                if psz:
+                    kout(v >> 24)
+                    kout((v >> 16) & 255)
+                else:
+                    if v > 65535:
+                        error()
+                kout((v >> 8) & 255)
+                kout(v & 255)
+            tli += cnt
+        else:
+            pos = H[it + I_POS]
+            for j in range(H[it + I_LEN]):
+                kout(H[pos + j])
+            if H[it + I_CODE] == 65365:
+                tli += ktlmcount(pos, H[it + I_LEN])
+    for j in range(kntp):
+        t = ktps + j * KT
+        b = H[t + T_BYTES]
+        for i in range(H[t + T_BLEN]):
+            kout(M[kstg + b + i])
+    for i in range(ktaillen):
+        kout(H[ktailpos + i])
+
+
+# ---------------------------------------------------------------- the model's view of the tile
+
+def kbandof(c, r, o):
+    if c >= kncomp or r >= H[kcomps + c * KCS + O_NRES]:
+        return KNONE
+    rg = kress + (H[kcomps + c * KCS + O_RES0] + r) * KRS
+    if r == 0:
+        if o == 0:
+            return H[rg + R_BAND]
+        return KNONE
+    if o > 0:
+        return H[rg + R_BAND + o - 1]
+    return KNONE
+
+
+def kmodeltile():
+    """ModelTile: the bands' parents and other components, and the maps'
+    places (M), when they fit in KMAPCAP"""
+    global kmaps, kmapsize
+    ar = alloc(kncomp)
+    for b in range(knb):
+        bg = kbands + b * KB
+        c = H[bg + B_COMP]
+        r = H[bg + B_RES]
+        o = H[bg + B_ORIENT]
+        H[bg + B_NRES] = H[kcomps + c * KCS + O_NRES]
+        w = H[bg + B_X1] - H[bg + B_X0]
+        h = H[bg + B_Y1] - H[bg + B_Y0]
+        H[bg + B_W] = w
+        H[bg + B_H] = h
+        if r == 0:
+            H[bg + B_COARSER] = KNONE
+        elif r == 1:
+            H[bg + B_COARSER] = kbandof(c, 0, 0)
+        else:
+            H[bg + B_COARSER] = kbandof(c, r - 1, o)
+        H[bg + B_CROSS0] = KNONE
+        H[bg + B_CROSS1] = KNONE
+        if c > 0:
+            H[bg + B_CROSS0] = kbandof(0, r, o)
+        if c > 1:
+            H[bg + B_CROSS1] = kbandof(1, r, o)
+        # the area, held to 2^28 (more never fits KMAPCAP)
+        area = 268435456
+        if w < 268435456 and h < 268435456 and (h == 0 or w <= 268435456 // h):
+            area = w * h
+        if H[ar + c] <= KMAPCAP:
+            H[ar + c] = H[ar + c] + area
+    a0 = H[ar]
+    a1 = 0
+    a2 = 0
+    if kncomp > 1:
+        a1 = H[ar + 1]
+    for c in range(2, kncomp):
+        if H[ar + c] > a2:
+            a2 = H[ar + c]
+    need = a0 + a1 + a2
+    b0 = 0
+    b1 = a0
+    b2 = a0 + a1
+    for b in range(knb):
+        bg = kbands + b * KB
+        if need > KMAPCAP:
+            H[bg + B_MAP] = KNONE
+        else:
+            c = H[bg + B_COMP]
+            wh = H[bg + B_W] * H[bg + B_H]
+            if c == 0:
+                H[bg + B_MAP] = b0
+                b0 += wh
+            elif c == 1:
+                H[bg + B_MAP] = b1
+                b1 += wh
+            else:
+                H[bg + B_MAP] = b2
+                b2 += wh
+                if b + 1 < knb and H[kbands + (b + 1) * KB + B_COMP] != c:
+                    b2 = a0 + a1
+    if need > KMAPCAP:
+        need = 0
+    kmapsize = need
+    kmaps = kmalloc(need)
+    kmtile()
+
+
+# ---------------------------------------------------------------- one tile
+
+def ktilerebuild():
+    global knpk, knpktarget, knsoplast, kbandz, kpk, kto, kcbd, kcbdn, ktilepk, kmp, kscr, kscrcap
+    mmark = kmp
+    trgn = ktileparams()
+    kgeometry()
+    kmodeltile()
+    kbandz = alloc(knb)
+    knsoplast = KNONE
+    knpktarget = kvi(SH_LAY, 33554432)
+    k = 0
+    t = H[ktphead + ktile]
+    while t:
+        n = kvi(SH_LAY, knpktarget)
+        H[t + T_NPK] = n
+        ln = kvi(SH_LAY, 2147483647)
+        H[t + T_GAPLEN] = ln
+        H[t + T_GAPPOS] = ktake(SH_LAY, ln)
+        H[t + T_PK0] = k
+        k += n
+        t = H[t + T_NEXT]
+    if k != knpktarget:
+        error()
+    kpk = alloc(knpktarget * KGS + 1)
+    knpk = 0
+    kiterate()
+    if knpk != knpktarget:
+        error()
+    if kpacked == 0:
+        ktrees()
+    # the code-blocks' scratch: the largest's decisions, and its MQ coder's two outputs
+    mc = 0
+    for i in range(kncb):
+        npass = H[kcb + i * KCBS + CB_PASSES]
+        if npass > 0 and npass <= KMAXPASSES:
+            kcbdims(i)
+            if kcw <= 1024 and kch <= 1024 and kcw * kch <= 4096:
+                mc = kmax(mc, npass * (2 * kcw * kch + 3 * kcw * ((kch + 3) // 4) + 8) + 64)
+    kscrcap = mc
+    kscr = kmalloc(7 * mc + 192)
+    kcbd = kmp
+    kcbdn = 0
+    for i in range(kncb):
+        if H[kcb + i * KCBS + CB_PASSES] > 0:
+            kdocb(i)
+    kmp = kcbd + kcbdn
+    kto = kmp
+    ktilepk = alloc(knpk + 1)
+    kpass3()
+    kmp = kto + kton
+    ktileparts()
+    kmp = mmark
+
+
+# ---------------------------------------------------------------- one codestream (mode 1)
+
+def kcsdecode(sp, slen, cslen):
+    """a mode 1 stream, M[sp .. sp + slen), back to its codestream of cslen
+    bytes, written out"""
+    global kcslen, ktphead, kstg, kstgn, ktile, koutn, kmp, kmaincod, kmainqcd, khasppm, khasrgn
+    hmark = hp
+    mmark = kmp
+    kcslen = cslen
+    if slen < 13 or M[sp] != 0:
+        error()
+    s = M[sp + 5] | (M[sp + 6] << 8) | (M[sp + 7] << 16) | (M[sp + 8] << 24)
+    if s < 1 or s > KSLICES or 13 + 4 * s > slen:
+        error()
+    p = sp + 9 + 4 * s
+    side = M[p] | (M[p + 1] << 8) | (M[p + 2] << 16) | (M[p + 3] << 24)
+    p += 4
+    if side > sp + slen - p:
+        error()
+    # the side information
+    for i in range(256):
+        O0[i] = 0
+    for i in range(65536):
+        O1[i] = 0
+    dinit(p, p + side)
+    bound = cslen + cslen // 4 + 65536
+    coderaw(bound)
+    blob = rawbase
+    bloblen = rawlen
+    p += side
+    soff = alloc(s)
+    slen2 = alloc(s)
+    for k in range(s):
+        q = sp + 9 + 4 * k
+        H[soff + k] = p
+        H[slen2 + k] = M[q] | (M[q + 1] << 8) | (M[q + 2] << 16) | (M[q + 3] << 24)
+        p += H[slen2 + k]
+        if p > sp + slen:
+            error()
+    if p != sp + slen:
+        error()
+    # the blob: version 2, the streams' lengths, the streams, the slice table
+    KSP[SH_BLOB] = blob
+    KSE[SH_BLOB] = blob + bloblen
+    if kget(SH_BLOB) != 2:
+        error()
+    for i in range(10):
+        KSE[i] = kvi(SH_BLOB, 2147483647)
+    q = KSP[SH_BLOB]
+    for i in range(10):
+        n = KSE[i]
+        if n > blob + bloblen - q:
+            error()
+        KSB[i] = q
+        KSP[i] = q
+        KSE[i] = q + n
+        q += n
+    kmaincod = 0
+    kmainqcd = 0
+    khasppm = 0
+    khasrgn = 0
+    kreadheaders()
+    # each tile's tile-parts, in order, and the tiles that have some
+    ktphead = alloc(knxt * knyt)
+    used = 0
+    i = kntp
+    while i > 0:
+        i -= 1
+        t = ktps + i * KT
+        it = H[t + T_ISOT]
+        if H[ktphead + it] == 0:
+            used += 1
+        H[t + T_NEXT] = H[ktphead + it]
+        H[ktphead + it] = t
+    KSP[SH_BLOB] = q
+    ns = kvi(SH_BLOB, kmin(used, KSLICES))
+    if ns < 1 or ns != s:
+        error()
+    for k in range(ns):
+        if k == 0:
+            KSLFIRST[0] = 0
+        else:
+            KSLFIRST[k] = kvi(SH_BLOB, used - 1)
+            if KSLFIRST[k] <= KSLFIRST[k - 1]:
+                error()
+        hb = kget(SH_BLOB)
+        if hb < 10 or hb > 20:
+            error()
+        KSLHB[k] = hb
+        for j in range(1, 9):
+            v = 0
+            if k > 0:
+                v = kvi(SH_BLOB, KSE[j] - KSB[j])
+            KSLPOS[k * 10 + j] = v
+    if KSP[SH_BLOB] != KSE[SH_BLOB]:
+        error()
+    # the tiles, slice by slice
+    kstg = kmalloc(cslen)
+    kstgn = 0
+    smark = 0
+    k = 0
+    n = 0
+    for t in range(knxt * knyt):
+        if H[ktphead + t] == 0:
+            continue
+        if k < ns and n == KSLFIRST[k]:
+            if k > 0:
+                krelease(smark)
+            for j in range(1, 9):
+                if KSP[j] - KSB[j] != KSLPOS[k * 10 + j]:
+                    error()
+            smark = hp
+            kminit(KSLHB[k])
+            dinit(H[soff + k], H[soff + k] + H[slen2 + k])
+            k += 1
+        ktile = t
+        tmark = hp
+        ktilerebuild()
+        krelease(tmark)
+        n += 1
+    if k != ns:
+        error()
+    for j in range(1, 9):
+        if KSP[j] != KSE[j]:
+            error()
+    koutn = 0
+    kassemble()
+    if koutn != cslen:
+        error()
+    krelease(hmark)
+    kmp = mmark

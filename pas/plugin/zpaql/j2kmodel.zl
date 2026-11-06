@@ -1,0 +1,1074 @@
+"""Stream version 8's mode 1 model for ZPAQL: pjaj2kmc.c's decoding path,
+line by line (doc/CODEC.md, "JPEG 2000 for zpaq-std"). Its tables
+(pjaj2km_tab.h) come packed in KSTPACK and KSQPACK (gen_pjadec.py), and
+J2KM_RC is pjadec.zl's RECIP. Every value is 32 bits: the codec takes only
+codestreams whose bands' Mb is at most 24, so that no sum of magnitudes
+here needs more (pjazsj2k.pas)."""
+
+KM_LIMIT = 255
+KM_FAST = 3
+KM_APMR = 6
+KM_LR0 = 31457
+KM_LR1 = 6
+KNC = 8
+KNW = 16
+KWMAX = 4194304
+KNSA = 2400
+KNSB = 1080
+KNSC = 1280
+KA0N = 100
+KA1N = 1620
+KA2N = 1260
+KCBMAX = 4096
+KSTMAX = 6156
+KRMAX = 8224
+# the contexts' natural ranges (pjaj2kmc.c's R_ enum)
+KR_SD = 12
+KR_LN = 20
+KR_LN2 = 14
+KR_LP = 18
+KR_DEP = 21
+KR_ORL = 64
+KR_CMP = 4
+KR_RC = 3
+KR_NS = 9
+KR_R = 8
+KR_REL = 17
+KR_MB = 8
+KR_EXT = 9
+K_SIGP = 0
+K_SIGC = 1
+K_SIGN = 2
+K_REF = 3
+K_RUN = 4
+# a coefficient's flags and its neighbours (pjaj2kt1.h)
+KSIG = 1
+KNEG = 2
+KPIV = 4
+KREF = 8
+KNW_ = 1
+KN_ = 2
+KNE_ = 4
+KW_ = 8
+KE_ = 16
+KSW_ = 32
+KS_ = 64
+KSE_ = 128
+KSOUTH = 224
+
+KPK = table([288, 58320, 51840, 326592, 514080, 860160, 362880, 2566080])
+KZC = array(1024)            # ZC[orient][mask], table D.1
+KST = array(4096)            # J2KM_ST
+KSQ = array(6144)            # J2KM_SQ
+KLR = array(1024)
+KMAGC = array(64)
+KTB = array(8)               # each context's table: its place in H, its counters
+KTS = array(8)
+KWA = array(38400)
+KWB = array(17280)
+KWC = array(20480)
+KCA = array(2400)
+KCB = array(1080)
+KCC = array(1280)
+KAP0 = array(3300)
+KAP1 = array(53460)
+KAP2 = array(41580)
+KMISC = array(128)
+KSTN = array(12312)          # st, then nb: (w + 2) (h + 2) each
+KR = array(8224)
+KPQ = array(4096)
+KXQ = array(4096)
+KPS = array(4096)
+KXS = array(4096)
+KCOLA = array(1024)
+KROWA = array(1024)
+KCOLB = array(1024)
+KROWB = array(1024)
+KCOLC = array(1024)
+KROWC = array(1024)
+KV = array(8)
+KS16 = array(16)
+KC8 = array(8)
+KPASSEND = array(256)
+
+khshift = 0
+# the code-block
+kw = 0
+kh = 0
+krw = 0
+kmbc = 0
+korient = 0
+klvl = 0
+kcomp = 0
+khaveP = 0
+khaveX = 0
+kpqoff = 0
+kxqoff = 0
+ksym = 0                     # the decisions: M[ksym ..], ksns of them, at most kcap
+kns = 0
+kcap = 0
+# the tile: its bands (records of KB words), the maps in M
+kbands = 0
+knb = 0
+kmaps = 0
+kmapsize = 0
+kzcomp = 0
+kbitw = 0
+kbitp = 0
+kbita = 0
+
+
+def kbit():
+    """the next bit of a packed table (LSB first)"""
+    global kbitw, kbitp, kbita
+    if kbitp == 0:
+        kbitw = H[kbita]
+        kbita += 1
+        kbitp = 32
+    kbitp -= 1
+    b = kbitw & 1
+    kbitw = kbitw >> 1
+    return b
+
+
+def kunary():
+    n = 0
+    while kbit():
+        n += 1
+    return n
+
+
+def ktables():
+    """ZC, J2KM_ST, J2KM_SQ, the rates, the map values: once"""
+    global kbitp, kbita
+    for o in range(4):
+        for mk in range(256):
+            h = ((mk >> 3) & 1) + ((mk >> 4) & 1)
+            v = ((mk >> 1) & 1) + ((mk >> 6) & 1)
+            d = (mk & 1) + ((mk >> 2) & 1) + ((mk >> 5) & 1) + ((mk >> 7) & 1)
+            if o == 1:
+                t = h
+                h = v
+                v = t
+            if o == 3:
+                hv = h + v
+                if d >= 3:
+                    z = 8
+                elif d == 2:
+                    z = 6 + (hv >= 1)
+                elif d == 1:
+                    z = 3 + (hv >= 1) + (hv >= 2)
+                else:
+                    z = (hv >= 1) + (hv >= 2)
+            elif h == 2:
+                z = 8
+            elif h == 1:
+                if v >= 1:
+                    z = 7
+                elif d >= 1:
+                    z = 6
+                else:
+                    z = 5
+            elif v == 2:
+                z = 4
+            elif v == 1:
+                z = 3
+            else:
+                z = (d >= 1) + (d >= 2)
+            KZC[o * 256 + mk] = z
+    kbitp = 0
+    kbita = base(KSTPACK)
+    KST[2048] = 0
+    for i in range(2048, 4095):
+        KST[i + 1] = KST[i] + kunary()
+    for i in range(2048):
+        KST[i] = -KST[4095 - i]
+    kbitp = 0
+    kbita = base(KSQPACK)
+    KSQ[3072] = 32768
+    d = 64
+    for i in range(3071):
+        KSQ[3073 + i] = KSQ[3072 + i] + d
+        if i < 3070:
+            u = kunary()
+            if u & 1:
+                d = d - ((u + 1) >> 1)
+            else:
+                d = d + (u >> 1)
+    for i in range(1, 3072):
+        KSQ[3072 - i] = 65536 - KSQ[3072 + i]
+    KSQ[0] = 1
+    for i in range(1024):
+        KLR[i] = KM_LR1 + KM_LR0 // (1024 + 64 * i)
+    for i in range(1, 64):
+        q = i - 1
+        l = q >> 1
+        v = 1 << l
+        if (q & 1) and l > 0:
+            v = v | (1 << (l - 1))
+        KMAGC[i] = v
+
+
+def kclamp(v, lo, hi):
+    if slt(v, lo):
+        return lo
+    if sgt(v, hi):
+        return hi
+    return v
+
+
+def kabs(v):
+    if slt(v, 0):
+        return -v
+    return v
+
+
+def kilog2(v):
+    n = 0
+    if v >= 65536:
+        v = v >> 16
+        n = 16
+    if v >= 256:
+        v = v >> 8
+        n += 8
+    if v >= 16:
+        v = v >> 4
+        n += 4
+    if v >= 4:
+        v = v >> 2
+        n += 2
+    if v >= 2:
+        n += 1
+    return n
+
+
+def kq2log(v):
+    l = kilog2(v)
+    if l > 0:
+        return 2 * l + ((v >> (l - 1)) & 1)
+    return 0
+
+
+def ksgn3(v):
+    if slt(v, 0):
+        return -1
+    if v:
+        return 1
+    return 0
+
+
+def kmapcode(v):
+    if v == 0:
+        return 0
+    c = kq2log(kabs(v)) + 1
+    if slt(v, 0):
+        c = c | 128
+    return c
+
+
+def kmapval(c):
+    v = KMAGC[c & 63]
+    if c & 128:
+        return -v
+    return v
+
+
+def kminit(hb):
+    """a slice's model, its tables of at most 2^hb counters each (two
+    words a counter: p and the fast one, then n), zero: unseen"""
+    global khshift
+    for i in range(8):
+        r = KPK[i] * 5
+        if r > (1 << hb):
+            r = 1 << hb
+        KTS[i] = r
+        KTB[i] = alloc(2 * r)
+    for i in range(38400):
+        KWA[i] = 0
+    for i in range(17280):
+        KWB[i] = 0
+    for i in range(20480):
+        KWC[i] = 0
+    for i in range(2400):
+        KWA[16 * i] = 8192
+        KWA[16 * i + 2] = 8192
+        KWA[16 * i + 4] = 8192
+        KWA[16 * i + 6] = 8192
+        KWA[16 * i + 8] = 8192
+        KWA[16 * i + 10] = 8192
+        KWA[16 * i + 12] = 8192
+        KWA[16 * i + 14] = 8192
+        KCA[i] = 0
+    for i in range(1080):
+        for j in range(8):
+            KWB[16 * i + 2 * j] = 8192
+        KCB[i] = 0
+    for i in range(1280):
+        for j in range(8):
+            KWC[16 * i + 2 * j] = 8192
+        KCC[i] = 0
+    for j in range(33):
+        v = KSQ[(j - 16) * 128 + 3072]
+        for i in range(100):
+            KAP0[i * 33 + j] = v
+        for i in range(1620):
+            KAP1[i * 33 + j] = v
+        for i in range(1260):
+            KAP2[i * 33 + j] = v
+    for i in range(128):
+        KMISC[i] = 0
+    khshift = 32 - hb
+
+
+def klearn(c, bit):
+    w = H[c]
+    p = (w & 65535) ^ 32768
+    f = ((w >> 16) & 65535) ^ 32768
+    n = H[c + 1]
+    if bit:
+        p = p + (((65535 - p) * RECIP[n]) >> 16)
+        f = f + sar(65535 - f, KM_FAST)
+    else:
+        p = p - (((p - 1) * RECIP[n]) >> 16)
+        f = f + sar(-f, KM_FAST)
+    if n < KM_LIMIT:
+        H[c + 1] = n + 1
+    H[c] = (p ^ 32768) | ((f ^ 32768) << 16)
+
+
+def kapmupd(t, lo, fr, tg):
+    """a map's two bins toward tg: truncshr((tg - v) * w >> 6, 6 + KM_APMR)"""
+    v = H[t + lo]
+    d = (tg - v) * (4096 - fr)
+    if slt(d, 0):
+        d = -((-sar(d, 6)) >> (6 + KM_APMR))
+    else:
+        d = d >> (12 + KM_APMR)
+    H[t + lo] = (v + d) & 65535
+    v = H[t + lo + 1]
+    d = (tg - v) * fr
+    if slt(d, 0):
+        d = -((-sar(d, 6)) >> (6 + KM_APMR))
+    else:
+        d = d >> (12 + KM_APMR)
+    H[t + lo + 1] = (v + d) & 65535
+
+
+def kmix(sa, sb, sc, a0, a1, a2):
+    """mix_code, decoding: KV holds the contexts' values"""
+    for i in range(8):
+        idx = KV[i]
+        if KPK[i] * 5 > KTS[i]:
+            idx = ((idx + 1) * 2654435761) >> khshift
+        c = KTB[i] + 2 * idx
+        KC8[i] = c
+        w = H[c]
+        KS16[2 * i] = KST[((w & 65535) ^ 32768) >> 4]
+        KS16[2 * i + 1] = KST[(((w >> 16) & 65535) ^ 32768) >> 4]
+    wa = base(KWA) + sa * 16
+    wb = base(KWB) + sb * 16
+    wc = base(KWC) + sc * 16
+    da = 0
+    db = 0
+    dc = 0
+    for i in range(16):
+        s = KS16[i]
+        da = da + s * H[wa + i]
+        db = db + s * H[wb + i]
+        dc = dc + s * H[wc + i]
+    if slt(da, 0):
+        da = -((-da) >> 16)
+        if slt(da, -3071):
+            da = -3071
+    else:
+        da = da >> 16
+        if da > 3071:
+            da = 3071
+    if slt(db, 0):
+        db = -((-db) >> 16)
+        if slt(db, -3071):
+            db = -3071
+    else:
+        db = db >> 16
+        if db > 3071:
+            db = 3071
+    if slt(dc, 0):
+        dc = -((-dc) >> 16)
+        if slt(dc, -3071):
+            dc = -3071
+    else:
+        dc = dc >> 16
+        if dc > 3071:
+            dc = 3071
+    xx = (da + db + dc) * 21846
+    if slt(xx, 0):
+        xx = -((-xx) >> 16)
+    else:
+        xx = xx >> 16
+    pm = KSQ[xx + 3072]
+    pos = xx
+    if slt(pos, -2047):
+        pos = -2047
+    elif sgt(pos, 2047):
+        pos = 2047
+    pos = (pos + 2048) * 32
+    lo = pos >> 12
+    fr = pos & 4095
+    t0 = base(KAP0) + a0 * 33
+    t1 = base(KAP1) + a1 * 33
+    t2 = base(KAP2) + a2 * 33
+    pa0 = (H[t0 + lo] * (4096 - fr) + H[t0 + lo + 1] * fr) >> 12
+    pa1 = (H[t1 + lo] * (4096 - fr) + H[t1 + lo + 1] * fr) >> 12
+    pa2 = (H[t2 + lo] * (4096 - fr) + H[t2 + lo + 1] * fr) >> 12
+    bit = decode((pm + pa0 + pa1 + pa2) >> 2)
+    ea = sar((bit << 16) - KSQ[da + 3072], 4) * KLR[KCA[sa] >> 6]
+    eb = sar((bit << 16) - KSQ[db + 3072], 4) * KLR[KCB[sb] >> 6]
+    ec = sar((bit << 16) - KSQ[dc + 3072], 4) * KLR[KCC[sc] >> 6]
+    if KCA[sa] < 65535:
+        KCA[sa] += 1
+    if KCB[sb] < 65535:
+        KCB[sb] += 1
+    if KCC[sc] < 65535:
+        KCC[sc] += 1
+    for i in range(16):
+        s = KS16[i]
+        t = s * ea
+        if slt(t, 0):
+            t = H[wa + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wa + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wa + i] = t
+        t = s * eb
+        if slt(t, 0):
+            t = H[wb + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wb + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wb + i] = t
+        t = s * ec
+        if slt(t, 0):
+            t = H[wc + i] - ((-t) >> 16)
+            if slt(t, -KWMAX):
+                t = -KWMAX
+        else:
+            t = H[wc + i] + (t >> 16)
+            if sgt(t, KWMAX):
+                t = KWMAX
+        H[wc + i] = t
+    tg = 0
+    if bit:
+        tg = 65535
+    kapmupd(t0, lo, fr, tg)
+    kapmupd(t1, lo, fr, tg)
+    kapmupd(t2, lo, fr, tg)
+    for i in range(8):
+        klearn(KC8[i], bit)
+    return bit
+
+
+def kri(x, y):
+    """R's place of (x, y), -2 <= x, y"""
+    return base(KR) + (y + 2) * krw + x + 2
+
+
+def kevent(k, x, y, b, sd, rc):
+    i = kri(x, y)
+    rw = krw
+    pi = y * kw + x
+    rl = H[i - 1]
+    rr = H[i + 1]
+    ru = H[i - rw]
+    rd = H[i + rw]
+    rul = H[i - rw - 1]
+    rur = H[i - rw + 1]
+    rdl = H[i + rw - 1]
+    rdr = H[i + rw + 1]
+    n4 = (rl if sge(rl, 0) else -rl) + (rr if sge(rr, 0) else -rr) + (ru if sge(ru, 0) else -ru) + \
+        (rd if sge(rd, 0) else -rd)
+    nd = (rul if sge(rul, 0) else -rul) + (rur if sge(rur, 0) else -rur) + (rdl if sge(rdl, 0) else -rdl) + \
+        (rdr if sge(rdr, 0) else -rdr)
+    v = H[i - 2]
+    n2 = v if sge(v, 0) else -v
+    v = H[i + 2]
+    n2 = n2 + (v if sge(v, 0) else -v)
+    v = H[i - 2 * rw]
+    n2 = n2 + (v if sge(v, 0) else -v)
+    v = H[i + 2 * rw]
+    n2 = n2 + (v if sge(v, 0) else -v)
+    nsum = 2 * n4 + nd
+    ln = -7
+    if nsum:
+        ln = kq2log(nsum) - 2 * b - 2
+        if slt(ln, -6):
+            ln = -6
+        elif sgt(ln, 12):
+            ln = 12
+    ln2 = -5
+    if n2:
+        ln2 = kq2log(n2) - 2 * b
+        if slt(ln2, -4):
+            ln2 = -4
+        elif sgt(ln2, 8):
+            ln2 = 8
+    lp = -9
+    lps = 0
+    lx = -9
+    lxs = 0
+    depth = kmbc - b
+    if slt(depth, 0):
+        depth = 0
+    elif sgt(depth, 20):
+        depth = 20
+    orl = korient * 16 + klvl
+    ext = 0
+    if khaveP:
+        q = KPQ[pi]
+        lps = KPS[pi]
+        if sgt(q, -100):
+            lp = q + kpqoff - 2 * b
+            if slt(lp, -8):
+                lp = -8
+            elif sgt(lp, 8):
+                lp = 8
+    if khaveX:
+        q = KXQ[pi]
+        lxs = KXS[pi]
+        if sgt(q, -100):
+            lx = q + kxqoff - 2 * b
+            if slt(lx, -8):
+                lx = -8
+            elif sgt(lx, 8):
+                lx = 8
+    lnI = ln + 7
+    lpI = lp + 9
+    lxI = lx + 9
+    if k < 2:
+        nsig = (rl != 0) + (rr != 0) + (ru != 0) + (rd != 0) + (rul != 0) + (rur != 0) + (rdl != 0) + (rdr != 0)
+        KV[0] = (sd * KR_RC + rc) * KR_R
+        KV[1] = (sd * KR_LN + lnI) * KR_RC + rc
+        KV[2] = ((lnI * KR_LP + lxI) * KR_CMP + kcomp) * 4 + korient
+        KV[3] = ((sd * KR_LP + lpI) * KR_LP + lxI) * KR_DEP * KR_CMP + depth * KR_CMP + kcomp
+        KV[4] = (((nsig * KR_LN2 + (ln2 + 5)) * KR_LN + lnI) * KR_RC + rc) * 4 + korient
+        KV[5] = ((lnI * KR_DEP + depth) * KR_ORL + orl) * KR_CMP + kcomp
+        KV[6] = (((lpI * KR_LP + lxI) * KR_LN + lnI) * KR_LN2 + (ln2 + 5)) * 4 + korient
+    elif k == K_SIGN:
+        sl = ksgn3(rl) + 1
+        su = ksgn3(ru) + 1
+        sr = ksgn3(rr) + 1
+        sbl = ksgn3(rd) + 1
+        sul = ksgn3(rul) + 1
+        sur = ksgn3(rur) + 1
+        ext = sl * 3 + su
+        KV[0] = sd
+        KV[1] = ((sl * 27 + su * 9 + sr * 3 + sbl) * 3 + sul) * 4 + korient
+        KV[2] = (((lxs + 1) * KR_CMP + kcomp) * 9 + ext) * 4 + korient
+        KV[3] = (((lps + 1) * 9 + sul * 3 + sur) * 9 + ext) * KR_ORL + orl
+        KV[4] = (sd * KR_LN + lnI) * KR_ORL + orl
+        KV[5] = (((ext * 3 + lps + 1) * 3 + lxs + 1) * 9 + sr * 3 + sbl) * 4 + korient
+        KV[6] = (sd * 3 + lps + 1) * 3 + lxs + 1
+    else:
+        me = kabs(H[i])
+        m1 = me
+        if m1 == 0:
+            m1 = 1
+        r = kclamp(kilog2(m1) - b, 1, 8) - 1
+        rel = 0
+        if me:
+            rel = kclamp(kq2log(nsum + 1) - kq2log(me), -8, 8)
+        sh = 0
+        if b > 0:
+            sh = b - 1
+        mb = (me >> sh) & 7
+        ext = r
+        KV[0] = sd * KR_RC * KR_R + r
+        KV[1] = (r * KR_LN + lnI) * 4 + korient
+        KV[2] = (r * KR_REL + rel + 8) * KR_ORL + orl
+        KV[3] = ((sd * KR_R + r) * KR_DEP + depth) * KR_CMP + kcomp
+        KV[4] = ((r * KR_REL + rel + 8) * KR_LP + lpI) * KR_LN2 + ln2 + 5
+        KV[5] = ((r * KR_MB + mb) * KR_LN + lnI) * KR_ORL + orl
+        KV[6] = ((r * KR_REL + rel + 8) * KR_LP + lxI) * KR_CMP + kcomp
+    KV[7] = ((((lnI * KR_LP + lpI) * KR_LP + lxI) * 11 + (depth >> 1)) * KR_EXT + ext) * 4 + korient
+    for j in range(8):
+        KV[j] = KV[j] + k * KPK[j]
+    return kmix((k * 20 + lnI) * 24 + depth, (k * 12 + sd) * 18 + lpI,
+                (k * 64 + orl) * 4 + kcomp, k * 20 + lnI, (k * 18 + lpI) * 18 + lxI, (k * 12 + sd) * 21 + depth)
+
+
+def keventrun(x, y0, b, rl):
+    i0 = kri(x, y0)
+    rw = krw
+    pi = y0 * kw + x
+    sw = 0
+    a = i0 - 2 * rw - 2
+    for k in range(8):
+        for j in range(5):
+            v = H[a + j]
+            if slt(v, 0):
+                sw = sw - v
+            else:
+                sw = sw + v
+        a += rw
+    lw = -7
+    if sw:
+        lw = kq2log(sw) - 2 * b - 2
+        if slt(lw, -6):
+            lw = -6
+        elif sgt(lw, 12):
+            lw = 12
+    lp = -9
+    lx = -9
+    depth = kmbc - b
+    if slt(depth, 0):
+        depth = 0
+    elif sgt(depth, 20):
+        depth = 20
+    orl = korient * 16 + klvl
+    for k in range(4):
+        if khaveP and sgt(KPQ[pi + k * kw], -100):
+            j = kclamp(KPQ[pi + k * kw] + kpqoff - 2 * b, -8, 8)
+            if sgt(j, lp):
+                lp = j
+        if khaveX and sgt(KXQ[pi + k * kw], -100):
+            j = kclamp(KXQ[pi + k * kw] + kxqoff - 2 * b, -8, 8)
+            if sgt(j, lx):
+                lx = j
+    lwI = lw + 7
+    lpI = lp + 9
+    lxI = lx + 9
+    pos = (x == 0) | ((x == kw - 1) << 1) | ((y0 == 0) << 2) | ((y0 + 4 >= kh) << 3)
+    KV[0] = rl * KR_LN + lwI
+    KV[1] = (lwI * KR_LP + lpI) * KR_ORL + orl
+    KV[2] = (lpI * KR_LP + lxI) * KR_DEP + depth
+    KV[3] = ((lwI * KR_DEP + depth) * 8 + rl) * KR_CMP + kcomp
+    KV[4] = (pos * KR_LN + lwI) * KR_ORL + orl
+    KV[5] = ((lwI * KR_DEP + depth) * KR_ORL + orl) * KR_CMP + kcomp
+    KV[6] = (((lpI * KR_LP + lxI) * KR_LN + lwI) * 8 + rl) * 4 + korient
+    KV[7] = ((((lwI * KR_LP + lpI) * KR_LP + lxI) * 11 + (depth >> 1)) * KR_EXT + rl) * 4 + korient
+    for j in range(8):
+        KV[j] = KV[j] + K_RUN * KPK[j]
+    return kmix((K_RUN * 20 + lwI) * 24 + depth, (K_RUN * 12 + rl) * 18 + lpI,
+                (K_RUN * 64 + orl) * 4 + kcomp, K_RUN * 20 + lwI, (K_RUN * 18 + lpI) * 18 + lxI,
+                (K_RUN * 12 + rl) * 21 + depth)
+
+
+def keventmisc(j):
+    c = base(KMISC) + 2 * j
+    bit = decode((H[c] & 65535) ^ 32768)
+    klearn(c, bit)
+    return bit
+
+
+def kgive(ctx, bit):
+    global kns
+    if kns >= kcap:
+        error()
+    M[ksym + kns] = (ctx << 1) | bit
+    kns += 1
+
+
+# ---------------------------------------------------------------- the passes
+
+def kscctx(st, i, stride, excl):
+    """the sign context; KSCX gets the prediction's xor"""
+    global kscx
+    hc = ksg(H[st + i - 1]) + ksg(H[st + i + 1])
+    vc = ksg(H[st + i - stride])
+    if excl == 0:
+        vc = vc + ksg(H[st + i + stride])
+    hc = kclamp(hc, -1, 1)
+    vc = kclamp(vc, -1, 1)
+    kscx = 0
+    if slt(hc, 0) or (hc == 0 and slt(vc, 0)):
+        kscx = 1
+        hc = -hc
+        vc = -vc
+    if hc == 0:
+        return 9 + (vc != 0)
+    return 12 + vc
+
+
+kscx = 0
+
+
+def ksg(f):
+    if f & KSIG:
+        if f & KNEG:
+            return -1
+        return 1
+    return 0
+
+
+def kmakesig(st, i, stride, neg):
+    nb = st + (kw + 2) * (kh + 2)
+    v = KSIG
+    if neg:
+        v = KSIG | KNEG
+    H[st + i] = H[st + i] | v
+    H[nb + i - stride - 1] = H[nb + i - stride - 1] | KSE_
+    H[nb + i - stride] = H[nb + i - stride] | KS_
+    H[nb + i - stride + 1] = H[nb + i - stride + 1] | KSW_
+    H[nb + i - 1] = H[nb + i - 1] | KE_
+    H[nb + i + 1] = H[nb + i + 1] | KW_
+    H[nb + i + stride - 1] = H[nb + i + stride - 1] | KNE_
+    H[nb + i + stride] = H[nb + i + stride] | KN_
+    H[nb + i + stride + 1] = H[nb + i + stride + 1] | KNW_
+
+
+def ksignstep(st, i, stride, excl, x, y, b, raw):
+    cx = kscctx(st, i, stride, excl)
+    xr = kscx
+    sd = 10
+    if raw == 0:
+        sd = (cx - 9) * 2 + xr
+    else:
+        xr = 0
+    neg = kevent(K_SIGN, x, y, b, sd, 0)
+    if raw:
+        kgive(19, neg)
+    else:
+        kgive(cx, neg ^ xr)
+    kmakesig(st, i, stride, neg)
+    v = 1 << b
+    if b > 0:
+        v = v | (1 << (b - 1))
+    if neg:
+        v = -v
+    H[kri(x, y)] = v
+
+
+def kpassspp(st, zc, causal, b, raw):
+    stride = kw + 2
+    nb = st + stride * (kh + 2)
+    y0 = 0
+    while y0 < kh:
+        y1 = y0 + 4
+        if y1 > kh:
+            y1 = kh
+        for x in range(kw):
+            i = (y0 + 1) * stride + x + 1
+            y = y0
+            while y < y1:
+                if (H[st + i] & KSIG) == 0:
+                    mk = H[nb + i]
+                    last = causal and (y & 3) == 3
+                    if last:
+                        mk = mk & ~KSOUTH
+                    if mk:
+                        H[st + i] = H[st + i] | KPIV
+                        cx = H[zc + mk]
+                        bit = 0
+                        if raw:
+                            bit = kevent(K_SIGP, x, y, b, 9, 0)
+                            kgive(19, bit)
+                        else:
+                            bit = kevent(K_SIGP, x, y, b, cx, 0)
+                            kgive(cx, bit)
+                        if bit:
+                            ksignstep(st, i, stride, last, x, y, b, raw)
+                y += 1
+                i += stride
+        y0 += 4
+
+
+def kpassmrp(st, causal, b, raw):
+    stride = kw + 2
+    nb = st + stride * (kh + 2)
+    half = 0
+    if b > 0:
+        half = 1 << (b - 1)
+    y0 = 0
+    while y0 < kh:
+        y1 = y0 + 4
+        if y1 > kh:
+            y1 = kh
+        for x in range(kw):
+            i = (y0 + 1) * stride + x + 1
+            y = y0
+            while y < y1:
+                if (H[st + i] & (KSIG | KPIV)) == KSIG:
+                    mk = H[nb + i]
+                    if causal and (y & 3) == 3:
+                        mk = mk & ~KSOUTH
+                    cx = 14
+                    if H[st + i] & KREF:
+                        cx = 16
+                    elif mk:
+                        cx = 15
+                    if raw:
+                        bit = kevent(K_REF, x, y, b, 3, 0)
+                        kgive(19, bit)
+                    else:
+                        bit = kevent(K_REF, x, y, b, cx - 14, 0)
+                        kgive(cx, bit)
+                    H[st + i] = H[st + i] | KREF
+                    a = kri(x, y)
+                    v = H[a]
+                    if slt(v, 0):
+                        if bit:
+                            v = v - half
+                        else:
+                            v = v + half
+                    elif bit:
+                        v = v + half
+                    else:
+                        v = v - half
+                    H[a] = v
+                y += 1
+                i += stride
+        y0 += 4
+
+
+def kpasscup(st, zc, causal, segmark, b):
+    stride = kw + 2
+    nb = st + stride * (kh + 2)
+    y0 = 0
+    while y0 < kh:
+        y1 = y0 + 4
+        if y1 > kh:
+            y1 = kh
+        rl = 0
+        for x in range(kw):
+            i0 = (y0 + 1) * stride + x + 1
+            rc = 0
+            y = y0
+            m3 = 255
+            if causal:
+                m3 = ~KSOUTH
+            run = 0
+            if y1 - y0 == 4:
+                if (H[st + i0] | H[st + i0 + stride] | H[st + i0 + 2 * stride] |
+                        (H[st + i0 + 3 * stride] & (KSIG | KPIV))) == 0:
+                    if (H[nb + i0] | H[nb + i0 + stride] | H[nb + i0 + 2 * stride] |
+                            (H[nb + i0 + 3 * stride] & m3)) == 0:
+                        run = 1
+            if run:
+                rq = 7
+                if rl < 1:
+                    rq = 0
+                elif rl < 2:
+                    rq = 1
+                elif rl < 4:
+                    rq = 2
+                elif rl < 8:
+                    rq = 3
+                elif rl < 16:
+                    rq = 4
+                elif rl < 32:
+                    rq = 5
+                elif rl < 64:
+                    rq = 6
+                r = 4
+                if keventrun(x, y0, b, rq):
+                    r = 3
+                    for k in range(3):
+                        if kevent(K_SIGC, x, y0 + k, b, 0, 1):
+                            r = k
+                            break
+                kgive(17, r < 4)
+                if r < 4:
+                    kgive(18, r >> 1)
+                    kgive(18, r & 1)
+                if r == 4:
+                    rl += 1
+                    continue
+                rl = 0
+                y = y0 + r
+                ksignstep(st, i0 + r * stride, stride, causal and (y & 3) == 3, x, y, b, 0)
+                y += 1
+                rc = 2
+            if rc == 0:
+                rl = 0
+            i = i0 + (y - y0) * stride
+            while y < y1:
+                if (H[st + i] & (KSIG | KPIV)) == 0:
+                    mk = H[nb + i]
+                    last = causal and (y & 3) == 3
+                    if last:
+                        mk = mk & ~KSOUTH
+                    cx = H[zc + mk]
+                    bit = kevent(K_SIGC, x, y, b, cx, rc)
+                    kgive(cx, bit)
+                    if bit:
+                        ksignstep(st, i, stride, last, x, y, b, 0)
+                y += 1
+                i += stride
+        y0 += 4
+    for y in range(kh):
+        p = st + (y + 1) * stride + 1
+        for x in range(kw):
+            H[p + x] = H[p + x] & ~KPIV
+    if segmark:
+        for k in range(4):
+            kgive(18, keventmisc(k))
+
+
+def kbandmap(b):
+    """the M address of band b's map, or 0"""
+    if b == 4294967295 or b >= knb or kmapsize == 0:
+        return 0
+    g = kbands + b * KB
+    mp = H[g + B_MAP]
+    if mp == 4294967295 or H[g + B_W] == 0 or H[g + B_H] == 0 or mp + H[g + B_W] * H[g + B_H] > kmapsize:
+        return 0
+    return kmaps + mp
+
+
+def kmtile():
+    """pjaj2km_tile: the maps of components 0 and 1 zero"""
+    global kzcomp
+    kzcomp = 4294967295
+    for b in range(knb):
+        g = kbands + b * KB
+        if H[g + B_COMP] <= 1:
+            mp = kbandmap(b)
+            if mp:
+                for k in range(H[g + B_W] * H[g + B_H]):
+                    M[mp + k] = 0
+
+
+def kmcb(b, x0, y0, w, h, sty, npasses, zbp, sym, cap):
+    """pjaj2km_cb, decoding: the code-block's decisions into M[sym ..],
+    KPASSEND[k] how many after pass k; their count"""
+    global kw, kh, krw, korient, kmbc, klvl, kcomp, ksym, kns, kcap, kzcomp, khaveP, khaveX, kpqoff, kxqoff
+    if b >= knb or w < 1 or h < 1 or w > 1024 or h > 1024 or w * h > KCBMAX or npasses > 255:
+        error()
+    g = kbands + b * KB
+    gw = H[g + B_W]
+    gh = H[g + B_H]
+    kw = w
+    kh = h
+    krw = w + 4
+    korient = H[g + B_ORIENT]
+    kmbc = H[g + B_MB]
+    klvl = kclamp(H[g + B_NRES] - H[g + B_RES], 0, 15)
+    kcomp = kclamp(H[g + B_COMP], 0, 3)
+    ksym = sym
+    kns = 0
+    kcap = cap
+    mp = kbandmap(b)
+    if mp and (x0 + w > gw or y0 + h > gh):
+        mp = 0
+    if mp and H[g + B_COMP] > 1 and H[g + B_COMP] != kzcomp:
+        kzcomp = H[g + B_COMP]
+        for k in range(knb):
+            if H[kbands + k * KB + B_COMP] == kzcomp:
+                q = kbandmap(k)
+                if q:
+                    for j in range(H[kbands + k * KB + B_W] * H[kbands + k * KB + B_H]):
+                        M[q + j] = 0
+    for y in range(h + 4):
+        a = base(KR) + y * krw
+        gy = y0 + y - 2
+        for x in range(w + 4):
+            gx = x0 + x - 2
+            v = 0
+            if mp and (x < 2 or y < 2 or x >= w + 2 or y >= h + 2) and slt(gx, gw) and slt(gy, gh) and \
+                    sge(gx, 0) and sge(gy, 0):
+                v = kmapval(M[mp + gy * gw + gx])
+            H[a + x] = v
+    pmap = 0
+    xm0 = 0
+    xm1 = 0
+    if mp:
+        pmap = kbandmap(H[g + B_COARSER])
+        if H[g + B_COMP] > 0:
+            xm0 = kbandmap(H[g + B_CROSS0])
+        if H[g + B_COMP] > 1:
+            xm1 = kbandmap(H[g + B_CROSS1])
+    khaveP = pmap != 0
+    khaveX = xm0 != 0
+    if pmap:
+        pg = kbands + H[g + B_COARSER] * KB
+        pw = H[pg + B_W]
+        ph = H[pg + B_H]
+        for x in range(w):
+            KCOLA[x] = ((x0 + x) * pw) // gw
+        for y in range(h):
+            KROWA[y] = ((y0 + y) * ph) // gh
+        kpqoff = 2 * kmbc - 2 * H[pg + B_MB] - 4
+        for y in range(h):
+            py = KROWA[y]
+            pu = py
+            if py > 0:
+                pu = py - 1
+            pd = py
+            if py + 1 < ph:
+                pd = py + 1
+            for x in range(w):
+                px = KCOLA[x]
+                pl = px
+                if px > 0:
+                    pl = px - 1
+                pr = px
+                if px + 1 < pw:
+                    pr = px + 1
+                pv = kmapval(M[pmap + py * pw + px])
+                s = 2 * kabs(pv) + kabs(kmapval(M[pmap + py * pw + pl])) + kabs(kmapval(M[pmap + py * pw + pr])) + \
+                    kabs(kmapval(M[pmap + pu * pw + px])) + kabs(kmapval(M[pmap + pd * pw + px]))
+                KPS[y * w + x] = ksgn3(pv)
+                q = -100
+                if s:
+                    q = kq2log(s)
+                KPQ[y * w + x] = q
+    if xm0:
+        g0 = kbands + H[g + B_CROSS0] * KB
+        g0w = H[g0 + B_W]
+        g0h = H[g0 + B_H]
+        for x in range(w):
+            KCOLB[x] = ((x0 + x) * g0w) // gw
+        for y in range(h):
+            KROWB[y] = ((y0 + y) * g0h) // gh
+        g1w = 0
+        if xm1:
+            g1 = kbands + H[g + B_CROSS1] * KB
+            g1w = H[g1 + B_W]
+            g1h = H[g1 + B_H]
+            for x in range(w):
+                KCOLC[x] = ((x0 + x) * g1w) // gw
+            for y in range(h):
+                KROWC[y] = ((y0 + y) * g1h) // gh
+        kxqoff = 2 * kmbc - 2 * H[g0 + B_MB] - 2
+        for y in range(h):
+            for x in range(w):
+                v0 = kmapval(M[xm0 + KROWB[y] * g0w + KCOLB[x]])
+                s = 2 * kabs(v0)
+                if xm1:
+                    s = s + 2 * kabs(kmapval(M[xm1 + KROWC[y] * g1w + KCOLC[x]]))
+                KXS[y * w + x] = ksgn3(v0)
+                q = -100
+                if s:
+                    q = kq2log(s)
+                KXQ[y * w + x] = q
+    # run_cb
+    top = kmbc - zbp
+    causal = (sty & 8) != 0
+    st = base(KSTN)
+    for i in range(2 * (w + 2) * (h + 2)):
+        H[st + i] = 0
+    zc = base(KZC) + korient * 256
+    for k in range(npasses):
+        t = 2
+        if k > 0:
+            t = (k - 1) % 3
+        raw = (sty & 1) and k >= 10 and t < 2
+        bb = kclamp(top - (k + 2) // 3, 0, 30)
+        if t == 0:
+            kpassspp(st, zc, causal, bb, raw)
+        elif t == 1:
+            kpassmrp(st, causal, bb, raw)
+        else:
+            kpasscup(st, zc, causal, (sty & 32) != 0, bb)
+        KPASSEND[k] = kns
+    if mp:
+        for y in range(h):
+            a = kri(0, y)
+            for x in range(w):
+                M[mp + (y0 + y) * gw + x0 + x] = kmapcode(H[a + x])
+    return kns
