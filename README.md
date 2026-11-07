@@ -36,14 +36,25 @@ comes back byte for byte, and nothing is written unless it verified.
 | [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
 | **PJA** | JPEG, JPEG-LS and JPEG 2000 | [packJPG](https://github.com/YadeWira/packJPG) |
 
+## What it handles
+
+- **JPEG**: baseline, extended and progressive, Huffman or arithmetic, 8
+  and 12 bits, lossless JPEG, the JPEGs inside a JPEG (thumbnails, MPO,
+  Ultra HDR), and the oddities real encoders leave.
+- **JPEG-LS**: 2 to 16 bits, lossless and near-lossless.
+- **JPEG 2000** (since 0.9.5): JP2, JPX, JPM, Motion JPEG 2000 and raw
+  codestreams, HTJ2K since 0.9.6; each codestream rebuilt byte for byte.
+
+Anything else goes through as bytes, and `pja a` says why
+([details][wHandles]).
+
 ## Against other compressors
 
-One file at a time: [packJPG](https://github.com/YadeWira/packJPG) 5.0g and
-JPEG XL's lossless transcoding of a JPEG (`cjxl`/`djxl` 0.11.2), which both
-give the JPEG back byte for byte too, Lepton and brunsli, against `pja`
-0.9.6. Measured on 07/11/2026 ([how][wComp]): each set's whole output against its input, every
-file decompressed and compared with the original; a file a tool does not
-take, or that does not come back the same, counts at its own size.
+One file at a time, against the other recompressors that give a JPEG back
+byte for byte: [packJPG](https://github.com/YadeWira/packJPG) 5.0g, JPEG
+XL's lossless transcoding (0.11.2), Lepton and brunsli. Each set's whole
+output against its input; a file a tool does not take counts at its own
+size ([how, and the details][wComp]).
 
 | set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
 |---|---|---|---|---|---|---|---|
@@ -56,18 +67,8 @@ take, or that does not come back the same, counts at its own size.
 | 12-bit JPEG from camera RAWs | 12 | 27.7 MB | takes none | takes none | takes none | takes none | **84.80%** |
 | lossless JPEG | 36 | 390 KB | takes none | takes none | takes none | takes none | **96.04%** |
 
-And how fast, on the 151 photos (two Xeon E5-2697A v4, 64 threads, with
-other work running). "8 at once": `pja -th 8`; the others, 8 processes of
-one file each, best of three runs for one thread (Lepton and brunsli:
-05/11/2026's runs). PJA, packJPG and Lepton verify what they write; `cjxl`
-and `cbrunsli` do not. PJA also flushes each file it writes to the disk
-before giving it its name (since 0.9.5: a power cut leaves the old file
-or the whole new one); `--no-sync` skips that, about 12% off its
-one-thread extraction here. Since 0.9.7 the flush runs beside the next
-file's work, which takes back most of it (`x -th 1` of these photos
-40.7 -> 36.2 s). Lepton (Dropbox, commit `f34c7f4`,
-`-singlethread -allowprogressive`) and brunsli (Google, commit `c18b962`)
-were built from their repositories.
+Speed on the 151 photos (two Xeon E5-2697A v4; "8 at once": `pja -th 8`,
+the others 8 processes):
 
 | | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
 |---|---|---|---|---|---|
@@ -76,14 +77,10 @@ were built from their repositories.
 | compress, 8 at once | 10.3 s | 4.1 s | 5.8 s | **1.9 s** | 9.0 s |
 | decompress, 8 at once | 5.2 s | 1.5 s | 2.2 s | **1.4 s** | 5.1 s |
 
-PJA is the smallest on every set and the only one that takes every file.
-On photos it is 5.5% smaller than packJPG, as fast on one thread and 13%
-faster to compress at 8 at once; 7.4% smaller than brunsli, the fastest
-(3.6 to 5.1 times PJA's speed); 9.4% smaller than Lepton (1.6 to 2.4
-times as fast, and it leaves 15 of the 151 photos as they are); 9.9%
-smaller than JPEG XL (2.2 to 3.5 times as fast). None of
-the four takes 12-bit or lossless JPEG, and only packJPG takes
-arithmetic-coded ones.
+PJA is the smallest on every set and the only one that takes every file;
+none of the others takes 12-bit or lossless JPEG, and only packJPG takes
+arithmetic-coded ones. brunsli, JPEG XL and Lepton are faster, and neither
+of the first two verifies what it writes.
 
 ### JPEG 2000
 
@@ -104,16 +101,10 @@ byte for byte:
 | zpaq -m5 | 99.56% | 0.44% (18 min) |
 | **PJA 0.9.6** | **91.58%** | **8.42%** |
 
-By kind: scanned 1-bit book pages about 70% smaller (the pixels through a
-bitonal model, better than JBIG1); book and map scans 9 to 17%; solar,
-Sentinel-2 and medical images 6 to 7%. It is slower than on JPEG (about
-0.1-0.25 MB/s per thread to compress); since 0.9.6 a set like this one
-compresses in less than half the time on 8 threads (303 s → 136 s).
-
-HTJ2K (High-Throughput JPEG 2000, since 0.9.6): 716 real codestreams
-(460 MB of Netflix cinema frames, DICOM from public PACS and test sets,
-photos) come out **11.2% smaller**; lossless and lossy photos made with
-OpenJPH and Grok, 27%.
+Scanned 1-bit book pages come out about 70% smaller, other scans 9 to 17%,
+satellite and medical images 6 to 7%. HTJ2K (since 0.9.6): 11.2% smaller
+on 716 real codestreams, 27% on photos. Slower than JPEG: about 0.1-0.25
+MB/s per thread to compress.
 
 ## Safe by design
 
@@ -141,22 +132,11 @@ hash catches accidents, not tampering).
 
 ## Against archivers
 
-One archive per set, 8 threads, on 07/11/2026; every file extracted and
-compared, and every one came back. Times are to write the archive / to
-extract it.
-
-- **7-Zip + PJA**: 7-Zip 25.01 with PJA 0.9.6's plugin, `7z a -mmt=8
-  -m0=PJA -m1=LZMA2` ([below](#in-7-zip-and-7-zip-zstd)).
-- **zpaq-std + PJA**: [zpaq-std](https://github.com/YadeWira/zpaq-std)
-  2.6.0 with the PJA 0.9.6 plugin it ships, `zpaq-std a set.zpaq FILES
-  -sa -t8` (stream version 7, the command's model; JPEG 2000 through
-  `pja2k`); it keeps the files a
-  codec takes in one block, and its z codecs put the PJA streams of a
-  block's files through an LZ77 that reaches back into the files before.
-- **Aqueous**: [Aqueous](https://github.com/lifthrasiir/aqueous) (`aqr`,
-  commit `30f9a4e`), `aqr -c -T 8 -l high`.
-- For reference, 7-Zip (`7z a -mmt=8`, LZMA2) and zpaq-std (`-t8`, its
-  default method) without PJA.
+One archive per set, 8 threads; every file extracted and compared. Size,
+then the time to write / extract. 7-Zip + PJA: 7-Zip 25.01 with PJA
+0.9.6's plugin, `-m0=PJA -m1=LZMA2`; zpaq-std + PJA: zpaq-std 2.6.0 with
+the plugin it ships, `-sa`; [Aqueous](https://github.com/lifthrasiir/aqueous)
+`-l high`; 7-Zip and zpaq-std without PJA for reference.
 
 | set | 7-Zip + PJA | zpaq-std + PJA | Aqueous | 7-Zip | zpaq-std |
 |---|---|---|---|---|---|
@@ -170,30 +150,12 @@ extract it.
 | lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.08%**, 0.3 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 97.82%, 0.0 / 0.0 s |
 | JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 12.4 / 0.7 s | **92.51%**, 126.3 / 94.5 s | 100.00%, 1.2 / 0.1 s | 99.82%, 12.7 / 0.5 s | 99.97%, 0.6 / 0.5 s |
 
-7-Zip + PJA is smaller than Aqueous on every JPEG set, and the smallest of
-all on every one but the lossless one; zpaq-std + PJA is smaller than Aqueous
-on all but the small 12-bit one, and the only archiver here that takes
-JPEG 2000: `pja2k` saves 7.5% on 113 real codestreams (the `pja` command
-alone, with its pixel modes, 8.4%; 7-Zip's plugin does not take JPEG 2000
-yet), at about 1.2 to 1.6 MB/s on 8 threads. The small 12-bit set is 10 small files (8 made with
-cjpeg, 2 from the sample corpus), 83 KB in all: each zpaq-std block
-carries pjax78's ZPAQL decoder (33 KB), more than PJA saves on so few
-bytes, so zpaq-std rightly stores them its usual way (and two are
-arithmetic-coded 12-bit, which no plugin codec takes). 12-bit files of
-real size pay the decoder back: on 12 made from camera RAWs (NEF and DNG
-from the sample corpus, developed to 16 bits, about 2 to 5 megapixels,
-cjpeg 3.0.4 `-precision 12 -quality 90`, baseline, optimized and
-progressive), 350 KB to 4 MB each, zpaq-std + PJA is 0.18 points behind
-7-Zip + PJA, and nothing else takes them. On the arithmetic-coded and
-generated sets,
-whose files are variants of a few images, both keep each image about
-once: 16 to 18% of the input, where Aqueous writes 34 to 86%. zpaq-std +
-PJA writes stream version 7, as the command does, and keeps a codec's
-files in one block: on JPEG it is 0.2 to 1.5 points behind 7-Zip + PJA,
-1.8 to 3.2 times slower to write and up to 1.7 times slower to extract; what it spends
-buys an archive any zpaq can extract without the plugin, through the
-ZPAQL decoder each block carries. Aqueous is 3 to 18 times faster than
-7-Zip + PJA to write.
+7-Zip + PJA is the smallest on every JPEG set but the lossless one.
+zpaq-std + PJA is a little larger and slower, but any zpaq can extract its
+archives without the plugin, and it is the only one here that takes JPEG
+2000. On 10 small 12-bit files the ZPAQL decoder each block carries costs
+more than PJA saves, so zpaq-std stores them as usual. Why each number is
+what it is: [the benchmarks page][wComp].
 
 ## In 7-Zip and 7-Zip-zstd
 
@@ -214,51 +176,11 @@ byte that is not a JPEG (other files, EXIF) goes into the archive as it is.
 Extracting needs nothing but the plugin.
 
 PJA goes first in the chain as a filter: it recompresses the JPEG and
-JPEG-LS files it finds in the solid block and passes every other byte on
-to LZMA2 or zstd, which match what PJA leaves (EXIF, other files); its
-own data goes into the archive by a second stream, with what repeats
-between files taken out (one image saved several times, progressive or
-not, with or without restarts, gives the same coefficients). Extracting
-needs the plugin too ([doc/LIBRARY.md](doc/LIBRARY.md)); its sizes and
-times are in [the table above](#against-archivers).
-
-Since 0.5.0 the filter also takes the JPEGs that FlashPix, Picture It's
-and PhotoDraw's `.mix` and TIFF keep as tiles without their tables: 34
-such files of the sample corpus in one archive, 71.92% with 0.4.0 (no
-better than plain LZMA2), 59.55% now ([doc/LIBRARY.md](doc/LIBRARY.md)).
-Since 0.5.2 it gives the standard tables to those whose container keeps
-none (Konica's Q-Photo files: 27% smaller in an archive of their own),
-and the command and the filter repair a scan that ends early, a download
-cut short included (a photo cut at 99%: 85.9% as bytes, 61.1% now).
-
-It handles baseline, extended and progressive JPEG (Huffman or arithmetic,
-8 and 12 bits), the JPEGs inside a JPEG (thumbnails, MPO, Ultra HDR),
-lossless JPEG, and JPEG-LS, along with the oddities real encoders leave.
-Anything else goes through as bytes, and `pja a` says why
-([details][wHandles]).
-
-**JPEG 2000** (JP2, JPX, JPM, Motion JPEG 2000, JPH and raw codestreams:
-`.jp2`, `.j2k`, `.j2c`, `.jpx`, `.mj2`...) is recompressed too since 0.9.5:
-each Part 1 codestream is taken apart, its code-blocks' decisions coded
-again with a context-mixing model, and put back together byte for byte,
-checked before anything is written. A lossless codestream may instead be
-kept as its pixels, through a pixel model, when that is smaller: bitonal
-(1-bit) book pages come out **more than two thirds smaller** (70.6% on the
-Internet Archive's). On 113 real-world codestreams (book
-pages, maps, solar and satellite images, DICOM; 150 MB) the codestreams come out
-**8.4% smaller**, 17% on the book pages; on 30 files from seven encoders,
-11.7%. It is slower than for JPEG (about 0.1 to 0.25 MB/s to compress and
-0.2 to 0.5 MB/s to extract on one thread; a tiled codestream, the two
-modes of a lossless one, and a file's frames or layers use several). Since 0.9.6 **HTJ2K** codestreams too (`.jph`, `.jhc`, DICOM
-frames): each HT code-block's segments are decoded and written again
-exactly as their encoder ended them (OpenJPH, Grok, OpenHTJ2K, Kakadu), its
-values through a model, or a lossless codestream's pixels through the
-pixel models: **11% smaller** on 716 real HTJ2K codestreams (460 MB of
-cinema frames, DICOM and photos), 27% on lossless and lossy photos.
-Part 2 codestreams are kept as bytes. Since 0.9.6 zpaq-std has a JPEG 2000
-codec too, `pja2k` (Part 1 codestreams, their decisions through the model;
-its ZPAQL decoder lets any zpaq extract them without the plugin). The 7-Zip
-plugin leaves JPEG 2000 files as they are, for now ([details](doc/CODEC.md)).
+JPEG-LS files in the solid block and passes every other byte on to LZMA2
+or zstd; what repeats between files (one image saved several times) is
+kept once. Extracting needs the plugin too. JPEG 2000 files go through as
+they are, for now ([the library and 7-Zip][wLib],
+[doc/LIBRARY.md](doc/LIBRARY.md)).
 
 ## Install
 
@@ -282,18 +204,12 @@ The command's manual is [doc/CLI.md](doc/CLI.md).
 pja report photo.jpg -o report.txt   # what happened, on which machine
 ```
 
-It writes a plain-text report and prints a link that opens a [new
-issue][issues] with it filled in: add what you ran and what you expected.
-The report has PJA's version and build, the system, the processor and its
-SIMD path, the command line, and for the file its size, hash, structure
-(markers, frame, scans; for JPEG 2000 the boxes, each codestream's SIZ, COD
-and tiles, and its mode) and what PJA does with it. It does **not** have the
-image (no pixels), the contents of its metadata (EXIF, XMP, ICC, comments,
-JPEG 2000's XML and UUID boxes: only their sizes), or folder names. The file itself is attached only if you
-choose to: `--with-file` puts a copy beside the report. `pja info FILE`
-shows the same structure, `pja selftest` checks the binary on every SIMD
-path, and a run that hits a bug says so and exits with 3
-([details][wBugs], [doc/CLI.md](doc/CLI.md#checking-and-reporting)).
+It writes a plain-text report (PJA's build, the system, the command line,
+and the file's size, hash and structure, but no pixels, no metadata
+contents and no folder names) and prints a link that opens a [new
+issue][issues] with it filled in. `--with-file` puts a copy of the file
+beside it, to attach if you choose to ([details][wBugs],
+[doc/CLI.md](doc/CLI.md#checking-and-reporting)).
 
 ## More
 
