@@ -63,7 +63,9 @@ one file each, best of three runs for one thread (Lepton and brunsli:
 and `cbrunsli` do not. PJA also flushes each file it writes to the disk
 before giving it its name (since 0.9.5: a power cut leaves the old file
 or the whole new one); `--no-sync` skips that, about 12% off its
-one-thread extraction here. Lepton (Dropbox, commit `f34c7f4`,
+one-thread extraction here. Since 0.9.7 the flush runs beside the next
+file's work, which takes back most of it (`x -th 1` of these photos
+40.7 -> 36.2 s). Lepton (Dropbox, commit `f34c7f4`,
 `-singlethread -allowprogressive`) and brunsli (Google, commit `c18b962`)
 were built from their repositories.
 
