@@ -40,12 +40,12 @@ comes back byte for byte, and nothing is written unless it verified.
 
 One file at a time: [packJPG](https://github.com/YadeWira/packJPG) 5.0g and
 JPEG XL's lossless transcoding of a JPEG (`cjxl`/`djxl` 0.11.2), which both
-give the JPEG back byte for byte too, against `pja` 0.6.2. Measured on
-05/11/2026 ([how][wComp]): each set's whole output against its input, every
+give the JPEG back byte for byte too, Lepton and brunsli, against `pja`
+0.9.6. Measured on 07/11/2026 ([how][wComp]): each set's whole output against its input, every
 file decompressed and compared with the original; a file a tool does not
 take, or that does not come back the same, counts at its own size.
 
-| set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.7.0 |
+| set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
 |---|---|---|---|---|---|---|---|
 | photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 79.80% | 79.42% (takes 136) | 77.98% | **72.60%** |
 | corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 86.03% (takes 56) | 85.11% (takes 55) | 75.36% (takes 64) | **70.39%** |
@@ -58,23 +58,28 @@ take, or that does not come back the same, counts at its own size.
 
 And how fast, on the 151 photos (two Xeon E5-2697A v4, 64 threads, with
 other work running). "8 at once": `pja -th 8`; the others, 8 processes of
-one file each, best of three runs for one thread. PJA, packJPG and Lepton
-verify what they write; `cjxl` and `cbrunsli` do not. Lepton (Dropbox,
-commit `f34c7f4`, `-singlethread -allowprogressive`) and brunsli (Google,
-commit `c18b962`) were built from their repositories.
+one file each, best of three runs for one thread (Lepton and brunsli:
+05/11/2026's runs). PJA, packJPG and Lepton verify what they write; `cjxl`
+and `cbrunsli` do not. PJA also flushes each file it writes to the disk
+before giving it its name (since 0.9.5: a power cut leaves the old file
+or the whole new one); `--no-sync` skips that, about 12% off its
+one-thread extraction here. Lepton (Dropbox, commit `f34c7f4`,
+`-singlethread -allowprogressive`) and brunsli (Google, commit `c18b962`)
+were built from their repositories.
 
-| | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.7.0 |
+| | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
 |---|---|---|---|---|---|
-| compress, 1 thread | 72.2 s | 27.0 s | 40.8 s | **13.3 s** | 66.2 s |
-| decompress, 1 thread | 37.3 s | 10.9 s | 15.3 s | **9.0 s** | 32.5 s |
-| compress, 8 at once | 10.3 s | 4.2 s | 5.8 s | **1.9 s** | 9.4 s |
-| decompress, 8 at once | 5.3 s | 1.5 s | 2.2 s | **1.4 s** | 4.7 s |
+| compress, 1 thread | 68.1 s | 26.7 s | 40.8 s | **13.3 s** | 68.3 s |
+| decompress, 1 thread | 34.9 s | 10.7 s | 15.3 s | **9.0 s** | 37.0 s |
+| compress, 8 at once | 10.3 s | 4.1 s | 5.8 s | **1.9 s** | 9.0 s |
+| decompress, 8 at once | 5.2 s | 1.5 s | 2.2 s | **1.4 s** | 5.1 s |
 
 PJA is the smallest on every set and the only one that takes every file.
-On photos it is 5.5% smaller than packJPG and 9 to 15% faster; 7.4% smaller
-than brunsli, the fastest (3.4 to 5 times PJA's speed); 9.4% smaller than
-Lepton (1.6 to 2.1 times as fast, and it leaves 15 of the 151 photos as
-they are); 9.9% smaller than JPEG XL (2.2 to 3.1 times as fast). None of
+On photos it is 5.5% smaller than packJPG, as fast on one thread and 13%
+faster to compress at 8 at once; 7.4% smaller than brunsli, the fastest
+(3.6 to 5.1 times PJA's speed); 9.4% smaller than Lepton (1.6 to 2.4
+times as fast, and it leaves 15 of the 151 photos as they are); 9.9%
+smaller than JPEG XL (2.2 to 3.5 times as fast). None of
 the four takes 12-bit or lossless JPEG, and only packJPG takes
 arithmetic-coded ones.
 
@@ -134,15 +139,16 @@ hash catches accidents, not tampering).
 
 ## Against archivers
 
-One archive per set, 8 threads, on 05/11/2026; every file extracted and
+One archive per set, 8 threads, on 07/11/2026; every file extracted and
 compared, and every one came back. Times are to write the archive / to
 extract it.
 
-- **7-Zip + PJA**: 7-Zip 25.01 with PJA 0.7.0's plugin, `7z a -mmt=8
+- **7-Zip + PJA**: 7-Zip 25.01 with PJA 0.9.6's plugin, `7z a -mmt=8
   -m0=PJA -m1=LZMA2` ([below](#in-7-zip-and-7-zip-zstd)).
 - **zpaq-std + PJA**: [zpaq-std](https://github.com/YadeWira/zpaq-std)
-  2.3.0 with the PJA 0.6.4 plugin it ships, `zpaq-std a set.zpaq FILES
-  -sa -t8` (stream version 7, the command's model); it keeps the files a
+  2.6.0 with the PJA 0.9.6 plugin it ships, `zpaq-std a set.zpaq FILES
+  -sa -t8` (stream version 7, the command's model; JPEG 2000 through
+  `pja2k`); it keeps the files a
   codec takes in one block, and its z codecs put the PJA streams of a
   block's files through an LZ77 that reaches back into the files before.
 - **Aqueous**: [Aqueous](https://github.com/lifthrasiir/aqueous) (`aqr`,
@@ -152,36 +158,40 @@ extract it.
 
 | set | 7-Zip + PJA | zpaq-std + PJA | Aqueous | 7-Zip | zpaq-std |
 |---|---|---|---|---|---|
-| photos (151) | **72.57%**, 9.6 / 4.7 s | 72.88%, 16.0 / 5.4 s | 80.46%, 2.8 / 0.7 s | 97.04%, 6.8 / 1.0 s | 97.84%, 0.6 / 0.4 s |
-| corpus (78) | **66.86%**, 8.0 / 3.5 s | 68.41%, 16.3 / 3.0 s | 71.98%, 1.5 / 0.3 s | 82.24%, 2.8 / 0.4 s | 85.28%, 0.4 / 0.3 s |
-| MPO (6) | **73.39%**, 4.6 / 2.2 s | 73.76%, 13.9 / 4.0 s | 78.94%, 1.3 / 0.4 s | 99.57%, 3.7 / 0.9 s | 100.04%, 0.3 / 0.2 s |
-| arithmetic-coded (244) | **17.25%**, 1.7 / 0.8 s | 18.14%, 5.0 / 0.9 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.5 / 0.1 s | 75.43%, 0.1 / 0.1 s |
-| generated (640) | **16.40%**, 2.8 / 1.4 s | 16.96%, 5.8 / 1.6 s | 33.98%, 0.7 / 0.3 s | 62.85%, 1.2 / 0.4 s | 67.22%, 0.4 / 0.3 s |
-| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 95.81%, 0.3 / 0.0 s | 92.63%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
-| 12-bit from RAWs (12) | **84.80%**, 3.7 / 2.1 s | 84.99%, 11.7 / 3.1 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.4 / 0.1 s | 100.07%, 0.3 / 0.2 s |
-| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.98%**, 0.4 / 0.2 s | 96.63%, 0.0 / 0.0 s | 95.64%, 0.0 / 0.0 s | 97.82%, 0.0 / 0.0 s |
+| photos (151) | **72.57%**, 9.3 / 4.7 s | 72.87%, 16.3 / 5.5 s | 80.46%, 2.3 / 0.7 s | 97.04%, 6.9 / 1.1 s | 97.84%, 0.6 / 0.4 s |
+| corpus (78) | **66.86%**, 6.1 / 2.9 s | 68.36%, 12.9 / 2.7 s | 71.98%, 1.5 / 0.4 s | 82.24%, 2.7 / 0.5 s | 85.28%, 0.4 / 0.3 s |
+| MPO (6) | **73.39%**, 4.6 / 2.3 s | 73.75%, 13.8 / 3.9 s | 78.95%, 1.4 / 0.4 s | 99.57%, 3.6 / 0.8 s | 100.04%, 0.3 / 0.2 s |
+| arithmetic-coded (244) | **17.25%**, 1.7 / 0.8 s | 18.10%, 5.0 / 0.9 s | 85.74%, 0.2 / 0.0 s | 74.49%, 0.6 / 0.1 s | 75.43%, 0.1 / 0.1 s |
+| generated (640) | **16.40%**, 2.7 / 1.4 s | 16.94%, 5.8 / 1.6 s | 33.97%, 0.7 / 0.3 s | 62.85%, 1.3 / 0.4 s | 67.22%, 0.4 / 0.3 s |
+| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 95.81%, 0.2 / 0.0 s | 92.68%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
+| 12-bit from RAWs (12) | **84.80%**, 3.6 / 2.1 s | 84.98%, 11.5 / 2.9 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.3 / 0.1 s | 100.07%, 0.3 / 0.2 s |
+| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.08%**, 0.3 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 97.82%, 0.0 / 0.0 s |
+| JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 12.4 / 0.7 s | **92.51%**, 126.3 / 94.5 s | 100.00%, 1.2 / 0.1 s | 99.82%, 12.7 / 0.5 s | 99.97%, 0.6 / 0.5 s |
 
-7-Zip + PJA is smaller than Aqueous on every set, and the smallest of all
-on every set but the lossless one; zpaq-std + PJA is smaller than Aqueous
-on all but the small 12-bit one. That set is 10 small files (8 made with
+7-Zip + PJA is smaller than Aqueous on every JPEG set, and the smallest of
+all on every one but the lossless one; zpaq-std + PJA is smaller than Aqueous
+on all but the small 12-bit one, and the only archiver here that takes
+JPEG 2000: `pja2k` saves 7.5% on 113 real codestreams (the `pja` command
+alone, with its pixel modes, 8.4%; 7-Zip's plugin does not take JPEG 2000
+yet), at about 1.2 to 1.6 MB/s on 8 threads. The small 12-bit set is 10 small files (8 made with
 cjpeg, 2 from the sample corpus), 83 KB in all: each zpaq-std block
-carries pjax7's ZPAQL decoder (35 KB), more than PJA saves on so few
+carries pjax78's ZPAQL decoder (33 KB), more than PJA saves on so few
 bytes, so zpaq-std rightly stores them its usual way (and two are
 arithmetic-coded 12-bit, which no plugin codec takes). 12-bit files of
 real size pay the decoder back: on 12 made from camera RAWs (NEF and DNG
 from the sample corpus, developed to 16 bits, about 2 to 5 megapixels,
 cjpeg 3.0.4 `-precision 12 -quality 90`, baseline, optimized and
-progressive), 350 KB to 4 MB each, zpaq-std + PJA is 0.19 points behind
+progressive), 350 KB to 4 MB each, zpaq-std + PJA is 0.18 points behind
 7-Zip + PJA, and nothing else takes them. On the arithmetic-coded and
 generated sets,
 whose files are variants of a few images, both keep each image about
 once: 16 to 18% of the input, where Aqueous writes 34 to 86%. zpaq-std +
-PJA writes stream version 7, as the command does, and since 2.3.0 keeps a
-codec's files in one block: it is 0.3 to 1.6 points behind 7-Zip + PJA,
-1.7 to 3 times slower to write and up to 1.8 times slower to extract; what it spends
+PJA writes stream version 7, as the command does, and keeps a codec's
+files in one block: on JPEG it is 0.2 to 1.5 points behind 7-Zip + PJA,
+1.8 to 3.2 times slower to write and up to 1.7 times slower to extract; what it spends
 buys an archive any zpaq can extract without the plugin, through the
-ZPAQL decoder each block carries. Aqueous is 3 to 25 times faster than
-either to write.
+ZPAQL decoder each block carries. Aqueous is 3 to 18 times faster than
+7-Zip + PJA to write.
 
 ## In 7-Zip and 7-Zip-zstd
 
