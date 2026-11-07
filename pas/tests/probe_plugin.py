@@ -8,7 +8,8 @@ compress, query, data and decompress on those files.
 Checks: 31 codecs (0 to 30) and nothing past them; the JPEG 2000 codec at
 30, named as pjazsj2k.pas's PJK_NAME, its ZPAQL given only with $3..$5
 (comp 0 0 $3 $4 0); detect takes each JPEG 2000 file whose codestreams it
-can (all of tests/j2k) and no JPEG or JPEG-LS file, and no other codec takes
+can (all of tests/j2k but the HTJ2K ones, which it leaves as they are:
+modes 3 and 4 have no ZPAQL) and no JPEG or JPEG-LS file, and no other codec takes
 a JPEG 2000 file; each JPEG 2000 file of 64 KB or less compressed, its query
 within the ZPAQL's limits (H 2^26 words, M 2^28 bytes), decompressed back
 byte for byte. Exit code 1 on any failure."""
@@ -82,12 +83,30 @@ for a in sys.argv[2:]:
         files += sorted(os.path.join(a, f) for f in os.listdir(a) if os.path.isfile(os.path.join(a, f)))
     else:
         files.append(a)
+def is_ht(d):
+    """an HTJ2K codestream: its main header has a CAP (Part 15) or a COD
+    with the HT code-block style"""
+    p = d.find(b'\xff\x4f\xff\x51')
+    if p < 0:
+        return False
+    p += 2
+    while p + 4 <= len(d):
+        m = (d[p] << 8) | d[p + 1]
+        if m == 0xFF90 or m < 0xFF30:
+            return False
+        if m == 0xFF50:
+            return True
+        if m == 0xFF52 and p + 12 < len(d) and d[p + 12] & 0x40:
+            return True
+        p += 2 + ((d[p + 2] << 8) | d[p + 3])
+    return False
+
 taken = rt = 0
 for f in files:
     d = open(f, 'rb').read()
     j2k = d[:4] == b'\xff\x4f\xff\x51' or d[:12] == b'\x00\x00\x00\x0cjP  \r\n\x87\n'
     det = lib.zpaqstd_detect_v1(PJK.encode(), d, len(d))
-    if det != int(j2k):
+    if det != int(j2k and not is_ht(d)):
         fail('%s: detect %s says %d' % (os.path.basename(f), PJK, det))
     if j2k:
         for n in names[:30]:
