@@ -4142,7 +4142,8 @@ segments and query, `test_pjadec.py --pja2k` decodes two of them in the
 interpreter, alone and in one block; `pas/tests/probe_plugin.py` loads the
 plugin as zpaq-std does (ctypes): 31 codecs, the JPEG 2000 codec at 30
 with its ZPAQL only through `$3..$5`, detect taking every file of
-`tests/j2k` and no JPEG or JPEG-LS file (and no other codec taking a JPEG
+`tests/j2k` but the HTJ2K ones (0.9.6: modes 3 and 4 have no ZPAQL, so
+pja2k leaves them as they are) and no JPEG or JPEG-LS file (and no other codec taking a JPEG
 2000 file), each file's compress, query (within 2^26 words and 2^28
 bytes) and decompress, back byte for byte. The thirty frozen codecs'
 `.inc` files are the same bytes; the JPEG and JPEG-LS streams' hash is

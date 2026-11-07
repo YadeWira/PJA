@@ -79,6 +79,8 @@ type
       the threads it was given for its bands (Work) }
     size: Int64;
     threads: Integer;
+    { its output handed to the committer (Defer): the job ends there }
+    deferred: Boolean;
   end;
   PFileJob = ^TFileJob;
 
@@ -551,9 +553,10 @@ begin
   {$endif}
 end;
 
-{ Writes data under path, which must verify against `expected`. }
-function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
-var r: TFsResult; o: TOutcome; om: TOnMismatch; note: string;
+{ Save's checks before the write: the name taken in this run, what an
+  interrupted run left, an existing file without -f }
+function SaveCheck(const path: string): Boolean;
+var note: string;
 begin
   Result := False;
   if not Claim(path) then Exit;
@@ -565,7 +568,14 @@ begin
     Fail(path + ': already exists (-f to replace it)');
     Exit;
   end;
-  if dryRun then Exit(True);
+  Result := True;
+end;
+
+{ Save's write, after SaveCheck }
+function SaveWrite(const path: string; const data: TBytes; const expected: THash16): Boolean;
+var r: TFsResult; o: TOutcome; om: TOnMismatch;
+begin
+  Result := False;
   if keepCorrupt then om := omKeep else om := omDelete;
   StageEnter(stWrite);
   r := WriteVerified(path, data, expected, om, force, o);
@@ -589,6 +599,14 @@ begin
     ocKept: Fail(path + ': does not verify; kept as ' + o.path);
   end;
 end;
+
+{ Writes data under path, which must verify against `expected`. }
+function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
+begin
+  Result := SaveCheck(path);
+  if Result and not dryRun then Result := SaveWrite(path, data, expected);
+end;
+
 
 function StoredNote(const pja: TBytes): string;
 begin
@@ -639,8 +657,162 @@ begin
                        IntToStr(CurJob^.threads) + ' thread(s), ' + IntToStr(bands) + ' band(s)' + LineEnding;
 end;
 
+{ The committer (0.9.7): a file's write, flushed to the disk before it
+  takes its name (pjafs), waits about 16 ms on a SATA SSD, a tenth of a
+  photo's extraction on one thread. So when every write is flushed and
+  --stats does not time it, the worker checks the name (SaveCheck) and
+  hands the write and the rest of the job (its line, its --json object) to
+  one thread that does them in turn, and goes on to the next file: the same
+  files, lines and order, the flush beside the next file's work. At most
+  MAX_PENDING writes wait (their bytes are held). }
+type
+  TDoneKind = (dkCompress, dkExtract);
+  TPending = record
+    k: Integer;
+    kind: TDoneKind;
+    path, f, note, asBytes, repaired: string;
+    data: TBytes;
+    expected: THash16;
+    inLen: Int64;
+  end;
+  TCommitter = class(TJoinThread)
+    procedure Execute; override;
+  end;
+
+const
+  MAX_PENDING = 8;
+
+var
+  asyncCommit: Boolean = False;
+  pend: array[0..MAX_PENDING - 1] of TPending;
+  pendHead, pendCount: Integer;
+  pendStop: Boolean;
+  pendLock: TRTLCriticalSection;
+  pendWake, pendRoom: PRTLEvent;
+  committer: TCommitter = nil;
+
+procedure FinishJob(k: Integer); forward;
+
+{ what a written .pja or original adds to its job }
+procedure CompressDone(const f, path: string; origLen: Int64; const pja: TBytes; const note, asBytes,
+  repaired: string);
+begin
+  CurJob^.outBytes := Length(pja);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', origLen);
+  JobNode.Num('pja_size', Length(pja));
+  if origLen > 0 then JobNode.Fixed('ratio_percent', 100 * Length(pja) / origLen);
+  JobNode.Bool('stored', StoredNote(pja) <> '');
+  if asBytes <> '' then JobNode.Str('as_bytes', asBytes);
+  if repaired <> '' then JobNode.Str('repaired', repaired);
+  if not quiet then
+    Say(f + ' -> ' + path + '  ' + Human(origLen) + ' -> ' + Human(Length(pja)) +
+        Format('  %.2f%%', [100 * Length(pja) / origLen]) +
+        { the codec would not have made it smaller }
+        StoredNote(pja) + note);
+end;
+
+procedure ExtractDone(const f, path: string; const orig: TBytes; pjaLen: Int64);
+begin
+  CurJob^.outBytes := Length(orig);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', Length(orig));
+  JobNode.Num('pja_size', pjaLen);
+  if not quiet then Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+end;
+
+{ the job's write and end to the committer; waits while MAX_PENDING wait }
+procedure Defer(kind: TDoneKind; const f, path: string; const data: TBytes; const expected: THash16;
+  inLen: Int64; const note, asBytes, repaired: string);
+var i: Integer;
+begin
+  CurJob^.deferred := True;
+  repeat
+    EnterCriticalSection(pendLock);
+    if pendCount < MAX_PENDING then begin
+      i := (pendHead + pendCount) mod MAX_PENDING;
+      pend[i].k := CurJob^.index; pend[i].kind := kind;
+      pend[i].f := f; pend[i].path := path; pend[i].note := note;
+      pend[i].asBytes := asBytes; pend[i].repaired := repaired;
+      pend[i].data := data; pend[i].expected := expected; pend[i].inLen := inLen;
+      Inc(pendCount);
+      LeaveCriticalSection(pendLock);
+      RTLEventSetEvent(pendWake);
+      Exit;
+    end;
+    LeaveCriticalSection(pendLock);
+    RTLEventWaitFor(pendRoom, 50);
+  until False;
+end;
+
+procedure TCommitter.Execute;
+var p: TPending; have: Boolean;
+begin
+  repeat
+    EnterCriticalSection(pendLock);
+    have := pendCount > 0;
+    if have then begin
+      p := pend[pendHead];
+      pend[pendHead].data := nil;
+      pendHead := (pendHead + 1) mod MAX_PENDING;
+      Dec(pendCount);
+    end;
+    LeaveCriticalSection(pendLock);
+    if not have then begin
+      if pendStop then Break;
+      RTLEventWaitFor(pendWake, 50);
+      Continue;
+    end;
+    RTLEventSetEvent(pendRoom);
+    CurJob := @jobs[p.k];
+    try
+      if SaveWrite(p.path, p.data, p.expected) then
+        case p.kind of
+          dkCompress: CompressDone(p.f, p.path, p.inLen, p.data, p.note, p.asBytes, p.repaired);
+          dkExtract: ExtractDone(p.f, p.path, p.data, p.inLen);
+        end;
+    except
+      on e: Exception do begin
+        if not NotABug(e) then begin
+          jobs[p.k].bug := True;
+          Fail(jobs[p.k].name + ': internal error: ' + e.ClassName + ': ' + e.Message);
+        end else Fail(jobs[p.k].name + ': ' + e.ClassName + ': ' + e.Message);
+      end;
+    end;
+    p.data := nil;
+    FinishJob(p.k);
+  until False;
+end;
+
+procedure StartCommitter;
+begin
+  InitCriticalSection(pendLock);
+  pendWake := RTLEventCreate; pendRoom := RTLEventCreate;
+  pendHead := 0; pendCount := 0; pendStop := False;
+  try
+    committer := TCommitter.Create(False);
+  except
+    on EThread do committer := nil;
+  end;
+  asyncCommit := committer <> nil;
+end;
+
+{ every write done and every job ended }
+procedure StopCommitter;
+begin
+  if committer = nil then Exit;
+  EnterCriticalSection(pendLock);
+  pendStop := True;
+  LeaveCriticalSection(pendLock);
+  RTLEventSetEvent(pendWake);
+  committer.Join;
+  committer.Free;
+  committer := nil;
+  asyncCommit := False;
+end;
+
 procedure CompressOne(const f: string);
-var d, pja: TBytes; r: TPackResult; path: string;
+var d, pja: TBytes; r: TPackResult; path, ab, rp: string;
 begin
   if not ReadWhole(f, d) then Exit;
   if IsPja(d) then begin Fail(f + ': already a .pja'); Exit; end;
@@ -648,21 +820,13 @@ begin
   r := Pack(d, pja, CurJob^.threads, False, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt), True);
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pja'));
-  if Save(path, pja, Blake3_128(pja)) then begin
-    CurJob^.outBytes := Length(pja);
-    JobNode.Str('output', path);
-    JobNode.Num('original_size', Length(d));
-    JobNode.Num('pja_size', Length(pja));
-    if Length(d) > 0 then JobNode.Fixed('ratio_percent', 100 * Length(pja) / Length(d));
-    JobNode.Bool('stored', StoredNote(pja) <> '');
-    if r.codec.asBytes then JobNode.Str('as_bytes', r.codec.jpeg.Text);
-    if r.codec.repaired then JobNode.Str('repaired', r.codec.jpeg.Text);
-    if not quiet then
-      Say(f + ' -> ' + path + '  ' + Human(Length(d)) + ' -> ' + Human(Length(pja)) +
-          Format('  %.2f%%', [100 * Length(pja) / Length(d)]) +
-          { the codec would not have made it smaller }
-          StoredNote(pja) + BytesNote(r));
+  if r.codec.asBytes then ab := r.codec.jpeg.Text else ab := '';
+  if r.codec.repaired then rp := r.codec.jpeg.Text else rp := '';
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkCompress, f, path, pja, Blake3_128(pja), Length(d), BytesNote(r), ab, rp);
+    Exit;
   end;
+  if Save(path, pja, Blake3_128(pja)) then CompressDone(f, path, Length(d), pja, BytesNote(r), ab, rp);
   StatsOf(pja);
 end;
 
@@ -687,13 +851,11 @@ begin
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), ext));
   { a hash that does not match goes through Save as well: it deletes it, or
     keeps it under another name with --keep-corrupt }
-  if Save(path, orig, h) then begin
-    CurJob^.outBytes := Length(orig);
-    JobNode.Str('output', path);
-    JobNode.Num('original_size', Length(orig));
-    JobNode.Num('pja_size', Length(d));
-    if not quiet then Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkExtract, f, path, orig, h, Length(d), '', '', '');
+    Exit;
   end;
+  if Save(path, orig, h) then ExtractDone(f, path, orig, Length(d));
   StatsOf(d);
 end;
 
@@ -821,6 +983,14 @@ begin
       end else Fail(jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
     end;
   end;
+  { the committer ends it }
+  if jobs[k].deferred then Exit;
+  FinishJob(k);
+end;
+
+{ a job's --json object, and its lines printed when it is next in line }
+procedure FinishJob(k: Integer);
+begin
   if jsonOut then begin
     { info's "ok": the file was read and described (what PJA does with
       it is under "pja") }
@@ -1128,6 +1298,10 @@ begin
   InitCriticalSection(tokLock);
   tokWake := RTLEventCreate;
   tokFree := threads;
+  { the writes beside the work: when each is flushed, and --stats does not
+    time them }
+  if (command in [cmCompress, cmExtract]) and SyncToDisk and not dryRun and not stats and
+     (GetEnvironmentVariable('PJA_SYNC_INLINE') = '') then StartCommitter;
   pool := nil;
   SetLength(pool, workers - 1);
   { a thread the system refuses (a host at its limit) leaves the files to
@@ -1144,6 +1318,7 @@ begin
   SetLength(pool, n);
   Work;
   for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
+  StopCommitter;
   DoneCriticalSection(printLock);
   DoneCriticalSection(claimLock);
   if (stats or jsonOut) and (outputError = '') then Summary(Seconds - started);

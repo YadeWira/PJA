@@ -348,6 +348,16 @@ The summary: `command`, `files`, `failed`, `bugs`, `bytes_in`, `bytes_out`,
   1% of 0.9.0) for a run whose outputs can be made again: a power cut may
   then leave an output empty or missing. The temporary and the handlers
   above work the same either way.
+- **The flush beside the work** (since 0.9.7): each flush waits on the
+  disk (about 16 ms a file on that SSD, 4.9 s of `x -th 1`'s 37 s on the
+  151 photos), so `a` and `x` hand each file's write, flush and rename to
+  a thread of their own and go on with the next file; the file's line
+  comes out once its write is done, in the same order, and the run ends
+  only when every write has. The same files, lines, `--json` and exit
+  code; `x -th 1` of the 151 photos 40.7 -> 36.2 s. At most 8 writes wait
+  (their bytes in memory). Not with `--no-sync` (nothing to wait for),
+  `-n`, or `--stats` (which times the write in the file's own stages);
+  `PJA_SYNC_INLINE=1` writes in the file's own thread, as before.
 
 ## Choices, and why
 
