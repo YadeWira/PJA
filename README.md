@@ -48,6 +48,22 @@ comes back byte for byte, and nothing is written unless it verified.
 Anything else goes through as bytes, and `pja a` says why
 ([details][wHandles]).
 
+## Install
+
+Download the command for your platform from the [latest release][relLink]:
+Linux (x86-64, x86, arm64; glibc 2.34 or later: Debian 12, Ubuntu 22.04,
+RHEL 9 and newer), macOS (Apple silicon) or Windows (x64, and x86 from XP
+on). Each build is tested by CI on its own platform, and a `.pja`
+made on one opens on any other ([installing][wInstall], [platforms][wPlat]).
+
+```sh
+pja a *.jpg --output-dir=packed   # compress many
+pja x packed/*.pja -o restored/   # and back
+pja list packed/*.pja             # sizes and hashes
+```
+
+The command's manual is [doc/CLI.md](doc/CLI.md).
+
 ## Against other compressors
 
 One file at a time, against the other recompressors that give a JPEG back
@@ -157,46 +173,31 @@ archives without the plugin, and it is the only one here that takes JPEG
 more than PJA saves, so zpaq-std stores them as usual. Why each number is
 what it is: [the benchmarks page][wComp].
 
-## In 7-Zip and 7-Zip-zstd
+## In 7-Zip and zpaq-std
 
-`libpja` (in each release) is a C library and, in the same file, a codec
-for [7-Zip](https://7-zip.org) and
-[7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd): put `pja.dll` (or
-`pja.so`) in the `Codecs` folder next to 7-Zip (the x64 build for 64-bit
-7-Zip, the x86 one for 32-bit), and
+**7-Zip** and [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd): put
+`libpja`'s `pja.dll` (or `pja.so`; in each release, x64 for 64-bit 7-Zip,
+x86 for 32-bit) in the `Codecs` folder next to 7-Zip, and
 
 ```sh
 7z a -m0=PJA -m1=LZMA2 photos.7z photos/      # 7-Zip-zstd: -m1=zstd
 ```
 
-In 7-Zip's window (Add to archive, 7z format), the same goes in
-**Parameters**: `0=PJA 1=LZMA2` (7-Zip-zstd: `0=PJA 1=zstd`). `0=PJA`
-alone also works, but then nothing follows PJA in the chain and every
-byte that is not a JPEG (other files, EXIF) goes into the archive as it is.
-Extracting needs nothing but the plugin.
+(in 7-Zip's window: **Parameters** `0=PJA 1=LZMA2`). PJA goes first in the
+chain as a filter: it recompresses the JPEG and JPEG-LS files of the solid
+block, keeps once what repeats between them, and passes every other byte
+on. Extracting needs the plugin too; JPEG 2000 files go through as they
+are, for now ([details][wLib]).
 
-PJA goes first in the chain as a filter: it recompresses the JPEG and
-JPEG-LS files in the solid block and passes every other byte on to LZMA2
-or zstd; what repeats between files (one image saved several times) is
-kept once. Extracting needs the plugin too. JPEG 2000 files go through as
-they are, for now ([the library and 7-Zip][wLib],
-[doc/LIBRARY.md](doc/LIBRARY.md)).
-
-## Install
-
-Download the command for your platform from the [latest release][relLink]:
-Linux (x86-64, x86, arm64; glibc 2.34 or later: Debian 12, Ubuntu 22.04,
-RHEL 9 and newer), macOS (Apple silicon) or Windows (x64, and x86 from XP
-on). Each build is tested by CI on its own platform, and a `.pja`
-made on one opens on any other ([installing][wInstall], [platforms][wPlat]).
+**[zpaq-std](https://github.com/YadeWira/zpaq-std)** ships PJA as codecs
+and uses them with `-sa`, JPEG 2000 included:
 
 ```sh
-pja a *.jpg --output-dir=packed   # compress many
-pja x packed/*.pja -o restored/   # and back
-pja list packed/*.pja             # sizes and hashes
+zpaq-std a photos.zpaq photos/ -sa
 ```
 
-The command's manual is [doc/CLI.md](doc/CLI.md).
+Each block carries a ZPAQL decoder, so any zpaq extracts it, even without
+the plugin ([details][wPlugin]).
 
 ## Reporting a bug
 
