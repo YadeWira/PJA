@@ -18,7 +18,7 @@
   x86) and a block the runtime took before this unit started is told apart
   and given back to the manager that took it.
 
-  And 16 bytes after it (TAIL, since 0.9.8): FreePascal's i386 code can load
+  And 16 bytes after it (TAIL_BYTES, since 0.9.8): FreePascal's i386 code can load
   4 bytes where it reads a 2-byte element (`w[i] and $1F` over an array of
   Word), 2 bytes past the last one. FreePascal's heap always leaves room
   after a block; the process heap may end a block where the committed
@@ -37,7 +37,7 @@ implementation
 const
   HEAP_ZERO_MEMORY = 8;
   HEADER = 16;
-  TAIL = 16;
+  TAIL_BYTES = 16;
   OURS = PtrUInt({$ifdef cpu64}$9E3779B97F4A7C15{$else}$9E3779B9{$endif});
 
 type
@@ -76,8 +76,8 @@ end;
 function Take(size: PtrUInt; flags: LongWord): Pointer;
 var h: PHeader;
 begin
-  if size > High(PtrUInt) - HEADER - TAIL then Exit(Fail);
-  h := HeapAlloc(heap, flags, size + HEADER + TAIL);
+  if size > High(PtrUInt) - HEADER - TAIL_BYTES then Exit(Fail);
+  h := HeapAlloc(heap, flags, size + HEADER + TAIL_BYTES);
   if h = nil then Exit(Fail);
   h^.size := size;
   h^.mark := OURS;
@@ -123,8 +123,8 @@ begin
   end else if p = nil then
     p := HGetMem(size)
   else if Mine(p) then begin
-    if size > High(PtrUInt) - HEADER - TAIL then Exit(Fail);
-    h := HeapReAlloc(heap, 0, p - HEADER, size + HEADER + TAIL);
+    if size > High(PtrUInt) - HEADER - TAIL_BYTES then Exit(Fail);
+    h := HeapReAlloc(heap, 0, p - HEADER, size + HEADER + TAIL_BYTES);
     if h = nil then Exit(Fail);
     h^.size := size;
     p := Pointer(h) + HEADER;
