@@ -141,7 +141,7 @@ jobs:
       # the binaries, for testing in a Windows VM before a release
       - name: Collect the binaries
         shell: bash
-        run: mkdir -p build/ci/bin && cp build/ci/pja.exe build/ci/pja_plugin.dll build/ci/bin/ && cp build/ci/lib/pja.dll build/ci/bin/libpja.dll
+        run: mkdir -p build/ci/bin && cp build/ci/pja.exe build/ci/bin/ && cp build/ci/pja_plugin* build/ci/bin/ && cp "$(find build/ci/lib -maxdepth 1 -name "*.dll" | head -1)" build/ci/bin/libpja.dll && ls -la build/ci/bin
       - uses: actions/upload-artifact@v4
         with:
           name: bin-windows-x64
@@ -176,7 +176,7 @@ jobs:
       # the binaries, for testing in a Windows VM before a release
       - name: Collect the binaries
         shell: bash
-        run: mkdir -p build/ci/bin && cp build/ci/pja.exe build/ci/pja_plugin.dll build/ci/bin/ && cp build/ci/lib/pja.dll build/ci/bin/libpja.dll
+        run: mkdir -p build/ci/bin && cp build/ci/pja.exe build/ci/bin/ && cp build/ci/pja_plugin* build/ci/bin/ && cp "$(find build/ci/lib -maxdepth 1 -name "*.dll" | head -1)" build/ci/bin/libpja.dll && ls -la build/ci/bin
       - uses: actions/upload-artifact@v4
         with:
           name: bin-windows-x86
