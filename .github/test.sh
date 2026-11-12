@@ -30,7 +30,7 @@ $FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/pja$EXE" pas/p
 $FPC -O3 -dPJA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/dump_streams$EXE" pas/tests/dump_streams.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 # the plugin: a shared library (position-independent code where it is one)
-# with the version 7 codecs' C (pjav7c.c, pjasysc.c), position-independent too
+# with the version 7 codecs' C (pjav7c.c, pjasysc.c, b3chunks.c), position-independent too
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) PIC=; CPIC= ;; *) PIC=-Cg; CPIC=-fPIC ;; esac
 # shellcheck disable=SC2086
 sh pas/build_c.sh "$OUT/pc" $CPIC || { echo "the plugin's C part did not build (CC=${CC:-cc})"; exit 1; }

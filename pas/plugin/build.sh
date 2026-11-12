@@ -10,7 +10,7 @@
 # zpaq-std looks for codecs/pja.so (or codecs\pja.dll) next to its binary.
 #
 # What it is built from (a vendored copy, zpaq-std's compressors/pja, needs
-# all of it; doc/CODEC.md, "JPEG 2000 for zpaq-std (stage E)"): pas/build_c.sh,
+# all of it; doc/CODEC.md, "JPEG 2000 for zpaq-std (stage E)"): pas/build_c.sh, b3chunks.c,
 # pja.inc, pjaarith.pas, pjablake3.pas, pjacodec.pas, pjacoef.inc, pjaheap.pas,
 # pjaj2k.pas, pjaj2kcs.pas, pjaj2km.pas, pjaj2km_tab.h, pjaj2kmc.c, pjaj2kpm.c,
 # pjaj2kt1.c, pjaj2kt1.h, pjajls.pas, pjajpeg.pas, pjamodel.pas, pjastage.pas,

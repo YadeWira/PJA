@@ -45,6 +45,9 @@ mkdir -p "$OUT"
 $CC $FLAGS "$@" -c "$HERE/pjav7c.c" -o "$OUT/pjav7c.o"
 # shellcheck disable=SC2086
 $CC $FLAGS "$@" -c "$HERE/pjasysc.c" -o "$OUT/pjasysc.o"
+# pBLAKE3's chunks (b3chunks.c, as its v0.2.0 tag has it): B3_PLAIN is its PJA_V7_PLAIN
+B3=""; case "$*" in *PJA_V7_PLAIN*) B3="-DB3_PLAIN" ;; esac
+$CC $FLAGS "$@" $B3 -c "$HERE/b3chunks.c" -o "$OUT/b3chunks.o"
 # shellcheck disable=SC2086
 $CC $FLAGS "$@" -c "$HERE/pjaj2kt1.c" -o "$OUT/pjaj2kt1.o"
 # shellcheck disable=SC2086

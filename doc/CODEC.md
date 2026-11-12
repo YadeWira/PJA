@@ -4127,7 +4127,7 @@ same stream version 8.
 `pjaj2kcs.pas`, `pjaj2km.pas`, `pjaj2km_tab.h`, `pjaj2kmc.c`,
 `pjaj2kpm.c` (build_c.sh compiles it; the plugin does not link it),
 `pjaj2kt1.c`, `pjaj2kt1.h`, `pjajls.pas`, `pjajpeg.pas`, `pjamodel.pas`,
-`pjastage.pas`, `pjasysc.c`, `pjathread.pas`, `pjav7.pas`, `pjav7c.c`,
+`pjastage.pas`, `pjasysc.c`, `b3chunks.c` (since 0.9.9, pBLAKE3's), `pjathread.pas`, `pjav7.pas`, `pjav7c.c`,
 `pjav7c_loop.h`, and in `pas/plugin/`: `pja_zpaqstd.pas`,
 `pjazpaqlargs.pas`, `pjazsj2k.pas`, `pjazpaql.inc`, `pjalszpaql.inc`,
 `pjaxzpaql.inc`, `pjallzpaql.inc`, `pjalsxzpaql.inc`, `lzzpaql.inc`,

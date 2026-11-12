@@ -1,11 +1,15 @@
 { pjablake3 against the vectors of the official implementation (kat.txt, the
   "b3" lines): every size there, whole, split into two ranges, and fed in
-  pieces of several sizes, which have to give the same hash. Twice: with
-  pjav7's chunks at once (pjasysc.c) and with this unit's own compression
-  alone. A range outside the buffer has to be refused. }
+  pieces of several sizes, which have to give the same hash. With pjav7's
+  chunks at once (pBLAKE3's b3chunks.c), once for each path this CPU has
+  (one at a time, 4 at once, AVX2, AVX-512), and with this unit's own
+  compression alone. A range outside the buffer has to be refused. }
 program test_blake3;
 {$I ../pja.inc}
 uses SysUtils, Classes, pjablake3, pjav7;
+{ b3chunks.c (linked by pjav7): caps its widest path (0 one chunk at a time,
+  1 four at once, 2 AVX2, 3 AVX-512), -1 only asks; what the CPU has }
+function pblake3_chunks_level(max: LongInt): LongInt; cdecl; external;
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
 begin Inc(cells); if ok then Writeln('  ', what:58, '  ok') else begin Inc(failures); Writeln('  ', what:58, '  FAIL'); end; end;
@@ -34,7 +38,7 @@ begin
   Result := h.Final;
 end;
 
-var kat: TStringList; l, how: string; fields: TStringArray; n, nb3, cut, s, pass: Integer;
+var kat: TStringList; l, how: string; fields: TStringArray; n, nb3, cut, s, pass, top: Integer;
     d, x: TBytes; h: THash16; raised, same: Boolean; chunks: TBlake3Chunks;
 const STEPS: array[0..5] of Integer = (1, 7, 63, 64, 65, 1024);
 begin
@@ -42,9 +46,12 @@ begin
   kat := TStringList.Create; kat.LoadFromFile(ParamStr(1));
   chunks := Blake3Chunks;
   Check(Assigned(chunks), 'pjav7 installs its chunks at once');
-  for pass := 0 to 1 do begin
-  if pass = 0 then begin Blake3Chunks := chunks; how := ' (C)'; end
-  else begin Blake3Chunks := nil; how := ' (Pascal)'; end;
+  top := pblake3_chunks_level(-1);
+  Writeln('  the C chunks: paths 0 to ', top, ' on this CPU');
+  for pass := 0 to top + 1 do begin
+  if pass <= top then begin
+    Blake3Chunks := chunks; pblake3_chunks_level(pass); how := Format(' (C, path %d)', [pass]);
+  end else begin Blake3Chunks := nil; how := ' (Pascal)'; end;
   for l in kat do begin
     if (l = '') or (l[1] = '#') then Continue;
     fields := l.Split(' ');
@@ -64,9 +71,9 @@ begin
     Check(same, '  fed in pieces of 1, 7, 63, 64, 65, 1024 B');
   end;
   end;
-  Blake3Chunks := chunks;
+  Blake3Chunks := chunks; pblake3_chunks_level(3);
   kat.Free;
-  Check(nb3 >= 24, Format('vectors read: %d', [nb3]));
+  Check(nb3 >= 12 * (top + 2), Format('vectors read: %d', [nb3]));
 
   x := nil;
   h := Blake3_128(x, 0, 0, nil, 0, 0);

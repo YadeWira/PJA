@@ -42,7 +42,9 @@ type
   end;
 
 procedure pjav7_tables(constref t: TV7Tables); cdecl; external;
-procedure pjasys_b3chunks(input: PByte; n: SizeInt; counter: QWord; cv: PLongWord); cdecl; external;
+{$L b3chunks.o}
+{ pBLAKE3's (b3chunks.c): BLAKE3's chunks, as many at once as the CPU allows }
+procedure pblake3_chunks(input: PByte; n: SizeInt; counter: QWord; cv: PLongWord); cdecl; external;
 function pjasys_huffenc(var hs: THuffEncScan): SizeInt; cdecl; external;
 function pjasys_huffdec(var hs: THuffDecScan): SizeInt; cdecl; external;
 function pjav7_paths: LongInt; cdecl; external;
@@ -130,7 +132,7 @@ initialization
   V7Retable;
   V7Code := @Code;
   { pjasysc.c's helpers, for the units that have no C of their own }
-  Blake3Chunks := @pjasys_b3chunks;
+  Blake3Chunks := @pblake3_chunks;
   { the JPEG's own Huffman coding: PJA_NOASM=1 leaves it to Pascal (the
     suite compares the two) }
   if GetEnvironmentVariable('PJA_NOASM') <> '1' then begin
