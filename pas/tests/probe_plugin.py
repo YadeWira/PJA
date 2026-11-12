@@ -9,8 +9,10 @@ Checks: 31 codecs (0 to 30) and nothing past them; the JPEG 2000 codec at
 30, named as pjazsj2k.pas's PJK_NAME, its ZPAQL given only with $3..$5
 (comp 0 0 $3 $4 0); detect takes each JPEG 2000 file whose codestreams it
 can (all of tests/j2k but the HTJ2K ones, which it leaves as they are:
-modes 3 and 4 have no ZPAQL) and no JPEG or JPEG-LS file, and no other codec takes
-a JPEG 2000 file; each JPEG 2000 file of 64 KB or less compressed, its query
+modes 3 and 4 have no ZPAQL; for those it says 2, zpaq-std 2.9.0's "of my
+format, not taken") and no JPEG or JPEG-LS file, and no other codec takes
+a JPEG 2000 file; each JPEG or JPEG-LS file gets 1 or 2 from the -sa codecs
+of its format and 0 from the others; each JPEG 2000 file of 64 KB or less compressed, its query
 within the ZPAQL's limits (H 2^26 words, M 2^28 bytes), decompressed back
 byte for byte. Exit code 1 on any failure."""
 import ctypes as C, os, re, sys
@@ -106,13 +108,21 @@ for f in files:
     d = open(f, 'rb').read()
     j2k = d[:4] == b'\xff\x4f\xff\x51' or d[:12] == b'\x00\x00\x00\x0cjP  \r\n\x87\n'
     det = lib.zpaqstd_detect_v1(PJK.encode(), d, len(d))
-    if det != int(j2k and not is_ht(d)):
+    # 1: taken; 2 (zpaq-std 2.9.0's +rcmd): of its format, not taken (HTJ2K)
+    if det != (0 if not j2k else 2 if is_ht(d) else 1):
         fail('%s: detect %s says %d' % (os.path.basename(f), PJK, det))
     if j2k:
         for n in names[:30]:
             if lib.zpaqstd_detect_v1(n.encode(), d, len(d)):
                 fail('%s: %s takes it' % (os.path.basename(f), n))
-    if not det:
+    # a JPEG or JPEG-LS file: the -sa codecs of its format each say 1 or 2,
+    # the others 0
+    if d[:3] == b'\xff\xd8\xff':
+        jp = [lib.zpaqstd_detect_v1(n, d, len(d)) for n in (b'pjax78', b'pja78', b'pjall8')]
+        ls = [lib.zpaqstd_detect_v1(n, d, len(d)) for n in (b'pjals8', b'pjalsx8')]
+        if not ((all(jp) and not any(ls)) or (all(ls) and not any(jp))) or max(jp + ls) > 2:
+            fail('%s: the -sa codecs say %s %s' % (os.path.basename(f), jp, ls))
+    if det != 1:
         continue
     taken += 1
     if len(d) > 65536:

@@ -78,7 +78,7 @@ library pja_zpaqstd;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}pjaheap,{$endif}
-  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3, pjazsj2k;
+  SysUtils, pjajpeg, pjajls, pjacodec, pjamodel, pjazpaqlargs, pjav7, pjablake3, pjazsj2k, pjaj2k;
 
 {$I lzzpaql.inc}
 {$I ozpaql.inc}
@@ -603,7 +603,7 @@ begin
   end;
 end;
 
-function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
+function DetectTakes(codecName: PChar; src: Pointer; n: SizeUInt): LongInt;
 var d: TBytes; j: TJpeg; jl: TJls; w, after: Int64; base: array[0..15] of Char; k: SizeInt; h: THash16; v: TVerdict;
 begin
   Result := 0;
@@ -617,7 +617,7 @@ begin
        (StrComp(@base[0], 'pja7z') = 0) or (StrComp(@base[0], 'pjax7z') = 0) or
        (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) or
        (StrComp(@base[0], 'pjalsz') = 0) or (StrComp(@base[0], 'pjallz') = 0) or (StrComp(@base[0], 'pjalsxz') = 0) then
-      Exit(zpaqstd_detect_v1(@base[0], src, n));
+      Exit(DetectTakes(@base[0], src, n));
     Exit;
   end;
   { an o codec takes what its codec does: pjalso, pjals' files; pjalszo,
@@ -626,7 +626,7 @@ begin
     StrLCopy(@base[0], codecName, k - 1);
     if (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) or
        (StrComp(@base[0], 'pjalsz') = 0) or (StrComp(@base[0], 'pjallz') = 0) or (StrComp(@base[0], 'pjalsxz') = 0) then
-      Exit(zpaqstd_detect_v1(@base[0], src, n));
+      Exit(DetectTakes(@base[0], src, n));
     Exit;
   end;
   { a z codec takes what its codec does: pjaz, pja's files, and so on }
@@ -635,7 +635,7 @@ begin
     if (StrComp(@base[0], 'pja') = 0) or (StrComp(@base[0], 'pjals') = 0) or (StrComp(@base[0], 'pjax') = 0) or
        (StrComp(@base[0], 'pjall') = 0) or (StrComp(@base[0], 'pjalsx') = 0) or
        (StrComp(@base[0], 'pja7') = 0) or (StrComp(@base[0], 'pjax7') = 0) then
-      Exit(zpaqstd_detect_v1(@base[0], src, n));
+      Exit(DetectTakes(@base[0], src, n));
     Exit;
   end;
   { the JPEG 2000 codec }
@@ -709,6 +709,50 @@ begin
   end;
 end;
 
+type TFormatKind = (fkNone, fkJpeg, fkJls, fkJ2k);
+
+{ the format a codec's name is for: its base with the o, 8 and z of its
+  variants taken off (pjalsxz8: pjalsx) }
+function FormatOf(codecName: PChar): TFormatKind;
+var b: AnsiString;
+begin
+  Result := fkNone;
+  if codecName = nil then Exit;
+  b := codecName;
+  if b = PJK_NAME then Exit(fkJ2k);
+  while (Length(b) > 3) and (b[Length(b)] in ['8', 'o', 'z']) do SetLength(b, Length(b) - 1);
+  if (b = 'pja') or (b = 'pjax') or (b = 'pja7') or (b = 'pjax7') or (b = 'pjall') then Result := fkJpeg
+  else if (b = 'pjals') or (b = 'pjalsx') then Result := fkJls;
+end;
+
+{ 1 if the codec takes the file; 2 (zpaq-std 2.9.0, +rcmd) if the file is
+  of the codec's format but the codec does not take it, so that zpaq-std
+  stores it with the card's fallback_ma / fallback_m; else 0. By the bytes
+  only, like the rest: a JPEG starts FF D8 FF and is not JPEG-LS, a JPEG-LS
+  file is what pjajls.IsJls says, a JPEG 2000 file what J2kKind says }
+function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
+var d: TBytes; k: TFormatKind; mine: Boolean;
+begin
+  Result := DetectTakes(codecName, src, n);
+  if Result <> 0 then Exit;
+  k := FormatOf(codecName);
+  if (k = fkNone) or (src = nil) or (n < 4) then Exit;
+  try
+    mine := False;
+    case k of
+      fkJpeg, fkJls:
+        if (PByte(src)[0] = $FF) and (PByte(src)[1] = $D8) and (PByte(src)[2] = $FF) then begin
+          d := Bytes(src, n);
+          mine := IsJls(d) = (k = fkJls);
+        end;
+      fkJ2k: begin d := Bytes(src, n); mine := J2kKind(d) <> jkNone; end;
+    end;
+    if mine then Result := 2;
+  except
+    Result := 0;
+  end;
+end;
+
 const
   ZS_DATA_INFO = 3;
   { the card zpaq-std shows in codecinfoex: key=value lines. The commit is
@@ -776,6 +820,8 @@ end;
 
 var
   InfoPjk: AnsiString;
+  { INFO and the other constant cards, with their fallback keys }
+  InfoJ, InfoJx, InfoJll, InfoJlsx, InfoJls: AnsiString;
   InfoZ, InfoLsZ, InfoXZ, InfoLlZ, InfoLsxZ: AnsiString;
   Info7, InfoX7, Info7Z, InfoX7Z: AnsiString;
   InfoLsO, InfoLlO, InfoLsxO, InfoLsZO, InfoLlZO, InfoLsxZO: AnsiString;
@@ -832,27 +878,27 @@ end;
 
 function XData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  Result := DataOf(PJAX_ZPAQL, INFO_X, what, size);
+  Result := DataOf(PJAX_ZPAQL, InfoJx, what, size);
 end;
 
 function LsxData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  Result := DataOf(PJALSX_ZPAQL, INFO_LSX, what, size);
+  Result := DataOf(PJALSX_ZPAQL, InfoJlsx, what, size);
 end;
 
 function LlData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  Result := DataOf(PJALL_ZPAQL, INFO_LL, what, size);
+  Result := DataOf(PJALL_ZPAQL, InfoJll, what, size);
 end;
 
 function CodecData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  Result := DataOf(PJA_ZPAQL, INFO, what, size);
+  Result := DataOf(PJA_ZPAQL, InfoJ, what, size);
 end;
 
 function LsData(what: LongInt; size: PSizeUInt): Pointer; cdecl;
 begin
-  Result := DataOf(PJALS_ZPAQL, INFO_LS, what, size);
+  Result := DataOf(PJALS_ZPAQL, InfoJls, what, size);
 end;
 
 function Pja7Data(what: LongInt; size: PSizeUInt): Pointer; cdecl;
@@ -1270,6 +1316,24 @@ exports
   zpaqstd_threads_v1 name 'zpaqstd_threads_v1';
 {$endif}
 
+{ zpaq-std 2.9.0's +rcmd: the method for the files of a codec's format it
+  does not take (detect 2) or that give no gain, the best first, measured
+  on PJA's test sets (doc/CODEC.md, "zpaq-std +rcmd") }
+const
+  FALLBACK: array[TFormatKind] of AnsiString = (
+    '',
+    'fallback_ma=flzma2:10,uflzma2:11,lzma:9,lz:9,zstd:19'#10'fallback_m=3,4,5,2,1'#10,
+    'fallback_ma=flzma2:10,uflzma2:11,lz6:15,zstd:19,lzma:9'#10'fallback_m=3,4,5,2,1'#10,
+    'fallback_ma=zstd:19,deflate:12,zxc:7,flzma2:10,lz6:15'#10'fallback_m=1,2,3,4,5'#10);
+
+{ a card with its format's fallback keys after it }
+procedure AddFallback(var card: AnsiString);
+var name: AnsiString;
+begin
+  name := Copy(card, 6, Pos(#10, card) - 6);
+  card := card + FALLBACK[FormatOf(PChar(name))];
+end;
+
 begin
   IsMultiThread := True;
   InitCriticalSection(VerdictLock);
@@ -1308,4 +1372,14 @@ begin
   InfoLsZ8 := OCard('pjalsz8', InfoLsZ, OPT3);
   InfoLlZ8 := OCard('pjallz8', InfoLlZ, OPT3);
   InfoLsxZ8 := OCard('pjalsxz8', InfoLsxZ, OPT3);
+  InfoJ := INFO; InfoJx := INFO_X; InfoJll := INFO_LL; InfoJlsx := INFO_LSX; InfoJls := INFO_LS;
+  AddFallback(InfoJ); AddFallback(InfoJx); AddFallback(InfoJll); AddFallback(InfoJlsx); AddFallback(InfoJls);
+  AddFallback(InfoPjk);
+  AddFallback(InfoZ); AddFallback(InfoLsZ); AddFallback(InfoXZ); AddFallback(InfoLlZ); AddFallback(InfoLsxZ);
+  AddFallback(Info7); AddFallback(InfoX7); AddFallback(Info7Z); AddFallback(InfoX7Z);
+  AddFallback(InfoLsO); AddFallback(InfoLlO); AddFallback(InfoLsxO);
+  AddFallback(InfoLsZO); AddFallback(InfoLlZO); AddFallback(InfoLsxZO);
+  AddFallback(Info78); AddFallback(InfoX78); AddFallback(Info7Z8); AddFallback(InfoX7Z8);
+  AddFallback(InfoLs8); AddFallback(InfoLl8); AddFallback(InfoLsx8);
+  AddFallback(InfoLsZ8); AddFallback(InfoLlZ8); AddFallback(InfoLsxZ8);
 end.

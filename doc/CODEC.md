@@ -4149,3 +4149,65 @@ bytes) and decompress, back byte for byte. The thirty frozen codecs'
 `.inc` files are the same bytes; the JPEG and JPEG-LS streams' hash is
 unchanged (3387e58d...), and so is the JPEG 2000 streams' (the command
 never sets the hook).
+
+## zpaq-std +rcmd: the method for what the plugin does not take (12/11/2026)
+
+zpaq-std 2.9.0's `+rcmd` (`-sa:pja+rcmd`, or `-rcmd` for every codec)
+stores the files of a codec's format that the codec does not take, or that
+give no gain, with a method the codec recommends, whatever `-m`/`-ma` the
+user gave for the rest. The plugin now says which files are of its format
+and which method suits them:
+
+- `zpaqstd_detect_v1` answers 2 for a file of the codec's format it does
+  not take: a JPEG (`FF D8 FF`, not JPEG-LS) for pja, pjax, pja7, pjax7,
+  pjall and their z, o and 8 codecs; a JPEG-LS file (`pjajls.IsJls`) for
+  pjals and pjalsx; a JPEG 2000 file (`pjaj2k.J2kKind`) for pja2k. 1 and 0
+  are as before. zpaq-std takes a file with the first codec that says 1,
+  and counts a 2 only when none does; versions before 2.9.0 read 2 as 0:
+  zpaq-std 2.7.2 and 2.8.0 write the same archive, byte for byte, with this
+  plugin as with the one they ship.
+- Each codec's card (`ZS_DATA_INFO`) has two more keys, the best first:
+
+| format | `fallback_ma` | `fallback_m` |
+|---|---|---|
+| JPEG | `flzma2:10,uflzma2:11,lzma:9,lz:9,zstd:19` | `3,4,5,2,1` |
+| JPEG-LS | `flzma2:10,uflzma2:11,lz6:15,zstd:19,lzma:9` | `3,4,5,2,1` |
+| JPEG 2000 | `zstd:19,deflate:12,zxc:7,flzma2:10,lz6:15` | `1,2,3,4,5` |
+
+Measured with zpaq-std 2.9.0-rc1, 8 threads, on what the plugin does not
+take: 44 JPEG (cut short at 55 to 95% of the file, one cut per file, or
+small 12-bit and arithmetic-coded 12-bit ones), 13.3 MB; 78 JPEG-LS files
+cut short, 1.6 MB; 44 JPEG 2000 files cut short, 75.9 MB (pja2k takes
+most of these as bytes; their content is what reaches the method). 22
+methods each, every archive extracted and compared:
+
+| method | JPEG | JPEG-LS | JPEG 2000 |
+|---|---|---|---|
+| `-m1` | 94.30%, 0.5 / 0.4 s | 99.42% | 100.06%, 0.5 / 0.3 s |
+| `-m3` | 91.26%, 8.0 / 6.4 s | 87.87%, 0.1 / 0.1 s | 100.06% |
+| `-m5` | **88.73%**, 58.5 / 63.8 s | **86.93%**, 7.8 / 7.8 s | **99.56%**, 235 / 213 s |
+| `-ma:flzma2:10` | 91.01%, 3.7 / 0.5 s | 87.91%, 0.3 / 0.1 s | 99.85%, 11.7 / 0.6 s |
+| `-ma:zstd:19` | 92.07%, 3.2 / 0.2 s | 88.13%, 0.3 / 0.1 s | 99.80%, 15.9 / 0.4 s |
+| `-ma:kanzi:9` | 89.95%, 17.9 / 17.7 s | 90.07% | 99.76%, 101 / 22 s |
+
+`-m5` is the smallest everywhere but extracts 120 times slower than
+flzma2 on JPEG (64 s against 0.5 s for 13 MB), so it is not first; on
+JPEG 2000 nothing gains half a point, so the fast ones lead. zstd at 19,
+not 22: the same size within 0.01%, far less memory.
+
+With zpaq-std 2.9.0-rc4 on a folder of 217 files, 58 MB (30 camera
+photos PJA takes, the 44 JPEG and 78 JPEG-LS files above and 8 of the
+JPEG 2000 ones, and 57 files of other kinds), `-sa` against `-sa -rcmd`, every file
+back with the plugin, without it and with zpaq 7.15:
+
+| method | `-sa` | `-sa -rcmd` |
+|---|---|---|
+| `-m1` | 80.32% | **79.63%** |
+| `-m5` | **73.93%**, 103 / 112 s | 74.45%, 62 / 38 s |
+| `-ma:zstd:3` | 78.42% | **78.01%** |
+
+With `-m5` the user's method packs the rest tighter than flzma2 does,
+and `-rcmd` costs half a point for extraction 2.9 times faster. Windows 10
+x64 and x86 (rc4): the same sizes on both, every file back with the plugin
+and without it. The scripts and sets are in the author's lab
+(`rcmd/meas.sh`, `rcmd/run4.sh`).
