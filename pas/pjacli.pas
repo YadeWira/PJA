@@ -834,7 +834,7 @@ procedure ExtractOne(const f: string);
 var d, orig: TBytes; r: TPackResult; path, ext: string; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
-  r := Unpack(d, maxOutput, orig, h, CurJob^.threads);
+  r := Unpack(d, maxOutput, orig, h, CurJob^.threads, keepCorrupt);
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;

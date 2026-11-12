@@ -56,11 +56,12 @@ function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fas
 { .pja -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch or ukSizeMismatch, `original` holds what was decoded and
   `expected` the hash it should have had, for a caller that keeps damaged
-  output under another name (the size the descriptor declares may be what
-  is damaged: a stream that runs past it is decoded again up to maxOutput);
-  with any other error it is empty. }
+  output under another name; with any other error it is empty. salvage
+  (x --keep-corrupt): the size the descriptor declares may be what is
+  damaged, so a stream that runs past it is decoded again, up to
+  maxOutput, and is a SizeMismatch; without it, a codec error. }
 function Unpack(const pja: TBytes; maxOutput: QWord; out original: TBytes; out expected: THash16;
-                threads: Integer = 1): TPackResult;
+                threads: Integer = 1; salvage: Boolean = False): TPackResult;
 
 implementation
 
@@ -106,7 +107,7 @@ begin
 end;
 
 function Unpack(const pja: TBytes; maxOutput: QWord; out original: TBytes; out expected: THash16;
-                threads: Integer): TPackResult;
+                threads: Integer; salvage: Boolean): TPackResult;
 var p: TPja; actual: THash16; cap: QWord; again: TCodecResult;
 begin
   original := nil;
@@ -127,7 +128,7 @@ begin
     { longer than it declares: a damaged orig_size, or a damaged stream.
       Decoded again up to the caller's cap, it is a SizeMismatch with what
       it gives; the first answer stands if that fails too }
-    if (Result.codec.err = ceTooLarge) and (p.orig_size < maxOutput) then begin
+    if salvage and (Result.codec.err = ceTooLarge) and (p.orig_size < maxOutput) then begin
       cap := maxOutput;
       if cap > QWord(High(SizeInt)) then cap := QWord(High(SizeInt));
       again := Decompress(p.payload, original, SizeInt(cap), threads, 0);

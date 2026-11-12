@@ -105,14 +105,14 @@ begin
       1: PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) + 1000);
       2: PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) - 1000);
     end;
-    pr := Unpack(other, High(QWord), back, hx);
+    pr := Unpack(other, High(QWord), back, hx, 1, True);
     Check((pr.err = ukSizeMismatch) and Same(back, orig) and CompareMem(@hx, @h, 16),
        Format('orig_size changed (%d): %s, with the decoded and the expected', [k, pr.Text]));
   end;
   { less than the stream gives, and a cap below what it gives: nothing }
   other := Copy(b, 0, Length(b));
   PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) - 1000);
-  pr := Unpack(other, Length(orig) - 1, back, hx);
+  pr := Unpack(other, Length(orig) - 1, back, hx, 1, True);
   Check((pr.err = ukTooLarge) and (Length(back) = 0), 'orig_size 1000 lower, cap below the original: ' + pr.Text + ', nothing');
 
   Writeln('--- header: each error with its name');
