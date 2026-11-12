@@ -54,9 +54,11 @@ function Pack(const original: TBytes; out pja: TBytes; threads: Integer = 1; fas
               verify: Boolean = True; const ext: string = ''; v7: Boolean = False): TPackResult;
 
 { .pja -> the original. maxOutput: the largest original accepted. With
-  ukHashMismatch, `original` holds what was decoded and `expected` the hash
-  it should have had, for a caller that keeps damaged output under another
-  name; with any other error it is empty. }
+  ukHashMismatch or ukSizeMismatch, `original` holds what was decoded and
+  `expected` the hash it should have had, for a caller that keeps damaged
+  output under another name (the size the descriptor declares may be what
+  is damaged: a stream that runs past it is decoded again up to maxOutput);
+  with any other error it is empty. }
 function Unpack(const pja: TBytes; maxOutput: QWord; out original: TBytes; out expected: THash16;
                 threads: Integer = 1): TPackResult;
 
@@ -105,7 +107,7 @@ end;
 
 function Unpack(const pja: TBytes; maxOutput: QWord; out original: TBytes; out expected: THash16;
                 threads: Integer): TPackResult;
-var p: TPja; actual: THash16; cap: QWord;
+var p: TPja; actual: THash16; cap: QWord; again: TCodecResult;
 begin
   original := nil;
   FillChar(expected, SizeOf(expected), 0);
@@ -122,9 +124,23 @@ begin
   if p.stored then original := p.payload
   else begin
     Result.codec := Decompress(p.payload, original, SizeInt(cap), threads, SizeInt(cap));
+    { longer than it declares: a damaged orig_size, or a damaged stream.
+      Decoded again up to the caller's cap, it is a SizeMismatch with what
+      it gives; the first answer stands if that fails too }
+    if (Result.codec.err = ceTooLarge) and (p.orig_size < maxOutput) then begin
+      cap := maxOutput;
+      if cap > QWord(High(SizeInt)) then cap := QWord(High(SizeInt));
+      again := Decompress(p.payload, original, SizeInt(cap), threads, 0);
+      if again.Ok then Result.codec := again;
+    end;
     if not Result.codec.Ok then begin original := nil; Result.err := ukCodec; Exit; end;
   end;
-  if QWord(Length(original)) <> p.orig_size then begin original := nil; Exit(PackFail(ukSizeMismatch)); end;
+  if QWord(Length(original)) <> p.orig_size then begin
+    { the codec's cap is on the raw part only: the caller's is on the whole }
+    if QWord(Length(original)) > maxOutput then begin original := nil; Exit(PackFail(ukTooLarge)); end;
+    Result.err := ukSizeMismatch;
+    Exit;
+  end;
   StageEnter(stHash);
   actual := Blake3_128(original);
   if not CompareMem(@actual[0], @expected[0], SizeOf(THash16)) then Result.err := ukHashMismatch;

@@ -838,10 +838,16 @@ begin
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
-  if not (r.Ok or (r.err = ukHashMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
+  { a size that does not match is kept with --keep-corrupt, as a hash that
+    does not match is: what was decoded, under another name }
+  if (r.err = ukSizeMismatch) and not keepCorrupt then begin Fail(f + ': ' + r.Text); Exit; end;
+  if not (r.Ok or (r.err = ukHashMismatch) or (r.err = ukSizeMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
   { -n does everything but write: a hash that does not match fails it as
     it fails x (Save, which -n stops before, is where x finds it) }
-  if dryRun and (r.err = ukHashMismatch) then begin Fail(f + ': does not verify (' + r.Text + ')'); Exit; end;
+  if dryRun and not r.Ok then begin Fail(f + ': does not verify (' + r.Text + ')'); Exit; end;
+  { its contents may even match the hash, but the descriptor is damaged:
+    never under the good name, so Save is given a hash it cannot match }
+  if r.err = ukSizeMismatch then begin h := Blake3_128(orig); h[0] := h[0] xor 1; end;
   { the original's own extension; a .pja without one (version 3) by the content }
   if r.ext <> '' then ext := '.' + r.ext
   else if IsJls(orig) then ext := '.jls'

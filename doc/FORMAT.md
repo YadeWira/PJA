@@ -169,6 +169,7 @@ Each row is a case with its expected result, and it is in the tests.
 | hash does not match | **nothing is written** under that name |
 | the same, with `--keep-corrupt` | written as `<name>.corrupt`; if it already exists, `.corrupt.1`, `.corrupt.2`...; if that name is too long, `pja.corrupt[.N]` in the same directory |
 | the same, and there is no free `.corrupt` name | error, without writing anything |
+| the size the descriptor declares is not what the stream gives (a damaged `orig_size`) | as a hash that does not match: nothing under that name; with `--keep-corrupt`, what was decoded (up to `--max-output`) is written as `<name>.corrupt`, even when it matches the stored hash, because the descriptor itself is damaged |
 | the write fails halfway | what was written is deleted before returning the error |
 | the file could not be created | **nothing is deleted**: whatever is there was not written by us |
 

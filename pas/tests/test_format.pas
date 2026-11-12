@@ -96,9 +96,24 @@ begin
   pr := Unpack(other, High(QWord), back, hx);
   Check((pr.err = ukHashMismatch) and Same(back, orig) and (hx[0] = b[16] xor 1),
      'one bit of the hash: HashMismatch, with the decoded and the expected');
-  other := Copy(b, 0, Length(b)); other[8] := other[8] xor 1;
-  pr := Unpack(other, High(QWord), back, hx);
-  Check((not pr.Ok) and (Length(back) = 0), 'orig_size one off: ' + pr.Text + ', nothing');
+  { a damaged orig_size: what was decoded comes back, for --keep-corrupt,
+    whether it declares more than the stream gives or less }
+  for k := 0 to 2 do begin
+    other := Copy(b, 0, Length(b));
+    case k of
+      0: other[8] := other[8] xor 1;
+      1: PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) + 1000);
+      2: PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) - 1000);
+    end;
+    pr := Unpack(other, High(QWord), back, hx);
+    Check((pr.err = ukSizeMismatch) and Same(back, orig) and CompareMem(@hx, @h, 16),
+       Format('orig_size changed (%d): %s, with the decoded and the expected', [k, pr.Text]));
+  end;
+  { less than the stream gives, and a cap below what it gives: nothing }
+  other := Copy(b, 0, Length(b));
+  PQWord(@other[8])^ := NtoLE(LEtoN(PQWord(@other[8])^) - 1000);
+  pr := Unpack(other, Length(orig) - 1, back, hx);
+  Check((pr.err = ukTooLarge) and (Length(back) = 0), 'orig_size 1000 lower, cap below the original: ' + pr.Text + ', nothing');
 
   Writeln('--- header: each error with its name');
   for n := 0 to HEADER_SIZE - 1 do
