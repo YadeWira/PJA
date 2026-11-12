@@ -34,6 +34,7 @@ comes back byte for byte, and nothing is written unless it verified.
 | [PRA](https://github.com/YadeWira/PRA) | raster images (PNM, BMP, TIFF, PSD, HDR, ...) | [packPNM](https://github.com/packjpg/packPNM) |
 | [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | [packPNG](https://github.com/YadeWira/packPNG) |
 | [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
+| [POA](https://github.com/YadeWira/POA) | Ogg (Vorbis, Opus, FLAC, Speex, Theora) | (new) |
 | **PJA** | JPEG, JPEG-LS and JPEG 2000 | [packJPG](https://github.com/YadeWira/packJPG) |
 
 ## What it handles
@@ -150,28 +151,35 @@ hash catches accidents, not tampering).
 
 One archive per set, 8 threads; every file extracted and compared. Size,
 then the time to write / extract. 7-Zip + PJA: 7-Zip 25.01 with PJA
-0.9.6's plugin, `-m0=PJA -m1=LZMA2`; zpaq-std + PJA: zpaq-std 2.6.0 with
-the plugin it ships, `-sa`; [Aqueous](https://github.com/lifthrasiir/aqueous)
-`-l high`; 7-Zip and zpaq-std without PJA for reference.
+0.9.8's plugin, `-m0=PJA -m1=LZMA2`; zpaq-std + PJA: zpaq-std 2.7.2 with
+the plugin it ships (PJA 0.9.8), `-sa -m5`; [Aqueous](https://github.com/lifthrasiir/aqueous)
+`-l high`; 7-Zip and zpaq-std `-m5` without PJA for reference. The mixed
+folder is 40 of the photos among 57 files of other kinds.
 
 | set | 7-Zip + PJA | zpaq-std + PJA | Aqueous | 7-Zip | zpaq-std |
 |---|---|---|---|---|---|
-| photos (151) | **72.57%**, 9.3 / 4.7 s | 72.87%, 16.3 / 5.5 s | 80.46%, 2.3 / 0.7 s | 97.04%, 6.9 / 1.1 s | 97.84%, 0.6 / 0.4 s |
-| corpus (78) | **66.86%**, 6.1 / 2.9 s | 68.36%, 12.9 / 2.7 s | 71.98%, 1.5 / 0.4 s | 82.24%, 2.7 / 0.5 s | 85.28%, 0.4 / 0.3 s |
-| MPO (6) | **73.39%**, 4.6 / 2.3 s | 73.75%, 13.8 / 3.9 s | 78.95%, 1.4 / 0.4 s | 99.57%, 3.6 / 0.8 s | 100.04%, 0.3 / 0.2 s |
-| arithmetic-coded (244) | **17.25%**, 1.7 / 0.8 s | 18.10%, 5.0 / 0.9 s | 85.74%, 0.2 / 0.0 s | 74.49%, 0.6 / 0.1 s | 75.43%, 0.1 / 0.1 s |
-| generated (640) | **16.40%**, 2.7 / 1.4 s | 16.94%, 5.8 / 1.6 s | 33.97%, 0.7 / 0.3 s | 62.85%, 1.3 / 0.4 s | 67.22%, 0.4 / 0.3 s |
-| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 95.81%, 0.2 / 0.0 s | 92.68%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 95.55%, 0.0 / 0.0 s |
-| 12-bit from RAWs (12) | **84.80%**, 3.6 / 2.1 s | 84.98%, 11.5 / 2.9 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.3 / 0.1 s | 100.07%, 0.3 / 0.2 s |
-| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.08%**, 0.3 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 97.82%, 0.0 / 0.0 s |
-| JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 12.4 / 0.7 s | **92.51%**, 126.3 / 94.5 s | 100.00%, 1.2 / 0.1 s | 99.82%, 12.7 / 0.5 s | 99.97%, 0.6 / 0.5 s |
+| photos (151) | **72.57%**, 9.6 / 4.7 s | 72.82%, 32.4 / 5.8 s | 80.46%, 2.5 / 0.8 s | 97.04%, 9.8 / 1.2 s | 94.58%, 320 / 316 s |
+| corpus (78) | **66.86%**, 6.3 / 3.1 s | 68.36%, 14.4 / 2.8 s | 71.98%, 1.5 / 0.3 s | 82.24%, 2.9 / 0.5 s | 80.07%, 140 / 134 s |
+| MPO (6) | **73.39%**, 4.8 / 2.2 s | 73.66%, 17.1 / 4.4 s | 78.94%, 1.3 / 0.4 s | 99.57%, 3.8 / 0.9 s | 95.23%, 196 / 251 s |
+| arithmetic-coded (244) | **17.25%**, 1.8 / 0.8 s | 18.10%, 5.6 / 0.9 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.5 / 0.1 s | 73.13%, 24.8 / 25.4 s |
+| generated (640) | **16.40%**, 2.8 / 1.4 s | 16.94%, 6.0 / 1.7 s | 33.97%, 0.7 / 0.3 s | 62.85%, 1.3 / 0.4 s | 62.65%, 80.2 / 74.6 s |
+| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 93.16%, 0.6 / 0.3 s | 92.62%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 92.42%, 0.4 / 0.3 s |
+| 12-bit from RAWs (12) | **84.80%**, 3.7 / 2.1 s | 84.98%, 11.6 / 3.0 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.2 / 0.1 s | 98.61%, 128 / 128 s |
+| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.08%**, 0.3 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 95.93%, 1.4 / 1.4 s |
+| JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 13.0 / 0.7 s | **92.44%**, 130 / 99 s | 100.00%, 1.3 / 0.1 s | 99.82%, 12.3 / 0.5 s | 99.62%, 221 / 222 s |
+| mixed (97, 38 MB) | 64.83%, 5.7 / 2.1 s | **63.22%**, 41.1 / 41.8 s | 69.98%, 1.9 / 0.4 s | 76.31%, 4.1 / 0.7 s | 73.54%, 155 / 146 s |
 
 7-Zip + PJA is the smallest on every JPEG set but the lossless one.
-zpaq-std + PJA is a little larger and slower, but any zpaq can extract its
-archives without the plugin, and it is the only one here that takes JPEG
-2000. On 10 small 12-bit files the ZPAQL decoder each block carries costs
-more than PJA saves, so zpaq-std stores them as usual. Why each number is
-what it is: [the benchmarks page][wComp].
+zpaq-std + PJA is 0.2 to 1.5 points behind it on JPEG and slower, but any
+zpaq can extract its archives without the plugin; it is the only one here
+that takes JPEG 2000, and the smallest on the mixed folder, where `-m5`
+packs the files PJA does not take tighter than LZMA2 (at 41 s against
+5.7 s). With `-sa -m1` every JPEG and JPEG 2000 set but the small 12-bit one
+stays within 0.1 points, and the mixed folder goes to 71.15% in 7.2 /
+1.9 s. On 10 small 12-bit files the ZPAQL
+decoder each block carries costs more than PJA saves, so zpaq-std stores
+them its usual way. Both methods, and why each number is what it is:
+[the benchmarks page][wComp].
 
 ## In 7-Zip and zpaq-std
 
