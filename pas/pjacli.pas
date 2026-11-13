@@ -26,7 +26,8 @@ uses
   SysUtils, Classes, pjablake3, pjaformat, pjacodec, pjajpeg, pjajls, pjapack, pjafs, pjacpu, pjav7, pjaj2km, pjaj2kpx, pjamodel, pjaj2k, pjathread,
   { the commands for reporting and checking (doc/CLI.md); each format's
     info provider registers itself }
-  pjastage, pjainfo, pjainfojpeg, pjainfoj2k, pjainfopja, pjasysinfo, pjareport, pjabench, pjaselftest;
+  pjastage, pjainfo, pjainfojpeg, pjainfoj2k, pjainfopja, pjasysinfo, pjareport, pjabench, pjaselftest,
+  pjaconsole;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -106,6 +107,8 @@ var w: PPWideChar; n, i: Integer;
 begin
   DefaultSystemCodePage := CP_UTF8;
   DefaultFileSystemCodePage := CP_UTF8;
+  { and what the RTL gives back (ExpandFileName, the names in its errors) }
+  DefaultRTLFileSystemCodePage := CP_UTF8;
   w := CommandLineToArgvW(GetCommandLineW, n);
   args := nil;
   SetLength(args, n);
@@ -326,6 +329,7 @@ begin
   threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
   ReadArgs;
+  SetupStdText;   { UTF-8 out, every character on a Windows console (pjaconsole) }
   if ArgCount = 0 then Usage(2);
   { --cpu may come before the command too }
   i := 1;
@@ -748,6 +752,7 @@ end;
 procedure TCommitter.Execute;
 var p: TPending; have: Boolean;
 begin
+  SetupStdText;   { this thread's own Output and StdErr (pjaconsole) }
   repeat
     EnterCriticalSection(pendLock);
     have := pendCount > 0;
@@ -1149,6 +1154,7 @@ type
 
 procedure TWorker.Execute;
 begin
+  SetupStdText;
   Work;
   ReleaseThreadModels;
 end;

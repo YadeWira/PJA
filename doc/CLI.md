@@ -411,7 +411,15 @@ measured against the old spelling.
   file that matches, in order of name, folders left out. Only the name part
   is a pattern (`photos\*.jpg`, not `*\x.jpg`). A pattern that matches
   nothing fails as `no file matches`, and the other inputs still go through.
-  Elsewhere the shell expands them, as always.
+  Elsewhere the shell expands them, as always. Names are read in UTF-16
+  and kept in UTF-8.
+- **What `pja` prints is UTF-8, and every character shows on a Windows
+  console** (since 0.9.11; before, a name outside the console's code page
+  came out as `?`). To a console it writes UTF-16 (`WriteConsoleW`),
+  without changing the console's code page; to a file or a pipe, UTF-8,
+  so `--json` and `report` read the same on every system. Standard output
+  and error are decided apart: `2> err.txt` with the output on the console
+  works. (From PAIA's fix, `pas/pjaconsole.pas`.)
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 

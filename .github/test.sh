@@ -95,6 +95,23 @@ done
 [ "$n" -ge 30 ] || { echo "FAIL: only $n samples"; exit 1; }
 echo "$n samples back byte for byte"
 
+echo "== a name in UTF-8, in what the command writes to a file"
+# --json, list and report, to a file, carry the name as UTF-8 on every system
+# (on Windows the console's code page would turn it into "?": pjaconsole)
+U="$OUT/u8"; rm -rf "$U"; mkdir -p "$U"
+name='señal 動画.jpg'
+cp tests/jpg/color_plasma.jpg "$U/$name"
+"$OUT/pja$EXE" a -q --json --output-dir="$U" "$U/$name" > "$U/a.json" || { echo "FAIL: a on a UTF-8 name"; exit 1; }
+"$OUT/pja$EXE" list "$U/señal 動画.pja" > "$U/list.txt" || { echo "FAIL: list on a UTF-8 name"; exit 1; }
+"$OUT/pja$EXE" report "$U/$name" > "$U/report.txt" || { echo "FAIL: report on a UTF-8 name"; exit 1; }
+for f in a.json list.txt report.txt; do
+  LC_ALL=C grep -q "$(printf 'se\303\261al \345\213\225\347\224\273')" "$U/$f" \
+    || { echo "FAIL: $f does not carry the name in UTF-8"; cat "$U/$f"; exit 1; }
+done
+"$OUT/pja$EXE" x -q -f -o "$U/back.jpg" "$U/señal 動画.pja" && cmp -s tests/jpg/color_plasma.jpg "$U/back.jpg" \
+  || { echo "FAIL: the UTF-8 name does not come back"; exit 1; }
+echo "a.json, list and report: the name in UTF-8"
+
 echo "== the streams"
 "$OUT/dump_streams$EXE" tests/jpg "$OUT/st"
 "$OUT/dump_streams$EXE" tests/jls "$OUT/st"
