@@ -81,6 +81,10 @@ type
     alloc: function(size: SizeUInt): Pointer; cdecl;
     release: procedure(p: Pointer); cdecl;
     threads: LongInt;
+    cpus: LongInt;
+    args: PChar;
+    argsSize: SizeUInt;
+    wline: PWideChar;
   end;
   { 7-Zip's calling convention for its exports and interfaces }
   HRESULT = LongInt;
@@ -116,6 +120,64 @@ begin
   FillChar((p + 4 + len)^, 4, 0);
 end;
 {$endif}
+
+{ the process's command line, for -mmt (pja7z.c: 7-Zip gives its thread
+  count to the chain's last coder only when extracting): Windows' line, as
+  7-Zip's console reads it; elsewhere the arguments, each ended by a zero
+  byte (Linux: /proc/self/cmdline; macOS: _NSGetArgv, since FreePascal
+  gives a library no ParamStr there); other systems none }
+var cmdArgs: array of Char;
+{$ifdef windows}
+function GetCommandLineW: PWideChar; stdcall; external 'kernel32.dll';
+{$endif}
+{$ifdef darwin}
+function NSGetArgc: PLongInt; cdecl; external 'c' name '_NSGetArgc';
+function NSGetArgv: PPPChar; cdecl; external 'c' name '_NSGetArgv';
+{$endif}
+
+procedure CommandLine(var h: THost7z);
+{$ifdef linux}
+var f: THandle; n, got: SizeInt;
+{$endif}
+{$ifdef darwin}
+var argv: PPChar; i, n, k: SizeInt;
+{$endif}
+begin
+  h.args := nil; h.argsSize := 0; h.wline := nil;
+  try
+    {$ifdef windows}
+    h.wline := GetCommandLineW;
+    {$endif}
+    {$ifdef linux}
+    f := FileOpen('/proc/self/cmdline', fmOpenRead);
+    if f = THandle(-1) then Exit;
+    n := 0;
+    SetLength(cmdArgs, 4096);
+    repeat
+      if n = Length(cmdArgs) then SetLength(cmdArgs, 2 * n);
+      got := FileRead(f, cmdArgs[n], Length(cmdArgs) - n);
+      if got > 0 then Inc(n, got);
+    until got <= 0;
+    FileClose(f);
+    if n > 0 then begin h.args := @cmdArgs[0]; h.argsSize := n; end;
+    {$endif}
+    {$ifdef darwin}
+    argv := NSGetArgv^;
+    n := 0;
+    for i := 0 to NSGetArgc^ - 1 do Inc(n, Length(argv[i]) + 1);
+    SetLength(cmdArgs, n);
+    k := 0;
+    for i := 0 to NSGetArgc^ - 1 do begin
+      if Length(argv[i]) > 0 then Move(argv[i]^, cmdArgs[k], Length(argv[i]));
+      Inc(k, Length(argv[i]));
+      cmdArgs[k] := #0; Inc(k);
+    end;
+    if n > 0 then begin h.args := @cmdArgs[0]; h.argsSize := n; end;
+    {$endif}
+  except
+    h.args := nil; h.argsSize := 0; h.wline := nil;
+  end;
+end;
 
 function HostAlloc(size: SizeUInt): Pointer; cdecl;
 begin
@@ -464,7 +526,10 @@ begin
   host7z.bstr := @MakeBstr;
   host7z.alloc := @HostAlloc;
   host7z.release := @HostRelease;
-  host7z.threads := CpuCount;
+  host7z.cpus := CpuCount;
+  host7z.threads := host7z.cpus;
   if host7z.threads > 8 then host7z.threads := 8;
+  CommandLine(host7z);
   pja7z_host(host7z);
+  cmdArgs := nil;
 end.

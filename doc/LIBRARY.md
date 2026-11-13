@@ -222,9 +222,20 @@ A stream a newer PJA wrote (`PJA_E_VERSION`) comes out of the plugin as
 files, and damaged data as "Data Error", as before (7-Zip 25.01, 0.9.5);
 damage on one of the version bytes above shows as "Unsupported Method".
 
-`-mmt` sets the filter's threads when compressing; extracting, 7-Zip
+`-mmt` sets the filter's threads when compressing. Extracting, 7-Zip
 gives its thread count only to the first coder of the chain that takes one
-(LZMA2), so PJA uses the processors (up to 8), as the `pja` command does.
+(LZMA2: `CDecoder::Decode` in 7zDecode.cpp, the coders listed backwards
+from `-m0`), never to PJA; so since 0.9.10 the plugin reads `-mmt` from
+the process's command line (Linux `/proc/self/cmdline`, macOS
+`_NSGetArgv`, Windows `GetCommandLineW`), parsed as 7-Zip's console does:
+`-mmt=N`, `-mmtN`, `-mmt=on`/`off`, `-mmt+`/`-`, `-mmt=pN` (a percentage
+of the processors), the last one counting, none after `--`. Without
+`-mmt`, and in another host (7zFM, 7zG), PJA uses the processors (up to
+8), as the `pja` command does; a 32-bit 7-Zip no more than that. The
+archive's bytes do not depend on the threads. Measured (20 photos, 8 MB,
+7-Zip 25.01 on Linux): extracting with `-mmt=1` 4.3 s on one core, `-mmt=2`
+2.3 s, `-mmt=8` 0.86 s, `-mmt=16` 0.77 s; before, 0.8 s on about 5.5 cores
+whatever `-mmt` said. (The same fix as PPA's, 13ccd32.)
 **The archive needs the plugin to be extracted**, in every 7-Zip that
 opens it. It works with 7-Zip on Windows and with 7-Zip 23 or later on
 Linux and macOS; p7zip (the old port, `7z` 16.02) builds its interfaces

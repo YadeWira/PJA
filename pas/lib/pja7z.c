@@ -58,9 +58,22 @@ typedef struct {
   void *(*alloc)(size_t size);
   void (*release)(void *p);
   int threads;    /* when 7-Zip says nothing: the processors, up to 8 */
+  int cpus;       /* the processors (-mmt=p50 is half of them) */
+  /* the process's command line, read only while pja7z_host runs: its
+     arguments, each ended by a zero byte (Linux, macOS), or Windows' line
+     (GetCommandLineW); 0 when there is none */
+  const char *args;
+  size_t args_size;
+  const uint16_t *wline;
 } host7z_t;
 static host7z_t H7;
-void pja7z_host(const host7z_t *h) { H7 = *h; }
+static int cmdline_mt(const host7z_t *h);
+static int MT;    /* -mmt on 7-Zip's command line: the threads, or 0 */
+void pja7z_host(const host7z_t *h) {
+  H7 = *h;
+  MT = cmdline_mt(h);
+  H7.args = 0; H7.args_size = 0; H7.wline = 0;
+}
 
 typedef ptrdiff_t (PJA_CALL *pja_read_fn)(void *ctx, void *buf, size_t size);
 typedef int (PJA_CALL *pja_write_fn)(void *ctx, const void *buf, size_t size);
@@ -192,6 +205,142 @@ static HRESULT result(const run_t *r, int res) {
   }
 }
 
+/* ---------- -mmt on the command line ----------
+
+   Extracting, 7-Zip gives its thread count (-mmt, or the processors) to one
+   coder of the folder only: CDecoder::Decode (Archive/7z/7zDecode.cpp)
+   calls ICompressSetCoderMt::SetNumberOfThreads, or SetMemLimit, on the
+   first coder that takes either, sets mt_wasUsed and asks no other. The
+   folder lists the coders backwards from the methods (7zEncode.cpp:
+   folder.Coders[i] is method numMethods - 1 - i), so with -m0=PJA
+   -m1=LZMA2 (zstd, BZip2 alike) that is LZMA2, never PJA; and nothing else
+   reaches a decoder (SetCoderPropertiesOpt is the encoder's). 7-Zip-zstd
+   does the same. So PJA reads -mmt where 7-Zip's console took it, the
+   process's command line, as 7-Zip parses it: switches up to "--"
+   (Common/CommandLineParser.cpp); "-mNAME=VALUE", a VALUE of digits a
+   number, "-mNAME-" and "-mNAME+" off and on (UI/Common/SetProperties.cpp);
+   then ParseMtProp2 (Common/MethodProps.cpp). The last -mmt counts; one
+   that leaves 7-Zip's count to the processors leaves PJA's default; one
+   7-Zip refuses does not matter (7-Zip stops). A host that is not 7-Zip's
+   console (7zFM, 7zG, another program) has no -mmt there: PJA's default. */
+
+static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+static int is_digit(int c) { return c >= '0' && c <= '9'; }
+
+/* ParseMtProp2's string, [d|u][p]N, again and again: the threads, or -1.
+   In 32 bits (no 64-bit division: the DLL has no C runtime), past 64
+   threads any number is as good as another */
+static long mt_string(const char *s, const char *end, int cpus) {
+  uint32_t c32 = cpus < 1 ? 1 : cpus > 4096 ? 4096 : (uint32_t)cpus, v = c32;
+  while (s < end) {
+    int c = lower(*s);
+    if (c == 'd' || c == 'u') { s++; continue; }
+    int percent = c == 'p';
+    if (percent) s++;
+    if (s >= end || !is_digit(*s)) return -1;
+    uint32_t n = 0;
+    while (s < end && is_digit(*s)) {
+      n = n * 10 + (uint32_t)(*s - '0');
+      if (n > 10000) n = 10000;
+      s++;
+    }
+    v = percent ? c32 * n / 100 : n;
+  }
+  return v > 64 ? 64 : (long)v;
+}
+
+/* one argument: -1 when it is not -mmt (or is one 7-Zip refuses), 0 when it
+   leaves the count to the processors, else the threads (1 to 64) */
+static long mt_arg(const char *a, size_t len, int cpus) {
+  if (len < 4 || a[0] != '-' || lower(a[1]) != 'm' || lower(a[2]) != 'm' || lower(a[3]) != 't')
+    return -1;
+  const char *end = a + len, *rest = a + 4, *eq = rest;
+  while (eq < end && *eq != '=') eq++;
+  long v;
+  if (eq == end) {    /* -mmt, -mmt-, -mmt+, -mmtN */
+    if (rest == end || (end - rest == 1 && *rest == '+')) return 0;
+    if (end - rest == 1 && *rest == '-') return 1;
+    if (lower(*rest) == 'f') return -1;    /* -mmtf: the 7z handler's mixer */
+    if (end[-1] == '-' || end[-1] == '+') return -1;
+    v = mt_string(rest, end, cpus);
+  } else {            /* -mmt=VALUE */
+    if (eq != rest) return -1;
+    const char *s = eq + 1, *d = s;
+    size_t n = (size_t)(end - s);
+    if (!n) return 0;
+    while (d < end && is_digit(*d)) d++;
+    if (d == end) {   /* a number, VT_UI4 (7-Zip refuses a larger one) */
+      uint32_t x = 0;
+      for (d = s; d < end; d++) {
+        uint32_t k = (uint32_t)(*d - '0');
+        if (x > 429496729u || (x == 429496729u && k > 5)) return -1;
+        x = x * 10 + k;
+      }
+      v = x > 64 ? 64 : (long)x;
+    } else if ((n == 1 && *s == '+') || (n == 2 && lower(s[0]) == 'o' && lower(s[1]) == 'n')) {
+      return 0;
+    } else if ((n == 1 && *s == '-')
+               || (n == 3 && lower(s[0]) == 'o' && lower(s[1]) == 'f' && lower(s[2]) == 'f')) {
+      return 1;
+    } else {
+      v = mt_string(s, end, cpus);
+    }
+  }
+  if (v < 0) return -1;
+  return v < 1 ? 1 : v;
+}
+
+/* the arguments a character at a time, each ended by end_arg */
+typedef struct {
+  char buf[64];    /* a longer argument is no -mmt */
+  size_t n;
+  int index, stopped, cpus;
+  long mt;
+} args_t;
+static void put_char(args_t *g, unsigned c) {
+  if (g->n < sizeof g->buf) g->buf[g->n] = (char)(c > 0 && c < 128 ? c : '?');
+  g->n++;
+}
+static void end_arg(args_t *g) {
+  if (g->index++ > 0 && !g->stopped && g->n <= sizeof g->buf) {    /* not the program */
+    if (g->n == 2 && g->buf[0] == '-' && g->buf[1] == '-') g->stopped = 1;
+    else {
+      long r = mt_arg(g->buf, g->n, g->cpus);
+      if (r >= 0) g->mt = r;
+    }
+  }
+  g->n = 0;
+}
+
+static int cmdline_mt(const host7z_t *h) {
+  args_t g;
+  g.n = 0; g.index = 0; g.stopped = 0; g.mt = 0;
+  g.cpus = h->cpus > 0 ? h->cpus : 1;
+  if (h->args) {
+    for (size_t k = 0; k < h->args_size; k++) {
+      if (h->args[k]) put_char(&g, (uint8_t)h->args[k]);
+      else end_arg(&g);
+    }
+    if (g.n) end_arg(&g);
+  } else if (h->wline) {
+    /* Windows: 7-Zip's console splits the line itself (SplitCommandLine):
+       spaces and tabs outside quotes part the arguments; quotes go */
+    int quote = 0, started = 0;
+    for (const uint16_t *w = h->wline; *w; w++) {
+      if ((*w == ' ' || *w == '\t') && !quote) {
+        if (started) end_arg(&g);
+        started = 0;
+        continue;
+      }
+      started = 1;
+      if (*w == '"') quote = !quote;
+      else put_char(&g, *w);
+    }
+    if (started) end_arg(&g);
+  }
+  return (int)g.mt;
+}
+
 /* ---------- the coder ---------- */
 
 /* ICompressCoder (PJA1) or ICompressCoder2 (PJA): the same object, its
@@ -273,6 +422,8 @@ static uint32_t COMCALL m_release(void *p) { return c_release(from_mt(p)); }
 static HRESULT COMCALL m_threads(void *p, uint32_t threads) {
   coder_t *c = from_mt(p);
   c->threads = threads < 1 ? 1 : threads > 64 ? 64 : (int)threads;
+  /* a 32-bit 7-Zip: no more than the default (the processors, up to 8) */
+  if (sizeof(void *) == 4 && H7.threads > 0 && c->threads > H7.threads) c->threads = H7.threads;
   return S_OK;
 }
 
@@ -300,8 +451,13 @@ static HRESULT new_coder(uint32_t index, int encode, const guid_t *iid, void **o
   c->vt = c->streams == 2 ? (const void *)&CODER2_VT : (const void *)&CODER_VT;
   c->mt_vt = &CODER_MT_VT; c->refs = 1; c->encode = encode;
   /* extracting, 7-Zip tells only the first coder of the chain that takes
-     it (LZMA2 or zstd) how many threads to use; PJA uses the processors */
-  c->threads = H7.threads > 0 ? H7.threads : 1;
+     it (LZMA2 or zstd) how many threads to use: -mmt on the command line,
+     else the processors (up to 8); a 32-bit 7-Zip no more than that
+     default. SetNumberOfThreads, when 7-Zip calls it (compressing), wins.
+     (Ported from PPA, 13ccd32.) */
+  int t = MT > 0 ? MT : H7.threads > 0 ? H7.threads : 1;
+  if (sizeof(void *) == 4 && H7.threads > 0 && t > H7.threads) t = H7.threads;
+  c->threads = t;
   HRESULT r = c_query(c, iid, out);
   c_release(c);
   return r;
