@@ -1323,8 +1323,8 @@ const
   FALLBACK: array[TFormatKind] of AnsiString = (
     '',
     'fallback_ma=flzma2:10,uflzma2:11,lzma:9,lz:9,zstd:19'#10'fallback_m=3,4,5,2,1'#10,
-    'fallback_ma=flzma2:10,uflzma2:11,lz6:15,zstd:19,lzma:9'#10'fallback_m=3,4,5,2,1'#10,
-    'fallback_ma=zstd:19,deflate:12,zxc:7,flzma2:10,lz6:15'#10'fallback_m=1,2,3,4,5'#10);
+    'fallback_ma=flzma2:10,uflzma2:11,lz6hc:15,zstd:19,lzma:9'#10'fallback_m=3,4,5,2,1'#10,
+    'fallback_ma=zstd:19,deflate:12,zxc:7,flzma2:10,lz6hc:15'#10'fallback_m=1,2,3,4,5'#10);
 
 { a card with its format's fallback keys after it }
 procedure AddFallback(var card: AnsiString);

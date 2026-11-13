@@ -4171,8 +4171,8 @@ and which method suits them:
 | format | `fallback_ma` | `fallback_m` |
 |---|---|---|
 | JPEG | `flzma2:10,uflzma2:11,lzma:9,lz:9,zstd:19` | `3,4,5,2,1` |
-| JPEG-LS | `flzma2:10,uflzma2:11,lz6:15,zstd:19,lzma:9` | `3,4,5,2,1` |
-| JPEG 2000 | `zstd:19,deflate:12,zxc:7,flzma2:10,lz6:15` | `1,2,3,4,5` |
+| JPEG-LS | `flzma2:10,uflzma2:11,lz6hc:15,zstd:19,lzma:9` | `3,4,5,2,1` |
+| JPEG 2000 | `zstd:19,deflate:12,zxc:7,flzma2:10,lz6hc:15` | `1,2,3,4,5` |
 
 Measured with zpaq-std 2.9.0-rc1, 8 threads, on what the plugin does not
 take: 44 JPEG (cut short at 55 to 95% of the file, one cut per file, or
@@ -4189,6 +4189,11 @@ methods each, every archive extracted and compared:
 | `-ma:flzma2:10` | 91.01%, 3.7 / 0.5 s | 87.91%, 0.3 / 0.1 s | 99.85%, 11.7 / 0.6 s |
 | `-ma:zstd:19` | 92.07%, 3.2 / 0.2 s | 88.13%, 0.3 / 0.1 s | 99.80%, 15.9 / 0.4 s |
 | `-ma:kanzi:9` | 89.95%, 17.9 / 17.7 s | 90.07% | 99.76%, 101 / 22 s |
+
+(0.9.11: `lz6:15` became `lz6hc:15`, the same codec and level: zpaq-std
+2.10.0 renamed lz6's former profile `lz6hc` and gave `lz6` another engine,
+levels 1 to 13. zpaq-std 2.9.0 does not know `lz6hc` and skips it, as it
+would any entry it does not know; the entries before it come first anyway.)
 
 `-m5` is the smallest everywhere but extracts 120 times slower than
 flzma2 on JPEG (64 s against 0.5 s for 13 MB), so it is not first; on
