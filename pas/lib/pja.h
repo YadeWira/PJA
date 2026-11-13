@@ -57,7 +57,7 @@ enum {
 /* Error codes may be added; a caller treats one it does not know as an
    error, as it treats PJA_E_DATA. */
 
-/* "pja 0.9.10" */
+/* "pja 0.9.11" */
 const char *PJA_CALL pja_version(void);
 
 /* A JPEG or JPEG-LS file -> a .pja. threads: how many at once (1 or more).
