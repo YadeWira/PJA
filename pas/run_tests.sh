@@ -113,7 +113,7 @@ python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pja7 "$OUT/zpaql7" "${Z7[@]}" |
 python3 "$PJA/tools/zpaql/test_pjadec.py" --v8 --pja7 "$OUT/zpaql7" "${Z7[@]}" | tail -1
 python3 "$PJA/tools/zpaql/test_pjadec.py" --v8 --lz --pja7 "$OUT/zpaql7" "${Z7[@]}" | tail -1
 rm -rf "$OUT/zpaqlx7"; mkdir -p "$OUT/zpaqlx7"
-ZX7=("$PJA/tests/jpg/dnl_baseline.jpg" "$PJA/tests/jpg/twelve_bit.jpg")
+ZX7=("$PJA/tests/jpg/dnl_baseline.jpg" "$PJA/tests/jpg/twelve_bit.jpg" "$PJA/tests/jpg/sos_se_zero.jpg")
 "$OUT/zpaql_segments" --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}"
 python3 "$PJA/tools/zpaql/test_pjadec.py" --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}" | tail -1
 python3 "$PJA/tools/zpaql/test_pjadec.py" --lz --pjax7 "$OUT/zpaqlx7" "${ZX7[@]}" | tail -1

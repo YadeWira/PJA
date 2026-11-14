@@ -4216,3 +4216,79 @@ and `-rcmd` costs half a point for extraction 2.9 times faster. Windows 10
 x64 and x86 (rc4): the same sizes on both, every file back with the plugin
 and without it. The scripts and sets are in the author's lab
 (`rcmd/meas.sh`, `rcmd/run4.sh`).
+
+## A sequential scan's Ss and Se (13/11/2026)
+
+A DICOM 12-bit JPEG from pydicom's test data (`JPEG-lossy.dcm`, 256x1024,
+SOF1) has Ss = 0 and Se = 0 in its SOS. A sequential scan holds all 64
+coefficients whatever those bytes say: libjpeg only warns
+(JWRN_NOT_SEQUENTIAL) and reads 0 to 63. Up to 0.9.11 PJA said BadSos and
+took the file as bytes (90.29%); now ReadSos does as libjpeg does when Ah
+and Al are 0 (a point transform is still refused), and the file goes
+through the model (65.72%, as its twin with Se = 63, 65.75%). The header
+keeps its bytes, so nothing changes in any stream format; the ZPAQL
+decoders never read Ss or Se for a sequential scan.
+
+In the same batch, a 16-bit near-lossless JPEG-LS from the same source
+(`CT1_JLSN.dcm`, signed CT samples, NEAR 4) stays bytes (98.56%): its
+scan runs out of bits on line 409 of 512, and CharLS 2.4.2 and ffmpeg's
+decoder read it the same way, the image going wrong from about line 360.
+The stream is damaged or its encoder broke the standard; there is nothing
+to follow.
+
+## Lossless JPEG: subsampled components, a wrapping predictor, bytes when they win (13/11/2026)
+
+The same batch had three lossless JPEGs (SOF3) PJA took badly.
+
+**Subsampled components.** The T.81 conformance files O1 (8 bits, one
+interleaved scan) and O2 (16 bits, a scan per component) have 4 components
+sampled 1x1, 1x2, 3x1 and 1x4, and PJA said Unsupported and took them as
+bytes. A lossless MCU (A.2) is h x v samples of each component of an
+interleaved scan, over the frame's MCU grid and past the image's edge as
+the DCT's blocks are; a scan of one component walks its own size,
+ceil(X*h/Hmax) x ceil(Y*v/Vmax), one sample an MCU. Each component's
+samples are now kept on the MCU grid (bw x bh, the frame's own size when
+nothing is subsampled, so no stream changes for those), the scans walk
+them that way, and a restart interval is whole rows of MCUs (libjpeg's
+rule; the frame's width alone before). O1 and O2 decode to the same
+image, O2's 8 bits higher, except for the rows past the edge only the
+interleaved scan codes, which is how A.2 has it. The JPEG-LS samples model
+already took components of different sizes. O1: 85.96% as bytes, now
+65.11%. The plugin's pjall still takes only unsubsampled files.
+
+**A predictor that wraps.** `JPEGLossless_1s_1f_i_16_16_bad.dcm`
+(pydicom's test data; 16 bits, predictor 6, signed CT samples) round
+trips, but the model left it at 100%: its image is noise. Its encoder
+computed Ra - Rc as a 16-bit signed number before halving it, where
+H.1.2.1's predictor does not wrap; decoded with that predictor, the image
+is a CT slice (line 256 starts 23, 30, 17, 16 instead of 23, 32798,
+49169, ...). Both readings are the same bits, so either rebuilds the file;
+only the model cares. Decompose reads such a scan (predictor 5 or 6, 16
+bits after the point transform) both ways and keeps the second if its
+image is four times smoother (the sum of each sample against its left
+neighbour, the short way round 2^16: 1.5e9 against 9.2e6 here). Version 5
+cannot say it, so it goes in version 6 as a quirk (WRAP, flag 16, a list
+of scans like QUIRKS'), and the plugin's pjall refuses it. 100.02%, now
+80.94%.
+
+**Bytes when they win.** O2's samples are 8 bits shifted up 8: the
+samples model takes them at 43.70%, the raw bytes' model the file at
+33.63%. Three of pydicom's files with few distinct values (about 236 in
+a 16-bit or a colour image) are the same story, much more so. So
+Compress, for a lossless JPEG, also codes the file as bytes and keeps the
+smaller. It costs time: compressing pydicom's three largest (680 to 750
+KB) took 0.67 to 0.92 s with 0.9.11 and takes 0.94 to 1.43 s now, 8
+threads; a lossless JPEG is rare enough. Extracting costs nothing more.
+
+| file | 0.9.11 | 0.9.12 |
+|---|---|---|
+| JPEGLossless P14 SV1, 16 bits | 66.05% | 28.50% (bytes) |
+| JPEGLossless P14 SV1, 3 components, frame 0 | 33.65% | 26.19% (bytes) |
+| the same, frame 1 | 33.54% | 26.13% (bytes) |
+| T.81 O1, 8 bits, subsampled | 85.96% (bytes) | 65.11% |
+| T.81 O2, 16 bits, subsampled | 33.63% (bytes) | 33.63% (bytes) |
+| signed CT, predictor 6 that wraps | 100.02% (stored) | 80.94% |
+| JPEG-lossy.dcm's 12-bit JPEG, Se = 0 | 90.29% (bytes) | 65.72% |
+
+The model itself is unchanged: on the camera-made and DICOM lossless
+JPEGs the samples model takes, it stays ahead of the bytes'.

@@ -33,7 +33,7 @@ uses Math, pjaformat, pjacodec, pjajpeg, pjajls, pjamodel;
 
 const
   { doc/CODEC.md, version 6 }
-  V6_QUIRKS = 1; V6_BYTES = 2; V6_CORRECTION = 4; V6_PATCH = 8;
+  V6_QUIRKS = 1; V6_BYTES = 2; V6_CORRECTION = 4; V6_PATCH = 8; V6_WRAP = 16;
   PART_ENTRY = 13;
   PART_ZEROS = 1; PART_COPY = 2;
   MAX_LISTED_PARTS = 64;
@@ -91,6 +91,10 @@ begin
   if flags and V6_CORRECTION <> 0 then begin
     if p + 4 > Length(s) then Exit;
     p := p + 4 + 8 * GetU32(s, p);
+  end;
+  if flags and V6_WRAP <> 0 then begin
+    if p + 4 > Length(s) then Exit;
+    p := p + 4 + 4 * GetU32(s, p);
   end;
   i := 0;
   while i < n do begin
@@ -261,6 +265,7 @@ begin
   n.Str('kind', 'parts (JPEGs inside, each a stream; then the host)');
   if flags and V6_QUIRKS <> 0 then n.Bool('restart_quirk', True);
   if flags and V6_CORRECTION <> 0 then n.Bool('correction_bits_quirk', True);
+  if flags and V6_WRAP <> 0 then n.Bool('wrapped_predictor_quirk', True);
   if Length(s) < 6 then begin n.Str('problem', 'cut short'); Exit; end;
   cnt := GetU32(s, 2);
   n.Num('parts', cnt);
@@ -276,6 +281,11 @@ begin
     if p + 4 > Length(s) then Exit;
     n.Num('scans_with_other_correction_limit', GetU32(s, p));
     p := p + 4 + 8 * GetU32(s, p);
+  end;
+  if flags and V6_WRAP <> 0 then begin
+    if p + 4 > Length(s) then Exit;
+    n.Num('scans_with_wrapped_predictor', GetU32(s, p));
+    p := p + 4 + 4 * GetU32(s, p);
   end;
   parts := n.List('part_list');
   at := p;

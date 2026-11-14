@@ -100,8 +100,9 @@ type
     bwReal, bhReal: SizeInt;
     { bw*bh*64, each block in zigzag order }
     coef: array of SmallInt;
-    { lossless JPEG: the samples instead, width*height, row by row (the
-      point transform's, as the scan codes them) }
+    { lossless JPEG: the samples instead, bw*bh, row by row (the point
+      transform's, as the scan codes them); bw and bh count samples there,
+      the frame's width and height with no component subsampled }
     samples: array of Word;
   end;
 
@@ -129,6 +130,12 @@ type
       wrote the DRI and then coded as if there were none (ri is 0 then).
       ParseHeaders cannot tell it from the raw bytes: the caller says it }
     ignoreRi: Boolean;
+    { lossless, predictor 5 or 6 at 16 bits: the encoder took Rb - Rc (or
+      Ra - Rc) as a 16-bit signed number before halving it, so it wraps
+      where H.1.2.1's does not. The bits do not tell: Decompose decodes
+      such a scan both ways and keeps the smoother image, and the caller
+      says it otherwise }
+    wrapPred: Boolean;
     cut: SizeInt;                    { where in TJpeg.raw its data goes }
     { Decompose only: its entropy-coded bytes in the file, [dataStart, dataEnd) }
     dataStart, dataEnd: SizeInt;
@@ -254,6 +261,11 @@ function VerifyRoundTripFrom(const data: TBytes; const ref: TJpeg; const refData
 function IsMpo(const data: TBytes): Boolean;
 { Some scan with a DRI in force and no restarts (TScan.ignoreRi) }
 function HasIgnoredRestarts(const j: TJpeg): Boolean;
+{ Some lossless scan of a wrapPred encoder's (TScan.wrapPred) }
+function HasWrappedPredictor(const j: TJpeg): Boolean;
+{ Whether a scan may be a wrapPred encoder's: lossless, predictor 5 or 6,
+  differences that can pass 15 bits }
+function MayWrapPred(const j: TJpeg; const s: TScan): Boolean;
 { Some scan whose EOB runs end at another number of correction bits than
   libjpeg's (TScan.maxBe) }
 function HasCorrectionLimits(const j: TJpeg): Boolean;
@@ -1964,12 +1976,23 @@ begin
       if v > j.vmax then j.vmax := v;
     end;
   if j.lossless then begin
-    { the samples of each component, none subsampled }
-    if (j.hmax <> 1) or (j.vmax <> 1) then Exit(jeUnsupported);
-    if Int64(j.width) * j.height * nf > MAX_LOSSLESS_SAMPLES then Exit(jeTooLarge);
+    { the samples of each component, bw x bh: the MCU grid's (an MCU is h x v
+      samples of each, A.2.4), the frame's own size with none subsampled;
+      bwReal x bhReal, what a scan of the component alone walks }
+    j.mcusx := (j.width + j.hmax - 1) div j.hmax;
+    j.mcusy := (j.height + j.vmax - 1) div j.vmax;
+    blocks := 0;
     for i := 0 to nf - 1 do
       with j.comp[i] do begin
-        SetLength(samples, SizeInt(j.width) * j.height);
+        bw := SizeInt(j.mcusx) * h; bh := SizeInt(j.mcusy) * v;
+        bwReal := (Int64(j.width) * h + j.hmax - 1) div j.hmax;
+        bhReal := (Int64(j.height) * v + j.vmax - 1) div j.vmax;
+        Inc(blocks, Int64(bw) * bh);
+      end;
+    if blocks > MAX_LOSSLESS_SAMPLES then Exit(jeTooLarge);
+    for i := 0 to nf - 1 do
+      with j.comp[i] do begin
+        SetLength(samples, bw * bh);
         if Length(samples) > 0 then FillChar(samples[0], Length(samples) * SizeOf(Word), 0);
       end;
     Exit(jeNone);
@@ -2020,9 +2043,10 @@ begin
   s.ss := d[q]; s.se := d[q + 1]; s.ah := d[q + 2] shr 4; s.al := d[q + 2] and 15;
   if j.lossless then begin
     { H.1.2: a predictor 1 to 7, Se and Ah zero, a point transform below the
-      precision; restarts at the start of a line, as libjpeg has them }
+      precision; restarts at the start of a row of MCUs, as libjpeg has them }
     if (s.ss < 1) or (s.ss > 7) or (s.se <> 0) or (s.ah <> 0) or (s.al >= j.precision) then Exit(jeBadSos);
-    if (ri > 0) and (ri mod j.width <> 0) then Exit(jeUnsupported);
+    if s.ncomp = 1 then k := j.comp[s.comp[0]].bwReal else k := j.mcusx;
+    if (ri > 0) and (ri mod k <> 0) then Exit(jeUnsupported);
     for i := 0 to s.ncomp - 1 do begin
       if not hs.present[0, tds[i]] then Exit(jeMissingTable);
       s.dc[i] := hs.t[0, tds[i]];
@@ -2031,7 +2055,11 @@ begin
     Exit(jeNone);
   end;
   if not j.progressive then begin
-    if (s.ss <> 0) or (s.se <> 63) or (s.ah <> 0) or (s.al <> 0) then Exit(jeBadSos);
+    { Ss and Se mean nothing to a sequential scan: libjpeg only warns
+      (JWRN_NOT_SEQUENTIAL) and reads all 64 coefficients, and some DICOM
+      encoders write Se = 0. The header keeps its bytes; the scan is 0..63 }
+    if (s.ah <> 0) or (s.al <> 0) then Exit(jeBadSos);
+    s.ss := 0; s.se := 63;
   end else begin
     { G.1.1.1: DC alone, or AC of a single component; each refinement drops one bit }
     if (s.ss = 0) and (s.se <> 0) then Exit(jeBadSos);
@@ -2074,35 +2102,76 @@ end;
 
 { H.1.2.1, as libjpeg computes it: Ra the sample to the left, Rb the one
   above, Rc above and to the left; the shifts arithmetic }
-function LosslessPredict(psv, ra, rb, rc: Integer): Integer; inline;
+function LosslessPredict(psv, ra, rb, rc: Integer; wrap: Boolean): Integer; inline;
 begin
   case psv of
     1: Result := ra;
     2: Result := rb;
     3: Result := rc;
     4: Result := ra + rb - rc;
-    5: Result := ra + SarLongint(rb - rc, 1);
-    6: Result := rb + SarLongint(ra - rc, 1);
+    5: if wrap then Result := ra + SarLongint(Wrap16(rb - rc), 1)
+       else Result := ra + SarLongint(rb - rc, 1);
+    6: if wrap then Result := rb + SarLongint(Wrap16(ra - rc), 1)
+       else Result := rb + SarLongint(ra - rc, 1);
   else Result := (ra + rb) shr 1;
   end;
 end;
 
-{ The prediction of the sample at (x, y) of a component; y0 the first line
-  of its restart interval (the scan's first line without restarts) }
-function LosslessPrediction(const j: TJpeg; const s: TScan; const sm: array of Word; x, y, y0: SizeInt): Integer;
-var w: SizeInt;
+{ Whether a scan may be a wrapPred encoder's: predictor 5 or 6, and
+  differences that can pass 15 bits }
+function MayWrapPred(const j: TJpeg; const s: TScan): Boolean;
 begin
-  w := j.width;
+  Result := j.lossless and ((s.ss = 5) or (s.ss = 6)) and (j.precision - s.al = 16);
+end;
+
+{ How rough a scan's image is: each sample against the one on its left,
+  the difference taken the short way round 2^16 }
+function Roughness(const j: TJpeg; const s: TScan): QWord;
+var i, c, d: Integer; k: SizeInt;
+begin
+  Result := 0;
+  for i := 0 to s.ncomp - 1 do begin
+    c := s.comp[i];
+    for k := 1 to High(j.comp[c].samples) do
+      if k mod j.comp[c].bw <> 0 then begin
+        d := (Integer(j.comp[c].samples[k]) - j.comp[c].samples[k - 1]) and $FFFF;
+        if d > 32768 then d := 65536 - d;
+        Inc(Result, d);
+      end;
+  end;
+end;
+
+{ The prediction of the sample at (x, y) of a component whose rows are w
+  samples apart; y0 the first line of its restart interval (the scan's
+  first line without restarts) }
+function LosslessPrediction(const j: TJpeg; const s: TScan; const sm: array of Word; x, y, y0, w: SizeInt): Integer;
+begin
   if y = y0 then begin
     if x = 0 then Result := 1 shl (j.precision - s.al - 1)
     else Result := sm[y * w + x - 1];
   end else if x = 0 then Result := sm[(y - 1) * w]
-  else Result := LosslessPredict(s.ss, sm[y * w + x - 1], sm[(y - 1) * w + x], sm[(y - 1) * w + x - 1]);
+  else Result := LosslessPredict(s.ss, sm[y * w + x - 1], sm[(y - 1) * w + x], sm[(y - 1) * w + x - 1], s.wrapPred);
+end;
+
+{ A lossless scan's MCUs (A.2): one sample of its component when it has one,
+  over the component's own size; with several, h x v samples of each in
+  turn, over the frame's MCU grid (the samples past the image coded too).
+  A restart interval is whole rows of MCUs (ReadSos) }
+procedure LosslessGrid(const j: TJpeg; const s: TScan; out mcusX, mcusY, rows: SizeInt);
+begin
+  if s.ncomp = 1 then begin
+    mcusX := j.comp[s.comp[0]].bwReal; mcusY := j.comp[s.comp[0]].bhReal;
+  end else begin
+    mcusX := j.mcusx; mcusY := j.mcusy;
+  end;
+  rows := 0;
+  if s.ri > 0 then rows := s.ri div mcusX;
 end;
 
 function DecodeScanLossless(const data: TBytes; first: SizeInt; var j: TJpeg; var s: TScan;
                             out last: SizeInt): TJpegResult;
-var rd: TBitReader; x, y, y0, rows, w: SizeInt; i, c, t, v, pb, rst, diff, top: Integer; e: TJpegError;
+var rd: TBitReader; mx, my, mcusX, mcusY, rows, w, x, y, y0: SizeInt; i, c, t, v, pb, rst, diff, top,
+    hh, vv, r, q: Integer; e: TJpegError;
 
   function Padding: Boolean;
   begin
@@ -2119,36 +2188,41 @@ begin
   rd := Default(TBitReader);
   rd.d := data; rd.p := first;
   s.padbit := -1;
-  w := j.width;
-  rows := 0;
-  if s.ri > 0 then rows := s.ri div w;
+  LosslessGrid(j, s, mcusX, mcusY, rows);
   { the samples a P - Pt bit range holds: anything above, no encoder writes }
   top := (1 shl (j.precision - s.al)) - 1;
   rst := 0; y0 := 0;
-  for y := 0 to j.height - 1 do begin
-    if (rows > 0) and (y > 0) and (y mod rows = 0) then begin
+  for my := 0 to mcusY - 1 do begin
+    if (rows > 0) and (my > 0) and (my mod rows = 0) then begin
       if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
       if (rd.p + 1 >= Length(data)) or (data[rd.p] <> $FF) or (data[rd.p + 1] <> $D0 + (rst and 7)) then
         Exit(Fail(jeBadRst, rd.p));
       Inc(rd.p, 2); Inc(rst);
-      y0 := y;
+      y0 := my;
     end;
-    for x := 0 to w - 1 do
+    for mx := 0 to mcusX - 1 do
       for i := 0 to s.ncomp - 1 do begin
-        e := DecodeSymbol(rd, s.dc[i], t);
-        if e <> jeNone then Exit(Fail(e, rd.p));
-        { a difference of 16 bits: 32768 itself, with no bits after it }
-        if t > 16 then Exit(Fail(jeBadCode, rd.p));
-        if t = 16 then diff := 32768
-        else begin
-          if not rd.Bits(t, v) then Exit(Fail(jeTruncated, rd.p));
-          diff := Extend(v, t);
-        end;
         { no `with` here: TComponent has fields h and v }
         c := s.comp[i];
-        v := (diff + LosslessPrediction(j, s, j.comp[c].samples, x, y, y0)) and $FFFF;
-        if v > top then Exit(Fail(jeCoefOutOfRange, rd.p));
-        j.comp[c].samples[y * w + x] := v;
+        w := j.comp[c].bw;
+        if s.ncomp = 1 then begin hh := 1; vv := 1; end
+        else begin hh := j.comp[c].h; vv := j.comp[c].v; end;
+        for r := 0 to vv - 1 do
+          for q := 0 to hh - 1 do begin
+            e := DecodeSymbol(rd, s.dc[i], t);
+            if e <> jeNone then Exit(Fail(e, rd.p));
+            { a difference of 16 bits: 32768 itself, with no bits after it }
+            if t > 16 then Exit(Fail(jeBadCode, rd.p));
+            if t = 16 then diff := 32768
+            else begin
+              if not rd.Bits(t, v) then Exit(Fail(jeTruncated, rd.p));
+              diff := Extend(v, t);
+            end;
+            y := my * vv + r; x := mx * hh + q;
+            v := (diff + LosslessPrediction(j, s, j.comp[c].samples, x, y, y0 * vv, w)) and $FFFF;
+            if v > top then Exit(Fail(jeCoefOutOfRange, rd.p));
+            j.comp[c].samples[y * w + x] := v;
+          end;
       end;
   end;
   if not Padding then Exit(Fail(jeInconsistentPadding, rd.p));
@@ -2161,36 +2235,41 @@ begin
 end;
 
 function EncodeScanLossless(var wr: TBitWriter; const j: TJpeg; const s: TScan): Boolean;
-var x, y, y0, rows, w: SizeInt; i, c, d, mag, bits, nbits, rst: Integer;
+var mx, my, mcusX, mcusY, rows, w, x, y, y0: SizeInt; i, c, d, mag, bits, nbits, rst, hh, vv, r, q: Integer;
 begin
-  w := j.width;
-  rows := 0;
-  if s.ri > 0 then rows := s.ri div w;
+  LosslessGrid(j, s, mcusX, mcusY, rows);
   rst := 0; y0 := 0;
-  for y := 0 to j.height - 1 do begin
-    if (rows > 0) and (y > 0) and (y mod rows = 0) then begin
+  for my := 0 to mcusY - 1 do begin
+    if (rows > 0) and (my > 0) and (my mod rows = 0) then begin
       wr.Align(s.padbit);
       wr.PutByte($FF); wr.PutByte($D0 + (rst and 7));
       Inc(rst);
-      y0 := y;
+      y0 := my;
     end;
-    for x := 0 to w - 1 do
+    for mx := 0 to mcusX - 1 do
       for i := 0 to s.ncomp - 1 do begin
         c := s.comp[i];
-        d := (j.comp[c].samples[y * w + x] - LosslessPrediction(j, s, j.comp[c].samples, x, y, y0)) and $FFFF;
-        { jclhuff.c: the magnitude modulo 2^16, 32768 alone in category 16 }
-        if d and $8000 <> 0 then begin
-          mag := (-d) and $7FFF;
-          if mag = 0 then begin mag := $8000; bits := 0; end
-          else bits := not mag;
-        end else begin
-          mag := d and $7FFF;
-          bits := mag;
-        end;
-        nbits := 0;
-        while mag <> 0 do begin Inc(nbits); mag := mag shr 1; end;
-        if not EmitSymbol(wr, s.dc[i], nbits) then Exit(False);
-        if (nbits > 0) and (nbits < 16) then wr.Bits(bits and ((1 shl nbits) - 1), nbits);
+        w := j.comp[c].bw;
+        if s.ncomp = 1 then begin hh := 1; vv := 1; end
+        else begin hh := j.comp[c].h; vv := j.comp[c].v; end;
+        for r := 0 to vv - 1 do
+          for q := 0 to hh - 1 do begin
+            y := my * vv + r; x := mx * hh + q;
+            d := (j.comp[c].samples[y * w + x] - LosslessPrediction(j, s, j.comp[c].samples, x, y, y0 * vv, w)) and $FFFF;
+            { jclhuff.c: the magnitude modulo 2^16, 32768 alone in category 16 }
+            if d and $8000 <> 0 then begin
+              mag := (-d) and $7FFF;
+              if mag = 0 then begin mag := $8000; bits := 0; end
+              else bits := not mag;
+            end else begin
+              mag := d and $7FFF;
+              bits := mag;
+            end;
+            nbits := 0;
+            while mag <> 0 do begin Inc(nbits); mag := mag shr 1; end;
+            if not EmitSymbol(wr, s.dc[i], nbits) then Exit(False);
+            if (nbits > 0) and (nbits < 16) then wr.Bits(bits and ((1 shl nbits) - 1), nbits);
+          end;
       end;
   end;
   wr.Align(s.padbit);
@@ -2246,6 +2325,7 @@ function ParseWith(const data: TBytes; decode: Boolean; out j: TJpeg; ref: PJpeg
                    out refFailed: Boolean): TJpegResult;
 var p, first, last, copied, seglen, ns: SizeInt; m: Byte; hs: THuffState; ri, i: Integer;
     haveFrame: Boolean; e: TJpegError; s, s2: TScan; rawOut: TBitWriter; ac: TArithCond; r2: TJpegResult;
+    copied2: SizeInt; rough: QWord; keep: array of array of Word;
 
   procedure CopyUpTo(upto: SizeInt);
   begin rawOut.CopyFrom(data, copied, upto); copied := upto; end;
@@ -2346,6 +2426,19 @@ begin
                  if r2.Ok then begin s := s2; s.ignoreRi := True; Result := r2; end;
                end;
                if not Result.Ok then Exit;
+               { a wrapPred encoder's scan: the same bits read the other
+                 way, kept if the image is smoother. Either comes back
+                 to the same bytes; only the model sees the difference }
+               if MayWrapPred(j, s) then begin
+                 rough := Roughness(j, s);
+                 SetLength(keep, s.ncomp);
+                 for i := 0 to s.ncomp - 1 do keep[i] := Copy(j.comp[s.comp[i]].samples);
+                 s2 := s; s2.wrapPred := True;
+                 r2 := DecodeScanLossless(data, last, j, s2, copied2);
+                 if r2.Ok and (copied2 = copied) and (Roughness(j, s2) < rough div 4) then s := s2
+                 else
+                   for i := 0 to s.ncomp - 1 do j.comp[s.comp[i]].samples := keep[i];
+               end;
                s.dataStart := last; s.dataEnd := copied;
              end;
              if ns = Length(j.scans) then SetLength(j.scans, Max(8, 2 * ns));
@@ -2430,6 +2523,13 @@ var i: Integer;
 begin
   Result := False;
   for i := 0 to High(j.scans) do if j.scans[i].ignoreRi then Exit(True);
+end;
+
+function HasWrappedPredictor(const j: TJpeg): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  for i := 0 to High(j.scans) do if j.scans[i].wrapPred then Exit(True);
 end;
 
 function HasCorrectionLimits(const j: TJpeg): Boolean;

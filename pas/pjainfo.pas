@@ -357,7 +357,7 @@ begin
   if Length(p.payload) = 0 then Exit;
   Result := 'version ' + IntToStr(p.payload[0]);
   if (p.payload[0] = STREAM_PARTS) and (Length(p.payload) > 1) then begin
-    { doc/CODEC.md: flags 1 and 4 the quirks, 2 as bytes, 8 PATCH; then
+    { doc/CODEC.md: flags 1, 4 and 16 the quirks, 2 as bytes, 8 PATCH; then
       the number of parts }
     f := p.payload[1];
     parts := 0;
@@ -366,8 +366,8 @@ begin
                (QWord(p.payload[5]) shl 24);
     if f = 2 then Result := Result + ' (as bytes)'
     else if f = 8 then Result := Result + ' (repaired, PATCH)'
-    else if (f and 5 <> 0) and (parts > 0) then Result := Result + ' (parts, quirks)'
-    else if f and 5 <> 0 then Result := Result + ' (quirks)'
+    else if (f and 21 <> 0) and (parts > 0) then Result := Result + ' (parts, quirks)'
+    else if f and 21 <> 0 then Result := Result + ' (quirks)'
     else Result := Result + ' (parts)';
   end;
   if p.payload[0] = STREAM_J2K then Result := Result + ' (JPEG 2000)';

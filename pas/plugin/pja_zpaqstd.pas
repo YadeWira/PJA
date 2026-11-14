@@ -680,7 +680,8 @@ begin
                     (Log2Words(ZpaqlWords7(j)) <= ZPAQL_MAX_PH);
           { pjall: a lossless JPEG (SOF3), its restarts where its DRI says:
             no other codec takes it }
-          v.pjall := j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and
+          v.pjall := j.lossless and not j.arithmetic and not HasIgnoredRestarts(j) and not HasWrappedPredictor(j) and
+                     (j.hmax = 1) and (j.vmax = 1) and
                      (Length(j.scans) <= ZPAQL_MAX_SCANS) and (Log2Words(ZpaqlLjpegWords(j)) <= ZPAQL_MAX_PH);
         end;
         KeepVerdict(v);
