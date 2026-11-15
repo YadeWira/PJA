@@ -74,7 +74,7 @@ XL's lossless transcoding (0.11.2), Lepton and brunsli. Each set's whole
 output against its input; a file a tool does not take counts at its own
 size ([how, and the details][wComp]).
 
-| set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
+| set | files | size | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.13 |
 |---|---|---|---|---|---|---|---|
 | photos (Huffman JPEG) | 151 | 78.4 MB | 76.62% | 79.80% | 79.42% (takes 136) | 77.98% | **72.60%** |
 | corpus of JPEGs of every kind | 78 | 33.0 MB | 77.23% (takes 65) | 86.03% (takes 56) | 85.11% (takes 55) | 75.36% (takes 64) | **70.39%** |
@@ -83,17 +83,17 @@ size ([how, and the details][wComp]).
 | generated JPEGs | 640 | 18.3 MB | 77.48% | 85.35% (takes 528) | 83.95% (takes 511) | 79.69% (takes 604) | **73.72%** |
 | 12-bit JPEG, small | 10 | 83 KB | takes none | takes none | takes none | takes none | **88.14%** |
 | 12-bit JPEG from camera RAWs | 12 | 27.7 MB | takes none | takes none | takes none | takes none | **84.80%** |
-| lossless JPEG | 36 | 390 KB | takes none | takes none | takes none | takes none | **96.04%** |
+| lossless JPEG | 36 | 390 KB | takes none | takes none | takes none | takes none | **95.47%** |
 
 Speed on the 151 photos (two Xeon E5-2697A v4; "8 at once": `pja -th 8`,
 the others 8 processes):
 
-| | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.6 |
+| | packJPG 5.0g | JPEG XL | Lepton | brunsli | PJA 0.9.13 |
 |---|---|---|---|---|---|
-| compress, 1 thread | 68.1 s | 26.7 s | 40.8 s | **13.3 s** | 68.3 s |
-| decompress, 1 thread | 34.9 s | 10.7 s | 15.3 s | **9.0 s** | 37.0 s |
-| compress, 8 at once | 10.3 s | 4.1 s | 5.8 s | **1.9 s** | 9.0 s |
-| decompress, 8 at once | 5.2 s | 1.5 s | 2.2 s | **1.4 s** | 5.1 s |
+| compress, 1 thread | 68.1 s | 26.7 s | 40.8 s | **13.3 s** | 68.9 s |
+| decompress, 1 thread | 34.9 s | 10.7 s | 15.3 s | **9.0 s** | 33.9 s |
+| compress, 8 at once | 10.3 s | 4.1 s | 5.8 s | **1.9 s** | 9.1 s |
+| decompress, 8 at once | 5.2 s | 1.5 s | 2.2 s | **1.4 s** | 4.5 s |
 
 PJA is the smallest on every set and the only one that takes every file;
 none of the others takes 12-bit or lossless JPEG, and only packJPG takes
@@ -152,31 +152,33 @@ hash catches accidents, not tampering).
 
 One archive per set, 8 threads; every file extracted and compared. Size,
 then the time to write / extract. 7-Zip + PJA: 7-Zip 25.01 with PJA
-0.9.10's plugin, `-m0=PJA -m1=LZMA2`; zpaq-std + PJA: zpaq-std 2.9.0 with
-the plugin it ships (PJA 0.9.9, the same streams), `-sa -m5`; [Aqueous](https://github.com/lifthrasiir/aqueous)
+0.9.13's plugin, `-m0=PJA -m1=LZMA2`; zpaq-std + PJA: zpaq-std 2.11.0 with
+the plugin it ships (PJA 0.9.12), `-sa -m5`; [Aqueous](https://github.com/lifthrasiir/aqueous)
 `-l high`; 7-Zip and zpaq-std `-m5` without PJA for reference. The mixed
 folder is 40 of the photos among 57 files of other kinds.
 
 | set | 7-Zip + PJA | zpaq-std + PJA | Aqueous | 7-Zip | zpaq-std |
 |---|---|---|---|---|---|
-| photos (151) | **72.57%**, 10.3 / 5.1 s | 72.82%, 28.7 / 5.6 s | 80.46%, 2.4 / 0.8 s | 97.04%, 6.7 / 1.0 s | 94.58%, 286 / 292 s |
-| corpus (78) | **66.86%**, 6.7 / 3.2 s | 68.36%, 13.3 / 2.8 s | 71.98%, 1.5 / 0.3 s | 82.24%, 2.9 / 0.5 s | 80.07%, 126 / 133 s |
-| MPO (6) | **73.39%**, 4.9 / 2.4 s | 73.66%, 18.1 / 4.4 s | 78.94%, 1.3 / 0.4 s | 99.57%, 4.0 / 1.0 s | 95.23%, 176 / 180 s |
-| arithmetic-coded (244) | **17.25%**, 1.8 / 0.8 s | 18.10%, 5.0 / 0.8 s | 85.73%, 0.2 / 0.0 s | 74.49%, 0.6 / 0.1 s | 73.13%, 24.5 / 25.0 s |
-| generated (640) | **16.40%**, 3.0 / 1.5 s | 16.94%, 6.0 / 1.6 s | 33.97%, 0.7 / 0.3 s | 62.85%, 1.2 / 0.4 s | 62.65%, 68.2 / 69.9 s |
-| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 93.16%, 0.5 / 0.3 s | 92.63%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 92.42%, 0.3 / 0.3 s |
-| 12-bit from RAWs (12) | **84.80%**, 3.8 / 2.2 s | 84.98%, 12.3 / 2.9 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.2 / 0.1 s | 98.61%, 111 / 119 s |
-| lossless JPEG (36) | 27.37%, 0.2 / 0.2 s | **25.08%**, 0.3 / 0.1 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 95.93%, 1.4 / 1.4 s |
-| JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 13.3 / 0.7 s | **92.44%**, 129 / 97.2 s | 100.00%, 1.2 / 0.1 s | 99.82%, 13.2 / 0.5 s | 99.62%, 208 / 208 s |
-| mixed (97, 38 MB) | 64.83%, 5.8 / 2.2 s | **63.22%**, 36.4 / 41.7 s | 69.98%, 1.9 / 0.4 s | 76.31%, 4.1 / 0.7 s | 73.54%, 144 / 159 s |
+| photos (151) | **72.57%**, 9.3 / 4.7 s | 72.82%, 30.6 / 5.6 s | 80.46%, 2.7 / 0.9 s | 97.04%, 7.4 / 1.1 s | 94.58%, 293 / 321 s |
+| corpus (78) | **66.86%**, 7.5 / 3.2 s | 68.36%, 17.0 / 2.7 s | 71.98%, 1.5 / 0.4 s | 82.24%, 3.0 / 0.5 s | 80.07%, 162 / 158 s |
+| MPO (6) | **73.39%**, 4.7 / 2.3 s | 73.66%, 18.7 / 4.3 s | 78.94%, 1.3 / 0.4 s | 99.57%, 4.1 / 1.1 s | 95.23%, 190 / 198 s |
+| arithmetic-coded (244) | **17.25%**, 1.7 / 0.8 s | 18.10%, 5.4 / 0.8 s | 85.74%, 0.2 / 0.0 s | 74.49%, 0.6 / 0.1 s | 73.13%, 24.3 / 27.6 s |
+| generated (640) | **16.40%**, 2.8 / 1.4 s | 16.94%, 5.8 / 1.6 s | 33.99%, 0.7 / 0.3 s | 62.85%, 1.3 / 0.4 s | 62.65%, 67.2 / 71.4 s |
+| 12-bit, small (10) | **58.28%**, 0.2 / 0.2 s | 93.16%, 0.5 / 0.3 s | 92.65%, 0.0 / 0.0 s | 90.38%, 0.0 / 0.0 s | 92.42%, 0.3 / 0.3 s |
+| 12-bit from RAWs (12) | **84.80%**, 3.6 / 2.0 s | 84.98%, 12.8 / 3.0 s | 100.00%, 0.2 / 0.0 s | 100.00%, 2.4 / 0.1 s | 98.61%, 120 / 128 s |
+| lossless JPEG (36) | **21.63%**, 0.3 / 0.2 s | 25.08%, 0.3 / 0.2 s | 96.59%, 0.0 / 0.0 s | 95.64%, 0.1 / 0.0 s | 95.93%, 1.6 / 1.7 s |
+| JPEG 2000 (113 codestreams, 150 MB) | 99.82%, 13.1 / 0.7 s | **92.44%**, 139 / 97.0 s | 100.00%, 1.3 / 0.1 s | 99.82%, 13.1 / 0.5 s | 99.62%, 215 / 220 s |
+| mixed (97, 38 MB) | 64.83%, 5.7 / 2.1 s | **63.22%**, 40.9 / 39.6 s | 69.98%, 2.0 / 0.4 s | 76.31%, 4.0 / 0.6 s | 73.54%, 143 / 138 s |
 
-7-Zip + PJA is the smallest on every JPEG set but the lossless one.
-zpaq-std + PJA is 0.2 to 1.5 points behind it on JPEG and slower, but any
+7-Zip + PJA is the smallest on every JPEG set (on lossless JPEG since
+0.9.13: its blended predictors, which the zpaq-std plugin does not use).
+zpaq-std + PJA is 0.2 to 1.5 points behind it on JPEG (3.5 on lossless
+JPEG) and slower, but any
 zpaq can extract its archives without the plugin; it is the only one here
 that takes JPEG 2000, and the smallest on the mixed folder, where `-m5`
-packs the files PJA does not take tighter than LZMA2 (at 36 s against
-5.8 s). With `-sa -m1` every JPEG and JPEG 2000 set but the small 12-bit one
-stays within 0.1 points, and the mixed folder goes to 71.15% in 6.7 /
+packs the files PJA does not take tighter than LZMA2 (at 41 s against
+5.7 s). With `-sa -m1` every JPEG and JPEG 2000 set but the small 12-bit one
+stays within 0.1 points, and the mixed folder goes to 71.15% in 6.6 /
 1.9 s. `-sa -rcmd` writes the same bytes on these sets (PJA takes nearly
 all their files); where it does not take some, see the plugin's page. On
 10 small 12-bit files the ZPAQL decoder each block carries costs more than
