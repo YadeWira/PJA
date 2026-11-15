@@ -271,6 +271,8 @@ begin
     if not ls and (not StreamHeaders(stream, j).Ok or (j.precision <> 8) or j.lossless or j.dnl) then Exit(ZS_ERR_DATA);
     { the same for a subsampled JPEG-LS file and the pjals ZPAQL }
     if ls and (not StreamJlsHeaders(stream, jl, symbols).Ok or JlsSubsampled(jl)) then Exit(ZS_ERR_DATA);
+    { and version 5's MED samples only (Compress without parts never blends) }
+    if (Length(stream) < 2) or (stream[1] > 1) then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);
     if Length(stream) > 0 then Move(stream[0], dst^, Length(stream));
     Result := Length(stream);

@@ -83,8 +83,9 @@ function BandCount(const j: TJpeg): Integer;
 type
   { A JPEG's coefficient models: the full one and the fast one (stream
     version 5), and version 7's (the full one with fewer decisions, in C:
-    pjav7) }
-  TModelKind = (mkFull, mkFast, mkV7);
+    pjav7). mkBlend: no coefficients' model, but the samples' (JPEG-LS,
+    lossless JPEG) with blended predictors, since 0.9.13 (CodeJlsBand) }
+  TModelKind = (mkFull, mkFast, mkV7, mkBlend);
 
 { The coefficients of one band (allocated by Decompose or ParseHeaders); its
   first block row has no neighbour above. False when decoding garbage
@@ -182,8 +183,10 @@ const
   JLS_BAND_SAMPLES = 1 shl 20;
 
 function JlsBandCount(const j: TJls): Integer;
-{ The samples of the rows of one band, all components. }
-function CodeJlsBand(var cd: TCoder; var j: TJls; band: Integer): Boolean;
+{ The samples of the rows of one band, all components. blend: each sample
+  predicted by JLS_PREDICTORS predictors blended by their recent errors
+  instead of by MED alone (since 0.9.13, another stream). }
+function CodeJlsBand(var cd: TCoder; var j: TJls; band: Integer; blend: Boolean = False): Boolean;
 { The run lengths that near-lossless scans need to be re-encoded exactly
   (pjajls.TJlsScan.runs), for the header stream. }
 function CodeJlsRuns(var cd: TCoder; var j: TJls; maxRuns: SizeInt): Boolean;
@@ -1739,7 +1742,40 @@ begin
   else Result := a + b - c;
 end;
 
-function CodeJlsBand(var cd: TCoder; var j: TJls; band: Integer): Boolean;
+{ The blended predictors (since 0.9.13): MED, W, N, W + N - NW, (W + N) / 2,
+  (W + NE) / 2, N + (NE - NW) / 2 and W + (NE - NW) / 2, each weighted by
+  2^40 / (1 + e)^2, e its absolute errors at W, N, NW and NE summed (the
+  weighted predictor of JPEG XL and CALIC's error energy, as h3d blends
+  them). Integer arithmetic only, the same on every machine. }
+const
+  JLS_PREDICTORS = 8;
+  BLEND_ONE = Int64(1) shl 40;
+  BLEND_TABLE = 4096;     { weights of the errors below it, from a table }
+
+var
+  BlendWeight: array[0..BLEND_TABLE - 1] of Int64;
+
+procedure InitBlendWeights;
+var e: Integer;
+begin
+  for e := 0 to BLEND_TABLE - 1 do BlendWeight[e] := BLEND_ONE div ((Int64(e) + 1) * (Int64(e) + 1));
+end;
+
+function BlendWeightOf(e: Integer): Int64; inline;
+begin
+  if e < BLEND_TABLE then Result := BlendWeight[e]
+  else begin
+    Result := BLEND_ONE div ((Int64(e) + 1) * (Int64(e) + 1));
+    if Result < 1 then Result := 1;
+  end;
+end;
+
+function ClampSample(v, maxv: Integer): Integer; inline;
+begin
+  if v < 0 then Result := 0 else if v > maxv then Result := maxv else Result := v;
+end;
+
+function CodeJlsBand(var cd: TCoder; var j: TJls; band: Integer; blend: Boolean): Boolean;
 var m: TJlsModel; nb, ci, cls, i, maxv, range, half, t1, t2, t3, a, b, c, d, ctx, sgn, px, x, e, v, ex, k,
     bit, act, nbb, first, bi: Integer; y, y0, y1, base, w, r, nr: SizeInt; haveUp, sub: Boolean;
     rowC: array of Integer; rowY, firstRow: array of SizeInt;
@@ -1747,6 +1783,11 @@ var m: TJlsModel; nb, ci, cls, i, maxv, range, half, t1, t2, t3, a, b, c, d, ctx
     resUp: array of array of Integer;     { [component] the row above's }
     t: array of Integer;
     bs: ^TJlsBias;
+    { blend: each predictor's guess here, and its errors on this row and the
+      one above ([column * JLS_PREDICTORS + predictor]) }
+    pr: array[0..JLS_PREDICTORS - 1] of Integer;
+    pe, peUp: array of array of Integer; tp: array of Integer;
+    kk, ee, xv: Integer; we, sw, sp: Int64;
 begin
   nb := JlsBandCount(j);
   if (band < 0) or (band >= nb) then Exit(False);
@@ -1761,6 +1802,13 @@ begin
   SetLength(res, Length(j.comp)); SetLength(resUp, Length(j.comp));
   for ci := 0 to High(j.comp) do begin
     SetLength(res[ci], j.comp[ci].width); SetLength(resUp[ci], j.comp[ci].width);
+  end;
+  pe := nil; peUp := nil;
+  if blend then begin
+    SetLength(pe, Length(j.comp)); SetLength(peUp, Length(j.comp));
+    for ci := 0 to High(j.comp) do begin
+      SetLength(pe[ci], JLS_PREDICTORS * j.comp[ci].width); SetLength(peUp[ci], JLS_PREDICTORS * j.comp[ci].width);
+    end;
   end;
   { the band's rows, in coding order: line by line through the components;
     subsampled, each component's own rows of the band, one component after
@@ -1785,6 +1833,7 @@ begin
     haveUp := y > firstRow[ci];
     begin
       t := res[ci]; res[ci] := resUp[ci]; resUp[ci] := t;
+      if blend then begin tp := pe[ci]; pe[ci] := peUp[ci]; peUp[ci] := tp; end;
       if ci = 0 then cls := 0 else cls := 1;
       base := y * w;
       for i := 0 to w - 1 do begin
@@ -1798,7 +1847,28 @@ begin
         ctx := (JlsQuantize(d - b, t1, t2, t3) * 9 + JlsQuantize(b - c, t1, t2, t3)) * 9 + JlsQuantize(c - a, t1, t2, t3);
         if ctx < 0 then begin sgn := -1; ctx := -ctx; end else sgn := 1;
         bs := @m.bias[cls, ctx];
-        px := MedPredict(a, b, c) + sgn * bs^.c;
+        if not blend then px := MedPredict(a, b, c)
+        else begin
+          pr[0] := MedPredict(a, b, c); pr[1] := a; pr[2] := b;
+          pr[3] := ClampSample(a + b - c, maxv);
+          pr[4] := (a + b + 1) shr 1; pr[5] := (a + d + 1) shr 1;
+          pr[6] := ClampSample(b + (d - c) div 2, maxv);
+          pr[7] := ClampSample(a + (d - c) div 2, maxv);
+          sw := 0; sp := 0;
+          for kk := 0 to JLS_PREDICTORS - 1 do begin
+            ee := 0;
+            if i > 0 then Inc(ee, pe[ci][(i - 1) * JLS_PREDICTORS + kk]);
+            if haveUp then begin
+              Inc(ee, peUp[ci][i * JLS_PREDICTORS + kk]);
+              if i > 0 then Inc(ee, peUp[ci][(i - 1) * JLS_PREDICTORS + kk]);
+              if i + 1 < w then Inc(ee, peUp[ci][(i + 1) * JLS_PREDICTORS + kk]);
+            end;
+            we := BlendWeightOf(ee);
+            Inc(sw, we); Inc(sp, we * pr[kk]);
+          end;
+          px := Integer((sp + sw div 2) div sw);
+        end;
+        px := px + sgn * bs^.c;
         if px < 0 then px := 0 else if px > maxv then px := maxv;
         { the residual, aligned and reduced modulo the range }
         if cd.encoding then begin
@@ -1844,6 +1914,10 @@ begin
           j.comp[ci].samples[base + i] := x;
         end;
         res[ci][i] := e;
+        if blend then begin
+          xv := j.comp[ci].samples[base + i];
+          for kk := 0 to JLS_PREDICTORS - 1 do pe[ci][i * JLS_PREDICTORS + kk] := Abs(xv - pr[kk]);
+        end;
         { LOCO's bias update (A.12, A.13), NEAR 0 }
         bs^.a := bs^.a + Abs(e); bs^.b := bs^.b + e;
         if bs^.n = 64 then begin
@@ -2218,6 +2292,7 @@ initialization
   {$endif}
   InitTables;
   InitUnzig;
+  InitBlendWeights;
   InitCriticalSection(ParkLock);
 
 finalization

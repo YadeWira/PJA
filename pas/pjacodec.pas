@@ -3,7 +3,9 @@
     byte 0          STREAM_VERSION (5), or STREAM_V7 (7) for a JPEG's
                     coefficients with version 7's model
     byte 1          the coefficient model: 0 the full one, 1 the fast one
-                    (pjamodel.CodeBand); 0 for JPEG-LS and for version 7
+                    (pjamodel.CodeBand); 0 for version 7. For JPEG-LS
+                    (its samples model) and lossless JPEG: 0 MED, 2 the
+                    blended predictors (since 0.9.13: pjamodel.CodeJlsBand)
     4 bytes (LE)    length H of the header stream
     H bytes         arithmetic stream: raw length (32 direct bits) and raw
                     bytes (pjamodel.CodeRaw), then one padding bit per scan;
@@ -74,6 +76,11 @@ const
   STREAM_J2K = 8;
   { the header: version, model, header stream length }
   STREAM_HEADER = 6;
+  { version 5's byte 1 for the samples of a JPEG-LS file or of a lossless
+    JPEG blended from several predictors (pjamodel.CodeJlsBand). Since
+    0.9.13: Compress writes it when it comes out smaller than MED alone,
+    and only with parts (never for the zpaq-std plugin's frozen ZPAQL) }
+  MODEL_BLEND = 2;
 
 type
   TCodecError = (
@@ -239,7 +246,7 @@ type
     { not nil: encoding writes into it, or decoding reads it while another
       thread writes it }
     live: TLiveStream;
-    model: TModelKind;      { a JPEG's coefficients: which model }
+    model: TModelKind;      { a JPEG's coefficients: which model; mkBlend, samples }
     ok: Boolean;
   end;
   PBandJob = ^TBandJob;
@@ -264,7 +271,7 @@ begin
       cd.InitDecoder(slice, 0);
     end;
     if b.symbols then b.ok := CodeJlsSymbolStream(cd, b.jl^)
-    else if b.jl <> nil then b.ok := CodeJlsBand(cd, b.jl^, b.band)
+    else if b.jl <> nil then b.ok := CodeJlsBand(cd, b.jl^, b.band, b.model = mkBlend)
     else b.ok := CodeBand(cd, b.j^, b.band, b.model);
     if b.encoding then b.output := cd.enc.Finish;
   except
@@ -366,6 +373,7 @@ begin
   stream[0] := STREAM_VERSION;
   if (nb > 0) and (jobs[0].model = mkV7) then stream[0] := STREAM_V7;
   stream[1] := Ord((nb > 0) and (jobs[0].model = mkFast));
+  if (nb > 0) and (jobs[0].model = mkBlend) then stream[1] := MODEL_BLEND;
   p := 2;
   PutU32(stream, p, Length(head));
   Move(head[0], stream[p], Length(head)); Inc(p, Length(head));
@@ -608,20 +616,24 @@ end;
   not be decompressed again (the symbols won on every photo measured).
   The samples model's bands run on a thread of their own next to the
   symbol stream when a thread is left for them (three or more, or two
-  without verify), else after it. }
+  without verify), else after it.
+
+  blend: the samples model's bands twice, with MED and with the blended
+  predictors (MODEL_BLEND), side by side; the smaller kept (MED on a tie). }
 function AssembleJls(var jl: TJls; threads: Integer; out stream: TBytes; const jpeg: TBytes;
-                     verify: Boolean; out checked: Boolean): Boolean;
-var head0, head1, s0, s1: TBytes; jobs0, jobs1: TBandJobs; rd: TBandJob; nb, b, t0: Integer;
-    ok0, ok1, live: Boolean; h: THead; th: TBandsThread; dt: TBandThread;
+                     verify: Boolean; out checked: Boolean; blend: Boolean): Boolean;
+var head0, head1, s0, s1, s2: TBytes; jobs0, jobs1: TBandJobs; rd: TBandJob; nb, b, t0: Integer;
+    ok0, ok1, ok2, live: Boolean; h: THead; th: TBandsThread; dt: TBandThread;
 begin
   stream := nil; checked := False;
   head0 := JlsHead(jl, 0);
   head1 := JlsHead(jl, 1);
   nb := JlsBandCount(jl);
-  jobs0 := nil; SetLength(jobs0, nb);
-  for b := 0 to nb - 1 do begin
+  jobs0 := nil; SetLength(jobs0, nb * (1 + Ord(blend)));
+  for b := 0 to High(jobs0) do begin
     jobs0[b] := Default(TBandJob);
-    jobs0[b].jl := @jl; jobs0[b].band := b; jobs0[b].encoding := True;
+    jobs0[b].jl := @jl; jobs0[b].band := b mod nb; jobs0[b].encoding := True;
+    if b >= nb then jobs0[b].model := mkBlend;
   end;
   jobs1 := nil; SetLength(jobs1, 1);
   jobs1[0] := Default(TBandJob);
@@ -676,9 +688,11 @@ begin
   end;
   try
     { a model that cannot code this file leaves the other }
-    ok0 := Build(head0, jobs0, s0);
+    ok0 := Build(head0, Copy(jobs0, 0, nb), s0);
+    ok2 := blend and Build(head0, Copy(jobs0, nb, nb), s2);
     ok1 := Build(head1, jobs1, s1);
     if ok0 then stream := s0;
+    if ok2 and ((stream = nil) or (Length(s2) < Length(stream))) then stream := s2;
     if ok1 and ((stream = nil) or (Length(s1) < Length(stream))) then begin
       stream := s1;
       checked := live and JlsLiveChecked(jpeg, s1, head1, jobs1[0], rd, h);
@@ -813,10 +827,13 @@ end;
 
 { A JPEG (j: what VerifyRoundTrip made of it) -> its version 5 stream }
 function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
-                      model: TModelKind; const ownHead: TBytes = nil): TCodecResult; forward;
+                      model: TModelKind; const ownHead: TBytes = nil; blend: Boolean = False): TCodecResult; forward;
 
+{ blend: samples (JPEG-LS, lossless JPEG) may go with the blended
+  predictors (MODEL_BLEND), when smaller: only for a .pja (Compress with
+  parts), never in the zpaq-std plugin's version 5 }
 function CompressOne(const jpeg: TBytes; out stream: TBytes; verify: Boolean; threads: Integer;
-                     model: TModelKind): TCodecResult;
+                     model: TModelKind; blend: Boolean = False): TCodecResult;
 var j: TJpeg; jl: TJls; checked: Boolean;
 begin
   stream := nil;
@@ -826,7 +843,7 @@ begin
     Result.jpeg := VerifyJls(jpeg, jl);
     StageEnter(stEncode);
     if not Result.jpeg.Ok then begin Result.err := ceJpeg; Exit; end;
-    if not AssembleJls(jl, threads, stream, jpeg, verify, checked) then Exit(CodecFail(ceNoRoundTrip));
+    if not AssembleJls(jl, threads, stream, jpeg, verify, checked, blend) then Exit(CodecFail(ceNoRoundTrip));
     if not checked then Result := VerifyStream(jpeg, stream, verify, threads);
   end else begin
     Result.jpeg := VerifyRoundTrip(jpeg, j);
@@ -843,7 +860,7 @@ begin
       Result.err := ceJpeg; Result.jpeg.err := jeNoRoundTrip;
       Exit;
     end;
-    Result := CompressJpeg(jpeg, j, stream, verify, threads, model);
+    Result := CompressJpeg(jpeg, j, stream, verify, threads, model, nil, blend);
   end;
 end;
 
@@ -866,8 +883,8 @@ begin
 end;
 
 function CompressJpeg(const jpeg: TBytes; var j: TJpeg; out stream: TBytes; verify: Boolean; threads: Integer;
-                      model: TModelKind; const ownHead: TBytes): TCodecResult;
-var jl: TJls; head: TBytes; jobs: array of TBandJob; nb, b: Integer;
+                      model: TModelKind; const ownHead: TBytes; blend: Boolean): TCodecResult;
+var jl: TJls; head, s2: TBytes; jobs: array of TBandJob; nb, b: Integer;
 begin
   stream := nil;
   Result := CodecFail(ceOk);
@@ -883,14 +900,20 @@ begin
     end;
     if Length(ownHead) > 0 then head := ownHead else head := HeadBytes(j);
     if j.lossless then begin
-      { the samples of a lossless JPEG: JPEG-LS's samples model }
+      { the samples of a lossless JPEG: JPEG-LS's samples model; with
+        blend, also with the blended predictors, the smaller kept (MED on
+        a tie) }
       LosslessView(j, jl);
       nb := JlsBandCount(jl);
-      SetLength(jobs, nb);
-      for b := 0 to nb - 1 do begin
+      SetLength(jobs, nb * (1 + Ord(blend)));
+      for b := 0 to High(jobs) do begin
         jobs[b] := Default(TBandJob);
-        jobs[b].jl := @jl; jobs[b].band := b; jobs[b].encoding := True;
+        jobs[b].jl := @jl; jobs[b].band := b mod nb; jobs[b].encoding := True;
+        if b >= nb then jobs[b].model := mkBlend;
       end;
+      RunBands(jobs, threads);
+      if not Build(head, Copy(jobs, 0, nb), stream) then Exit(CodecFail(ceNoRoundTrip));
+      if blend and Build(head, Copy(jobs, nb, nb), s2) and (Length(s2) < Length(stream)) then stream := s2;
     end else begin
       nb := BandCount(j);
       SetLength(jobs, nb);
@@ -898,8 +921,8 @@ begin
         jobs[b] := Default(TBandJob);
         jobs[b].j := @j; jobs[b].band := b; jobs[b].encoding := True; jobs[b].model := model;
       end;
+      if not Assemble(head, jobs, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
     end;
-    if not Assemble(head, jobs, threads, stream) then Exit(CodecFail(ceNoRoundTrip));
   end;
   Result := VerifyStream(jpeg, stream, verify, threads);
 end;
@@ -908,14 +931,14 @@ function StreamHeaders(const stream: TBytes; out j: TJpeg; maxRaw: SizeInt): TCo
 var h: THead; len: Int64;
 begin
   j := Default(TJpeg);
-  if (Length(stream) < STREAM_HEADER) or not (((stream[0] = STREAM_VERSION) and (stream[1] <= 1)) or
+  if (Length(stream) < STREAM_HEADER) or not (((stream[0] = STREAM_VERSION) and (stream[1] <= MODEL_BLEND)) or
      ((stream[0] = STREAM_V7) and (stream[1] = 0))) then
     Exit(CodecFail(ceBadStream));
   len := GetU32(stream, 2);
   if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
   Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
   if not Result.Ok then Exit;
-  if h.isLs then Exit(CodecFail(ceBadStream));
+  if h.isLs or ((stream[1] = MODEL_BLEND) and not h.j.lossless) then Exit(CodecFail(ceBadStream));
   j := h.j;
 end;
 
@@ -923,13 +946,14 @@ function StreamJlsHeaders(const stream: TBytes; out jl: TJls; out symbols: Boole
 var h: THead; len: Int64;
 begin
   jl := Default(TJls); symbols := False;
-  if (Length(stream) < STREAM_HEADER) or (stream[0] <> STREAM_VERSION) or (stream[1] > 1) then
+  if (Length(stream) < STREAM_HEADER) or (stream[0] <> STREAM_VERSION) or
+     ((stream[1] <> 0) and (stream[1] <> MODEL_BLEND)) then
     Exit(CodecFail(ceBadStream));
   len := GetU32(stream, 2);
   if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
   Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
   if not Result.Ok then Exit;
-  if not h.isLs then Exit(CodecFail(ceBadStream));
+  if not h.isLs or ((stream[1] = MODEL_BLEND) and h.symbols) then Exit(CodecFail(ceBadStream));
   jl := h.jl; symbols := h.symbols;
 end;
 
@@ -946,15 +970,19 @@ begin
     if V7Code = nil then Exit(CodecFail(ceFutureVersion));
     model := mkV7;
   end else begin
-    if (stream[0] <> STREAM_VERSION) or (stream[1] > 1) then Exit(CodecFail(ceBadStream));
-    if stream[1] = 1 then model := mkFast else model := mkFull;
+    if (stream[0] <> STREAM_VERSION) or (stream[1] > MODEL_BLEND) then Exit(CodecFail(ceBadStream));
+    if stream[1] = 1 then model := mkFast
+    else if stream[1] = MODEL_BLEND then model := mkBlend
+    else model := mkFull;
   end;
   len := GetU32(stream, 2);
   if STREAM_HEADER + len > Length(stream) then Exit(CodecFail(ceBadStream));
   Result := DecodeHead(Copy(stream, STREAM_HEADER, len), maxRaw, h);
   if not Result.Ok then Exit;
-  { the fast model and version 7's are for a JPEG's coefficients only }
-  if (h.isLs or h.j.lossless) and (model <> mkFull) then Exit(CodecFail(ceBadStream));
+  { the fast model and version 7's are for a JPEG's coefficients only, the
+    blended predictors for samples only (not the JPEG-LS symbols) }
+  if (h.isLs or h.j.lossless) and not (model in [mkFull, mkBlend]) then Exit(CodecFail(ceBadStream));
+  if (model = mkBlend) and ((h.isLs and h.symbols) or not (h.isLs or h.j.lossless)) then Exit(CodecFail(ceBadStream));
   { the scans that ignore the DRI in force (version 6 says which): only
     sequential Huffman or lossless ones, as Decompose finds them }
   for b := 0 to High(quirks.wp) do begin
@@ -1136,7 +1164,7 @@ begin
     Result := CodecFail(ceJpeg); Result.jpeg.err := jeUnsupported; Exit;
   end;
   if (depth >= MAX_PART_DEPTH) or IsJls(jpeg) or (Length(jpeg) >= High(Cardinal)) then
-    Exit(CompressOne(jpeg, stream, verify, threads, model));
+    Exit(CompressOne(jpeg, stream, verify, threads, model, not huffOnly));
   { the file as PJA takes it today, decoded once: it gives the parts' places
     and, with none, the stream itself }
   Result := CodecFail(ceOk);
@@ -1248,11 +1276,11 @@ begin
   end;
   { with no parts, the file's own header stream, when it was made above:
     the same bytes CompressJpeg would make }
-  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model, ownJ));
+  if (n = 0) and NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model, ownJ, not huffOnly));
   { the host's stream: its header stream and the bands, coded once from the
     file, whose bands they are; the file's own with no parts }
-  if n > 0 then Result := CompressJpeg(jpeg, j, hs, False, threads, model, hostHead)
-  else Result := CompressJpeg(jpeg, j, hs, False, threads, model, ownJ);
+  if n > 0 then Result := CompressJpeg(jpeg, j, hs, False, threads, model, hostHead, not huffOnly)
+  else Result := CompressJpeg(jpeg, j, hs, False, threads, model, ownJ, not huffOnly);
   if not Result.Ok then Exit;
   len := 6 + PART_ENTRY * n + Length(hs);
   for i := 0 to n - 1 do Inc(len, Length(parts[i].stream));
@@ -1290,7 +1318,7 @@ begin
   if verify and not SameAfter(jpeg, stream, threads, depth) then begin
     { a bug in the parts must not cost the file: without quirks it goes as
       one stream }
-    if NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model));
+    if NoQuirks(quirks) then Exit(CompressJpeg(jpeg, j, stream, verify, threads, model, nil, not huffOnly));
     stream := nil;
     Exit(CodecFail(ceNoRoundTrip));
   end;

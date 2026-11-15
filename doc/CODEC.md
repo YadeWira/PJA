@@ -4292,3 +4292,68 @@ threads; a lossless JPEG is rare enough. Extracting costs nothing more.
 
 The model itself is unchanged: on the camera-made and DICOM lossless
 JPEGs the samples model takes, it stays ahead of the bytes'.
+
+## Blended predictors for the samples (15/11/2026)
+
+h3d (Michael Hugh Harrington, MIT, 13/11/2026: lossless CT and MRI series
+as 3D volumes) predicts each pixel with seven predictors blended by their
+recent errors, the weighted predictor of JPEG XL and the error energy of
+CALIC. The slice-to-slice part needs a series of files, which a stream of
+one file does not have; the blending within one image fits the samples
+model of JPEG-LS and lossless JPEG (pjamodel.CodeJlsBand), which predicts
+with MED alone and corrects it with LOCO's bias per context.
+
+`CodeJlsBand(..., blend)` predicts with eight: MED, W, N, W + N - NW,
+(W + N) / 2, (W + NE) / 2, N + (NE - NW) / 2 and W + (NE - NW) / 2 (those
+that can leave the range clamped to it). Each predictor's absolute errors
+at W, N, NW and NE are summed into e, its weight is 2^40 / (1 + e)^2 (a
+table below 4096), and the prediction is the weighted mean, rounded;
+LOCO's bias and every context stay as they were, on top of it. All
+integer, the same on every machine. Version 5's byte 1, which only a
+JPEG's coefficients used (1 = the fast model), is MODEL_BLEND = 2 for such
+samples. Measured in a prototype first (/mnt/IA_LAB/agentes/pja/wp), on
+the samples model alone:
+
+| predictor | 86 CT slices, JPEG-LS | 25 JPEG-LS photos |
+|---|---|---|
+| MED (0.9.12) | 95.01% | 89.91% |
+| 6 predictors, 1 / (1 + e)^2 | 91.66% | 90.35% |
+| 6, 1 / (1 + e)^3 | 91.79% | 90.58% |
+| 8, 1 / (1 + e)^2 | **90.29%** | 90.26% |
+| 8, two errors to the left | 90.72% | 90.21% |
+| 8, the predictors' spread in the neighbours' context | 91.30% | 90.26% |
+| 8, the spread instead of half of it | 91.47% | 90.49% |
+
+Taking the one predictor with the smallest errors instead of blending them
+gave nothing: the CT slices as whole files 92.18%, as with MED.
+(CT: neurolabusc/dcm_qa_ct's GE series and Philips S21610/S3010, 86 slices
+of 512 x 512 at 11 and 12 bits, signed ones shifted to 0, as CharLS 2.4
+writes them and as libjpeg-turbo 3.0.4's `cjpeg -precision 12 -lossless 1`
+and `7` do.) The blend wins on smooth, noisy images (CT) and loses a
+little on photos, and much on samples with few distinct values: pydicom's
+P14 file of 8 bits scaled to 16, +11%, its predictions between the values
+the image has. So Compress codes the samples both ways, side by side on
+the band threads, and keeps the smaller (MED on a tie): for JPEG-LS the
+smallest of MED, the blend and the symbols model; for a lossless JPEG,
+then against the file as bytes as before. Only with parts (a .pja, and
+libpja): the zpaq-std plugin's version 5 stays MED, its frozen ZPAQL's
+(pjall, pjals and pjalsx also refuse byte 1 = 2 when asked for their
+ZPAQL's arguments). A reader before 0.9.13 refuses the new byte as a
+damaged stream.
+
+Whole files, `pja a` (verified) and `pja t`:
+
+| set | 0.9.12 | 0.9.13 |
+|---|---|---|
+| 86 CT slices, JPEG-LS (CharLS) | 92.18% | **89.97%** (-2.4%) |
+| the same, lossless JPEG, predictor 1 | 60.64% | **57.16%** (-5.7%) |
+| the same, predictor 7 | 64.74% | **61.02%** (-5.7%) |
+| 25 JPEG-LS photos | 85.02% | 85.02% (the symbols win, as before) |
+| 36 lossless JPEGs of libjpeg-turbo (8, 12 and 16 bits, every predictor) | 96.04% | 95.47% |
+| 28 others (FFS's DICOM, conformance and tests/jls) | 51.32% | 51.14% |
+
+One thread, 8 of the lossless JPEG CT slices: compressing 2.36 -> 3.40 s
+(the samples coded twice), extracting 0.75 -> 0.95 s (eight predictors
+and their errors a sample). h3d's own measure of the blend's worth on
+these series was against JPEG-LS, 5 to 13% with the slice in front; here,
+without it, 2.4 to 5.7% off what PJA already took.

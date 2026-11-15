@@ -365,6 +365,8 @@ var j: TJpeg; ph: Integer;
 begin
   Result := -1;
   try
+    { MODEL_BLEND (a .pja's, since 0.9.13): not what the frozen ZPAQL reads }
+    if (Length(stream) < 2) or (stream[1] <> 0) then Exit;
     if not StreamHeaders(stream, j).Ok or not j.lossless or j.arithmetic or
        (Length(j.scans) > ZPAQL_MAX_SCANS) then Exit;
     ph := Log2Words(ZpaqlLjpegWords(j));
@@ -385,7 +387,7 @@ var jl: TJls; symbols: Boolean; ph: Integer;
 begin
   Result := -1;
   try
-    if not StreamJlsHeaders(stream, jl, symbols).Ok then Exit;
+    if (Length(stream) < 2) or (stream[1] <> 0) or not StreamJlsHeaders(stream, jl, symbols).Ok then Exit;
     ph := Log2Words(ZpaqlJlsxWords(jl, symbols));
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;
@@ -404,7 +406,8 @@ var jl: TJls; symbols: Boolean; ph: Integer;
 begin
   Result := -1;
   try
-    if not StreamJlsHeaders(stream, jl, symbols).Ok or JlsSubsampled(jl) then Exit;
+    if (Length(stream) < 2) or (stream[1] <> 0) or not StreamJlsHeaders(stream, jl, symbols).Ok or
+       JlsSubsampled(jl) then Exit;
     ph := ZpaqlJlsPh(jl, symbols);
     if ph > ZPAQL_MAX_PH then Exit;
     Result := ph;

@@ -216,7 +216,9 @@ begin
   n.Num('version', s[0]);
   if depth > MAX_STREAM_DEPTH then Exit;
   if (s[0] = STREAM_VERSION) or (s[0] = STREAM_V7) then begin
-    if s[1] = 1 then n.Str('model', 'fast') else n.Str('model', 'full');
+    if s[1] = 1 then n.Str('model', 'fast')
+    else if s[1] = MODEL_BLEND then n.Str('model', 'blended predictors (samples)')
+    else n.Str('model', 'full');
     if s[0] = STREAM_V7 then n.Str('model', 'version 7 (C)');
     if Length(s) >= STREAM_HEADER then n.Num('header_stream', GetU32(s, 2));
     if StreamHeaders(s, j, CapRaw(maxRaw)).Ok then begin
