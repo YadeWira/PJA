@@ -3,7 +3,8 @@
    dlsym, which a static binary linked with musl cannot do (musl's static
    dlopen fails, and cthreads then calls a nil pointer as it starts). These
    four functions take their place in that binary only: every name cthreads
-   asks for is found in the table below, from the binary's own musl.
+   asks for is found in the table below, from the binary's own musl. And
+   renameat2, for a musl older than 1.2.5 (at the end).
 
    Why musl and not glibc: Android's seccomp filter for apps (Android 11)
    kills a process that calls set_robust_list or rseq, which glibc's startup
@@ -55,3 +56,14 @@ void *dlsym(void *handle, const char *name) {
 int dlclose(void *handle) { (void)handle; return 0; }
 
 char *dlerror(void) { return 0; }
+
+/* pjafs's rename that never replaces (RENAME_NOREPLACE): musl has
+   renameat2 from 1.2.5 on, and Ubuntu 24.04's is 1.2.4. The system call
+   itself, then, whichever musl links; an object's symbol is taken before
+   the library's, so a musl that has it does not clash. */
+#include <unistd.h>
+#include <sys/syscall.h>
+int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
+              unsigned int flags) {
+  return (int)syscall(SYS_renameat2, olddirfd, oldpath, newdirfd, newpath, flags);
+}
