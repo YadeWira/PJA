@@ -77,6 +77,12 @@ jobs:
         run: |
           export PJA_COMMIT=$(git rev-parse --short=7 HEAD)
           sh .github/test.sh
+      - name: The static build (linux-arm64; musl, for Android too)
+        if: matrix.platform == 'linux-arm64'
+        run: |
+          sudo apt-get install -y musl-tools
+          export PJA_COMMIT=$(git rev-parse --short=7 HEAD)
+          sh scripts/static-musl.sh build/rel/c build/static build/rel/pja
       - name: Pack
         shell: bash
         run: |
@@ -96,7 +102,15 @@ jobs:
           cp LICENSE NOTICE "$PLG/"
           # libpja: the C library and 7-Zip / 7-Zip-zstd plugin
           cp build/rel/lib/$LIB pas/lib/pja.h doc/LIBRARY.md LICENSE NOTICE "$LIBP/"
-          for d in "$CLI" "$PLG" "$LIBP"; do
+          ALL="$CLI $PLG $LIBP"
+          # linux-arm64 also as one static binary (musl): Android's Termux
+          # and any arm64 Linux, whatever its C library
+          if [ -f build/static/pja ]; then
+            ST=pja-$V-$P-static; mkdir -p "$ST"
+            cp build/static/pja README.md LICENSE NOTICE doc/CLI.md "$ST/"
+            ALL="$ALL $ST"
+          fi
+          for d in $ALL; do
             case $P in
               windows-*) 7z a -tzip -bso0 "dist/$d.zip" "$d" ;;
               macos-*) tar --uid 0 --gid 0 -czf "dist/$d.tar.gz" "$d" ;;

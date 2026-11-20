@@ -67,12 +67,14 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal and clang
-        run: sudo apt-get update && sudo apt-get install -y fpc clang
+      - name: Install Free Pascal, clang and musl
+        run: sudo apt-get update && sudo apt-get install -y fpc clang musl-tools
       - name: Test
         env:
           CC: clang
         run: sh .github/test.sh
+      - name: The static build (musl; Android)
+        run: sh scripts/static-musl.sh build/ci/c build/static build/ci/pja
       - uses: actions/upload-artifact@v4
         with:
           name: hash-linux-arm64
