@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'the tag to build, as v0.9.13'
+        description: 'the tag to build, as v0.9.14'
         required: true
 
 permissions:
@@ -164,7 +164,7 @@ jobs:
         run: |
           gh release view "$TAG" > /dev/null 2>&1 \
             || gh release create "$TAG" --verify-tag --title "PJA ${TAG#v}" \
-                 --notes "PJA ${TAG#v}. The Linux builds need glibc 2.34 or later (Debian 12, Ubuntu 22.04, RHEL 9 and newer)."
+                 --notes "PJA ${TAG#v}. The Linux builds need glibc 2.34 or later (Debian 12, Ubuntu 22.04, RHEL 9 and newer), except linux-arm64-static, which also runs on Android (Termux)."
           gh release upload "$TAG" dist/* --clobber
           mkdir all
           gh release download "$TAG" --dir all --pattern 'pja-*'
